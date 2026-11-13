@@ -6,6 +6,10 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 
 本仓库提供电脑端源码。兼容的开发板是 **ESP32-2432S028 双 USB 版**（ST7789 屏幕、XPT2046 触摸、4 MiB Flash）。已预刷兼容固件的设备可直接配对。板端二进制包的发布状态见[刷机说明](docs/flash.md)。
 
+## Agent Speed 致谢
+
+本项目目前使用 Agent Speed 的 AgentSpeedProbe，并在开发其 Python 移植版。该移植基于 zoefix/agent-speed 的 Swift 实现，保留原项目的 MIT 许可证和版权声明。DeskPet Platform 提供设备接入；Python 移植版增加了测试和部分修复，目前仍在验证。感谢原项目作者的工作。
+
 ## 交给你的 Agent 安装
 
 把下面这段复制给你平时使用的 Agent，在本仓库目录里开始。
