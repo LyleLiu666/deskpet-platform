@@ -353,6 +353,128 @@ class CardUploadTests(unittest.IsolatedAsyncioTestCase):
             original.close.assert_awaited_once()
             self.assertEqual(recovered.upload_file.await_count, 2)
 
+    async def test_receipt_upload_survives_repeated_reconnect_errors_without_new_fetch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "data.bin"
+            source.write_bytes(b"synthetic file")
+            for outcome in ("stored", "different_boot", "different_device", "missing_capability", "missing_receipt"):
+                with self.subTest(outcome=outcome):
+                    config = DeviceConfig("02:00:00:00:00:01", bytes(32))
+                    original, recovered = Client(config), Client(config)
+                    for client in (original, recovered):
+                        client.device_id = "test-board"
+                        client.channel.boot = 42
+                        client.channel.online = True
+                        client.link.peer_address = "127.0.0.1"
+                        client.channel.capabilities = {"card_transfer": 1, "card_fetch_async": 1, "card_fetch_receipt": 1}
+                        client.close = AsyncMock()
+                    if outcome == "different_boot":
+                        recovered.channel.boot = 43
+                    elif outcome == "different_device":
+                        recovered.device_id = "other-board"
+                    elif outcome == "missing_capability":
+                        del recovered.channel.capabilities["card_fetch_receipt"]
+
+                    relay = SimpleNamespace(url="http://127.0.0.1/fixture", served=True, close=Mock())
+
+                    async def start_and_disconnect(kind, **_fields):
+                        if kind == "card_fetch":
+                            return {"transfer_status": "pending"}
+                        original.channel.online = False
+                        raise AckTimeout("lost status")
+
+                    original.channel.send = AsyncMock(side_effect=start_and_disconnect)
+                    recovered.channel.send = AsyncMock(side_effect=(
+                        CommandRejected("unknown_card_transfer") if outcome == "missing_receipt" else None
+                    ), return_value={"stored": True})
+                    attempts = []
+
+                    async def open_wifi(checked):
+                        self.assertIs(checked, config)
+                        relay.close.assert_not_called()
+                        attempts.append(checked)
+                        if len(attempts) == 1:
+                            raise AckTimeout("ack_timeout: hello")
+                        if len(attempts) == 2:
+                            raise OSError("wifi_device_absent")
+                        return recovered
+
+                    session = BoardSession(root / "device.json")
+                    session.client = original
+                    with patch.object(session, "open_wifi", open_wifi), patch(
+                        "deskpet_platform.card_upload.CardRelay"
+                    ) as relay_factory, patch("deskpet_platform.card_upload.asyncio.sleep", AsyncMock()):
+                        relay_factory.return_value.start.return_value = relay
+                        result = await session.upload_files([CardFile(source=str(source), path="desk/data.bin")])
+                        relay_factory.assert_called_once()
+
+                    self.assertEqual(len(attempts), 3)
+                    relay.close.assert_called_once()
+                    start, status = original.channel.send.await_args_list
+                    self.assertEqual(start.args, ("card_fetch",))
+                    self.assertEqual(status.args, ("card_fetch_status",))
+                    self.assertEqual(status.kwargs, {"transfer_id": start.kwargs["transfer_id"]})
+                    if outcome in ("different_boot", "different_device", "missing_capability"):
+                        recovered.channel.send.assert_not_awaited()
+                        self.assertEqual(result["status"], "failed")
+                        reason = {"different_boot": "device_restarted", "different_device": "device_identity_mismatch",
+                                  "missing_capability": "card_fetch_receipt_not_supported"}[outcome]
+                        self.assertEqual(result["failed"]["reason"], reason)
+                        if outcome != "missing_capability":
+                            self.assertIsNone(session.client)
+                    else:
+                        recovered.channel.send.assert_awaited_once_with("card_fetch_status", **status.kwargs)
+                        if outcome == "stored":
+                            self.assertEqual(result["status"], "completed")
+                        else:
+                            self.assertEqual(result["status"], "failed")
+                            self.assertEqual(result["failed"]["reason"], "device_error: unknown_card_transfer")
+
+    async def test_receipt_reconnect_retries_end_at_original_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "data.bin"
+            source.write_bytes(b"synthetic file")
+            original = Client(DeviceConfig("02:00:00:00:00:01", bytes(32)))
+            original.link.peer_address = "127.0.0.1"
+            original.channel.capabilities = {"card_transfer": 1, "card_fetch_async": 1, "card_fetch_receipt": 1}
+            original.channel.online = True
+            original.close = AsyncMock()
+            relay = SimpleNamespace(url="http://127.0.0.1/fixture", served=True, close=Mock())
+
+            async def send(kind, **_fields):
+                if kind == "card_fetch":
+                    return {"transfer_status": "pending"}
+                original.channel.online = False
+                raise AckTimeout("lost status")
+
+            async def open_wifi(_config):
+                relay.close.assert_not_called()
+                raise OSError("wifi_device_absent")
+
+            original.channel.send = AsyncMock(side_effect=send)
+            session = BoardSession(root / "device.json")
+            session.client = original
+            async def yield_without_delay(_seconds):
+                await asyncio.sleep(0)
+
+            upload_asyncio = Mock(wraps=asyncio, sleep=yield_without_delay)
+            with patch.object(session, "open_wifi", AsyncMock(side_effect=open_wifi)) as reconnect, patch(
+                "deskpet_platform.card_upload.CardRelay"
+            ) as relay_factory, patch("deskpet_platform.card_upload.asyncio", upload_asyncio), patch(
+                "deskpet_platform.card_upload.transfer_timeout", return_value=.03
+            ), patch("deskpet_platform.card_upload.BACKGROUND_RECEIPT_GRACE", .02):
+                relay_factory.return_value.start.return_value = relay
+                async with asyncio.timeout(1):
+                    result = await session.upload_files([CardFile(source=str(source), path="desk/data.bin")])
+                relay_factory.assert_called_once()
+            self.assertGreaterEqual(reconnect.await_count, 2)
+            self.assertEqual(result["failed"]["reason"], "card_transfer_unconfirmed")
+            relay.close.assert_called_once()
+            self.assertEqual([call.args for call in original.channel.send.await_args_list],
+                             [("card_fetch",), ("card_fetch_status",)])
+
     async def test_background_transfer_limits_status_polling(self):
         class Relay:
             url, served = "http://127.0.0.1/fixture", True

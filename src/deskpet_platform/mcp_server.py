@@ -885,17 +885,28 @@ class BoardSession:
 
     async def _upload_card_file(self, client, path, source, *, expected_sha256=None):
         options = {} if expected_sha256 is None else {"expected_sha256": expected_sha256}
-
-        async def resume(_channel):
-            nonlocal client
-            async with self.lock:
-                deadline = asyncio.get_running_loop().time() + 30
-                client = await self._reconnect_card_wifi(client, deadline)
-            return client.channel
-
         if (getattr(getattr(client, "link", None), "wireless", False) is True and
                 client.channel.capabilities.get("card_fetch_receipt") == 1):
-            options["resume"] = resume
+            original_boot = client.channel.boot
+
+            async def resume(_channel):
+                nonlocal client
+                async with self.lock:
+                    deadline = asyncio.get_running_loop().time() + 30
+                    recovered = await self._reconnect_card_wifi(client, deadline)
+                    if recovered.channel.boot != original_boot:
+                        await self.drop()
+                        self.snapshot = {"connection": "offline"}
+                        raise DeviceError("device_restarted")
+                    if recovered.channel.capabilities.get("card_fetch_receipt") != 1:
+                        raise DeviceError("card_fetch_receipt_not_supported")
+                    client = recovered
+                return client.channel
+
+            # Receipt firmware resumes inside the original relay's deadline.
+            # Do not fall through to the legacy path that starts a new worker.
+            result = await client.upload_file(path, source, resume=resume, **options)
+            return client, result
         try:
             result = await client.upload_file(path, source, **options)
             return client, result

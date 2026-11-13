@@ -127,6 +127,17 @@ def encrypt_file(source, destination, key, iv, path, size, crc):
 
 
 async def wait_for_fetch(channel, fields, resume, accepted):
+    async def reconnect(previous):
+        # This task is cancelled by the transfer deadline. Keep the original
+        # relay alive while discovery or the control handshake is transiently unavailable.
+        delay = 1
+        while True:
+            try:
+                return await resume(previous)
+            except (AckTimeout, OSError):
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 5)
+
     if resume:
         # This ID is independent of a control connection's epoch and sequence.
         status_fields = {"transfer_id": secrets.token_hex(16)}
@@ -140,20 +151,22 @@ async def wait_for_fetch(channel, fields, resume, accepted):
             result = await channel.send(kind, **request)
         except CommandRejected as error:
             if interrupted is not None and error.code == "unknown_card_transfer":
+                if accepted.is_set():
+                    raise
                 raise interrupted from error
             if not resume or error.code != "handshake_required":
                 raise
             channel.online = False
-            channel = await resume(channel)
-            # The board rejects an expired epoch before dispatch. Retry the
-            # rejected command, without replacing an accepted transfer.
+            channel = await reconnect(channel)
+            # The board rejects an expired epoch before dispatch. Resend only
+            # a command it explicitly rejected; an ambiguous send polls by ID.
             continue
         except (DeviceError, OSError) as error:
             disconnected = isinstance(error, (AckTimeout, OSError)) or str(error) == "handshake_required"
             if not resume or not disconnected or channel.online:
                 raise
             interrupted = error
-            channel = await resume(channel)
+            channel = await reconnect(channel)
             kind, request = "card_fetch_status", status_fields
             continue
         interrupted = None
