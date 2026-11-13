@@ -1,3 +1,5 @@
 include LICENSE
 include install-macos.command
 include uv.lock
+include docs/flash.md docs/role-format.md docs/assets/start-qr.png
+include examples/status.py examples/tap.py
