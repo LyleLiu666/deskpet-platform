@@ -1,0 +1,1597 @@
+"""Local stdio MCP. Credentials are loaded from private disk storage."""
+import asyncio
+from contextlib import asynccontextmanager, suppress
+from concurrent.futures import TimeoutError as FutureTimeout
+from dataclasses import asdict, replace
+import hashlib
+from importlib.resources import files
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+import sqlite3
+from typing import Any, Literal, get_args
+import webbrowser
+
+from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, ConfigDict
+
+from .adaptive_speed.config import Config as SpeedConfig
+from .adaptive_speed.history import Frame, History
+from .adaptive_speed.runtime import AdaptiveRuntime
+from .agent_speed_probe import AgentSpeedProbe
+from .card_upload import MAX_FILE_BYTES, validate_path
+from .channel import AckTimeout, CommandRejected, DeviceError
+from .client import Client, SCREEN_PAGES
+from .codex_hook import codex_home, hook_command, install_hook, remove_hook
+from .codex_quota import fetch_quota
+from .computer_metrics import ComputerMetrics, DisplayPreferences
+from .device_registry import DeviceRegistry
+from .device_sessions import DeviceSessions
+from .image_display import prepare_photo, prepare_photo_with_fullscreen
+from .notifications import NotificationStore, deliver_next, notification_text, request_worker_yield
+from .notification_cache import NotificationCache
+from .notification_view import NotificationView
+from .pair_portal import PairPortal
+from .pairing import DeviceConfig, valid_device_uuid
+from .role_example import create_role_example
+from .reference_collector import ReferenceCollector
+from .role_sources import list_role_sources
+from .role_staging import prepare_role_source
+from .token_metrics import TokenMetrics
+from .usb_setup import probe_usb
+from .usb_link import UsbLink, UsbPort
+from .weather import fetch_relay_weather, fetch_weather
+from .wifi_link import probe_board
+
+Manual = Literal["operations", "development", "roles"]
+LINK_ERRORS = (OSError, RuntimeError, ValueError, TimeoutError)
+WIFI_FALLBACK_TIMEOUT = 5
+
+
+class CardFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: str
+    path: str
+
+
+def read_manual(topic: Manual) -> str:
+    if topic not in get_args(Manual):
+        raise ValueError("unknown_manual")
+    return files("deskpet_platform").joinpath("manuals", topic + ".md").read_text(encoding="utf-8")
+
+
+class BoardSession:
+    def __init__(self, path, *, background=False, client_factory=Client, token_root=None, usb_port=None,
+                 token_collector=None, token_probe=None, probe_collector=None, no_token_probe=False,
+                 notification_source=None):
+        if (token_collector is not None and (token_probe is not None or probe_collector is not None) or
+                token_probe is not None and probe_collector is not None):
+            raise ValueError("请只选择一种 Token 速度采集器。")
+        self.path = path
+        self.background = background
+        self.client_factory = client_factory
+        self.identity_registry = None
+        self.usb_port = UsbPort.register(usb_port) if usb_port is not None else None
+        self.client = None
+        self.next_wifi_probe = 0.0
+        self.snapshot = {"connection": "starting"}
+        self.lock = asyncio.Lock()
+        self.storage_lock = asyncio.Lock()
+        self.loop = None
+        self.touches = asyncio.Queue(maxsize=32)
+        self.dropped_touches = 0
+        self.notifications = NotificationStore(Path(path).parent / "notifications.sqlite3", source=notification_source)
+        self.notification_view = NotificationView(self.notifications)
+        self.notification_cache = NotificationCache(self.notifications)
+        self.next_notification_attempt = 0.0
+        self.last_notice_count = None
+        self.last_message_cache = None
+        self.weather_path = Path(path).parent / "weather-location.json"
+        self.weather_lock = asyncio.Lock()
+        self.weather_due = 0.0
+        codex_data = codex_home()
+        self.token_metrics = TokenMetrics(token_root if token_root is not None else codex_data / "sessions")
+        self.reference_collector = ReferenceCollector(token_collector) if token_collector is not None else None
+        self.probe_collector = probe_collector if probe_collector is not None else (
+            AgentSpeedProbe(token_probe) if token_probe is not None else None)
+        self.owns_probe_collector = token_probe is not None
+        self.no_token_probe = no_token_probe
+        self.token_snapshot = None
+        self.token_published_at = 0.0
+        self.token_history_path = Path(path).parent / "token-speed.sqlite3"
+        self.codex_allowance = {}
+        self.computer_display = DisplayPreferences(Path(path).parent / "computer-display.json")
+        self.computer_metrics = ComputerMetrics()
+        self.computer_metrics_lock = asyncio.Lock()
+        self.computer_metrics_changed = asyncio.Event()
+        self.computer_preference_client = None
+
+    async def drop(self):
+        self.token_snapshot = None
+        self.computer_preference_client = None
+        if self.client is not None:
+            client, self.client = self.client, None
+            self.dropped_touches += getattr(client.channel, "dropped_events", 0)
+            await client.close()
+
+    async def _drop_failed_upload(self, client):
+        async with self.lock:
+            if self.client is client and not client.channel.online:
+                await self.drop()
+                self.snapshot = {"connection": "offline"}
+
+    def usb_client(self, config, port):
+        return Client(config, link_factory=lambda *args, **fields: UsbLink(*args, port=port, **fields))
+
+    async def connect(self, config):
+        try:
+            return await self.open_wifi(config)
+        except (OSError, AckTimeout):
+            if self.usb_port is None:
+                raise
+            return await self.usb_client(config, self.usb_port).__aenter__()
+
+    async def open_wifi(self, config):
+        async with asyncio.timeout(WIFI_FALLBACK_TIMEOUT if self.usb_port is not None else None):
+            return await self.client_factory(config).__aenter__()
+
+    async def recover_wifi(self, client, heartbeat):
+        if (client is None or client is not self.client or self.usb_port is None or
+                client.channel.capabilities.get("wifi_probe") != 1 or self.storage_lock.locked() or
+                not heartbeat.get("wifi_handoff_ready") or time.monotonic() < self.next_wifi_probe):
+            return
+        address = heartbeat.get("wifi_ip")
+        if not address:
+            return
+        config = client.config
+        self.next_wifi_probe = time.monotonic() + 5
+        if not await probe_board(config.identity, config.key, address) or self.storage_lock.locked():
+            return
+        async with self.storage_lock, self.lock:
+            if client is not self.client:
+                return
+            try:
+                latest = await client.status()
+            except LINK_ERRORS:
+                return  # The regular heartbeat will handle the broken link.
+            if not latest.get("wifi_handoff_ready") or latest.get("wifi_ip") != address:
+                return
+            self.next_wifi_probe = time.monotonic() + 30
+            self.snapshot = {"connection": "connecting"}
+            try:
+                await self.drop()
+                wifi_config = replace(config, address=address)
+                self.client = await self.open_wifi(wifi_config)
+            except LINK_ERRORS:
+                try:
+                    self.client = await self.usb_client(config, self.usb_port).__aenter__()
+                except LINK_ERRORS:
+                    return  # Retry through the regular connection path.
+            else:
+                self.next_wifi_probe = 0.0
+                if address != config.address:
+                    with suppress(OSError, ValueError):
+                        if DeviceConfig.load(self.path) == config:
+                            wifi_config.save(self.path)
+            self.last_notice_count = self.last_message_cache = None
+
+    def record_status(self, heartbeat):
+        status = status_view(heartbeat, self.client.channel.capabilities)
+        wireless = getattr(getattr(self.client, "link", None), "wireless", None)
+        if type(wireless) is bool:
+            status["transport"] = "wifi" if wireless else "usb"
+        if self.snapshot.get("speed_windows") != status.get("speed_windows"):
+            self.token_snapshot = None
+        self.snapshot = status
+
+    async def record_link_error(self, error):
+        await self.drop()
+        busy = isinstance(error, RuntimeError) and str(error).startswith("device_busy:")
+        if busy and not self.background:
+            with suppress(OSError):
+                request_worker_yield(self.path)
+        self.snapshot = {
+            "connection": "busy" if busy else "offline",
+            "next_step": "请停止占用小板的服务。" if busy else "检查供电、Wi-Fi 和配对，详见操作手册。",
+        }
+
+    async def get_status(self):
+        if self.client is None or self.storage_lock.locked():
+            return self.snapshot.copy()
+        async with self.lock:
+            if self.client is None or self.storage_lock.locked():
+                return self.snapshot.copy()
+            try:
+                heartbeat = await self.client.status()
+            except CommandRejected as error:
+                self.snapshot["device_error"] = error.code
+            except LINK_ERRORS as error:
+                await self.record_link_error(error)
+            else:
+                notification_error = self.snapshot.get("notification_error")
+                self.record_status(heartbeat)
+                if notification_error is not None:
+                    self.snapshot["notification_error"] = notification_error
+            return self.snapshot.copy()
+
+    async def poll(self):
+        sampled_client, heartbeat = None, {}
+        while True:
+            await self.recover_wifi(sampled_client, heartbeat)
+            async with self.lock:
+                try:
+                    if self.client is None:
+                        config = DeviceConfig.load(self.path)
+                        self.snapshot = {"connection": "connecting"}
+                        self.client = await self.connect(config)
+                        observed = getattr(self.client, "device_id", None)
+                        if self.identity_registry is not None and config.device_id is None and valid_device_uuid(observed):
+                            self.client.config = self.identity_registry.upgrade(self.path, config, observed)
+                        self.last_notice_count = None
+                        self.last_message_cache = None
+                        if self.client.channel.capabilities.get("clock_sync") == 1:
+                            await self.client.sync_clock(only_missing=True)
+                    compact = (self.client.channel.capabilities.get("compact_status") == 1 and
+                               getattr(getattr(self.client, "link", None), "wireless", False) is True)
+                    heartbeat = await self.client.status(compact=True) if compact else await self.client.status()
+                    sampled_client = self.client
+                    await self.sync_computer_preferences(sampled_client, heartbeat)
+                    self.record_status(heartbeat)
+                    try:
+                        await asyncio.to_thread(self.notifications.sync)
+                    except (OSError, sqlite3.Error, ValueError):
+                        self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
+                    if self.client.channel.capabilities.get("touch_demo") == 1:
+                        while event := await self.client.pending_touch():
+                            try:
+                                await self.process_touch(event)
+                            except (sqlite3.Error, ValueError):
+                                self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
+                    if self.client.channel.capabilities.get("notices") == 1:
+                        try:
+                            if self.client.channel.capabilities.get("message_cache") == 1:
+                                await self.refresh_messages()
+                            count = min(65535, self.notifications.unseen_count())
+                        except (sqlite3.Error, ValueError):
+                            self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
+                        else:
+                            if count != self.last_notice_count:
+                                await self.client.set_notice_count(count)
+                                self.last_notice_count = count
+                    if self.client.channel.capabilities.get("agent_home") == 1:
+                        try:
+                            await self.refresh_agent_notifications(heartbeat)
+                            await self.notification_cache.step(self.client)
+                        except (sqlite3.Error, ValueError):
+                            self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
+                    elif time.monotonic() >= self.next_notification_attempt:
+                        self.next_notification_attempt = time.monotonic() + 4
+                        try:
+                            await deliver_next(self.client, self.notifications)
+                        except (sqlite3.Error, ValueError):
+                            self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
+                except FileNotFoundError:
+                    self.snapshot = {"connection": "not_paired", "next_step": "在本机运行 deskpet-platform pair。"}
+                except CommandRejected as error:
+                    if self.client is None:
+                        self.snapshot = {"connection": "offline"}
+                    self.snapshot["device_error"] = error.code
+                except LINK_ERRORS as error:
+                    await self.record_link_error(error)
+            await asyncio.sleep(1 if self.client is not None else 3)
+
+    async def refresh_messages(self):
+        ids = await self.client.pending_notice_reads()
+        if ids:
+            await asyncio.to_thread(self.notifications.mark_seen_many, ids)
+            await self.client.acknowledge_notice_reads(ids)
+        records = await asyncio.to_thread(self.notifications.list, 10)
+        fingerprint = [(item["id"], item["seen"], item["title"]) for item in records]
+        if fingerprint != self.last_message_cache:
+            await self.client.sync_messages(records)
+            self.last_message_cache = fingerprint
+
+    async def refresh_agent_notifications(self, heartbeat):
+        if self.client is not None:
+            await self.notification_view.refresh(self.client, device_page=heartbeat.get("pet_page"),
+                                                 role_ready=heartbeat.get("role_state") == "ready")
+
+    async def message_view(self, mode, identity):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("message_view") != 1:
+                return {"status": "unsupported"}
+            reply = await self.client.message_view(mode, identity)
+            fields = ("view", "cached_count", "cached_unread", "page", "pages", "messages", "message")
+            return {"status": "ok", **{key: reply[key] for key in fields if key in reply}}
+
+    async def process_touch(self, event):
+        self.notification_view.touch(event)
+        if event["action"] == "notice_open":
+            item = self.notifications.latest_unseen()
+            if item:
+                try:
+                    result = await self.client.show_text(notification_text(item))
+                except ValueError:
+                    result = await self.client.show_text(notification_text(item, detail=False))
+                if result.get("status") == "shown":
+                    try:
+                        await self.client.show_notice_detail(item["id"])
+                    except CommandRejected as error:
+                        # The toast can expire between the two commands.
+                        if error.code != "notice_not_visible":
+                            raise
+        elif event["action"] == "notice_seen" and "notification_id" in event:
+            await asyncio.to_thread(self.notifications.mark_seen, event["notification_id"])
+        if self.touches.full():
+            self.touches.get_nowait()
+            self.dropped_touches += 1
+        touch = {"id": event["id"], "action": event["action"], "received_at": time.time()}
+        for key in ("x", "y", "notification_id"):
+            if key in event:
+                touch[key] = event[key]
+        self.touches.put_nowait(touch)
+
+    async def render_metrics(self, reset):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("render_metrics") != 1:
+                return {"status": "unsupported"}
+            reply = await self.client.render_metrics(reset=reset)
+        elapsed, frames = reply["elapsed_ms"], reply["frames"]
+        result = {"status": "ok", "elapsed_ms": elapsed, "frames": frames,
+                  "fps": round(frames * 1000 / elapsed, 2) if elapsed else None}
+        if "displayed_frames" in reply:
+            displayed = reply["displayed_frames"]
+            result.update(displayed_frames=displayed,
+                          displayed_fps=round(displayed * 1000 / elapsed, 2) if elapsed else None)
+        for field in ("scene_redraws", "strips_written", "strips_skipped", "loop_stack_min_bytes",
+                      "heap_free_bytes", "heap_largest_bytes", "background_cached"):
+            if field in reply:
+                result[field] = reply[field]
+        for field in ("load_us", "background_us", "composite_us", "display_us",
+                      "frame_us", "touch_poll_us", "touch_ack_ms", "spi_us", "displayed_frame_gap_ms",
+                      "touch_dispatch_ms", "touch_role_feedback_ms"):
+            if field not in reply:
+                continue
+            count, total, maximum = reply[field]
+            result[field] = {"samples": count, "total": total, "max": maximum,
+                             "mean": round(total / count, 2) if count else None}
+        return result
+
+    async def sync_clock(self, offset_minutes):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("clock_sync") != 1:
+                return {"status": "unsupported"}
+            reply = await self.client.sync_clock(offset_minutes)
+            return {"status": "synced" if reply.get("synced") else "unknown"}
+
+    async def clock_edit(self, mode, field, step):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("clock_edit") != 1:
+                return {"status": "unsupported"}
+            reply = await self.client.clock_edit(mode, field=field, step=step)
+            fields = ("editing", "unix_seconds", "offset_minutes", "field", "draft_unix_seconds", "draft")
+            return {"status": "ok", **{key: reply[key] for key in fields if key in reply}}
+
+    async def set_view(self, page, make_default, clock_face):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("screen_views") != 1:
+                return {"status": "unsupported"}
+            await self.client.set_view(page, make_default=make_default, clock_face=clock_face)
+            return {"status": "shown", "page": page}
+
+    async def publish_weather(self, snapshot, location, *, background_client=None):
+        async with self.lock:
+            client = self.client
+            if client is None or (background_client is not None and client is not background_client):
+                return {"status": "not_connected", "connection": self.snapshot}
+            if client.channel.capabilities.get("weather") != 1:
+                return {"status": "unsupported"}
+            if background_client is not None and client.channel.capabilities.get("weather_device") == 1:
+                if (await client.status()).get("weather_device_refresh") is True:
+                    return {"status": "device_managed"}
+            reply = await client.set_weather(snapshot, location=location)
+        self.weather_due = time.monotonic() + 1800
+        return {"status": "updated", "updated": reply["updated"]}
+
+    async def set_weather_location(self, latitude, longitude, label):
+        location = dict(latitude=latitude, longitude=longitude, label=label)
+        async with self.weather_lock:
+            client = self.client
+            relay = client is not None and client.channel.capabilities.get("weather_relay") == 1
+            snapshot = await asyncio.to_thread(fetch_relay_weather, location) if relay else await asyncio.to_thread(fetch_weather, **location)
+            self.weather_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with tempfile.NamedTemporaryFile(mode="w", dir=self.weather_path.parent, delete=False) as stream:
+                pending = Path(stream.name)
+                try:
+                    json.dump(location, stream)
+                    stream.flush()
+                    os.replace(pending, self.weather_path)
+                finally:
+                    pending.unlink(missing_ok=True)
+            if relay:
+                return await self.publish_relay_weather(snapshot, background_client=client)
+            return await self.publish_weather(snapshot, location)
+
+    async def publish_relay_weather(self, snapshot, *, background_client):
+        async with self.lock:
+            if self.client is not background_client:
+                return {"status": "not_connected", "connection": self.snapshot}
+            await background_client.relay_weather(snapshot)
+        self.weather_due = time.monotonic() + 1800
+        return {"status": "updated"}
+
+    async def refresh_weather(self):
+        async with self.weather_lock:
+            client = self.client
+            relay = client is not None and client.channel.capabilities.get("weather_relay") == 1
+            if (client is None or (not relay and client.channel.capabilities.get("weather") != 1) or
+                    self.snapshot.get("connection") != "connected" or
+                    self.snapshot.get("weather", {}).get("device_refresh") is True or
+                    time.monotonic() < self.weather_due):
+                return
+            self.weather_due = time.monotonic() + 300
+            try:
+                try:
+                    location = json.loads(self.weather_path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    return
+                if relay:
+                    snapshot = await asyncio.to_thread(fetch_relay_weather, location)
+                    await self.publish_relay_weather(snapshot, background_client=client)
+                else:
+                    snapshot = await asyncio.to_thread(fetch_weather, **location)
+                    await self.publish_weather(snapshot, location, background_client=client)
+            except (TypeError, *LINK_ERRORS):
+                pass
+
+    async def poll_weather(self):
+        while True:
+            await self.refresh_weather()
+            await asyncio.sleep(30)
+
+    async def poll_tokens(self):
+        runtime = None
+        try:
+            while True:
+                client = self.client
+                windows = self.snapshot.get("speed_windows")
+                if (client is not None and client.channel.capabilities.get("token_stats") == 1 and
+                        (windows is not None or client.channel.capabilities.get("speed_windows") != 1)):
+                    try:
+                        if self.probe_collector is not None:
+                            snapshot = await self.probe_collector.sample()
+                            metric_version = self.probe_collector.metric_version
+                            speed_state = self.probe_collector.speed_state
+                        elif self.reference_collector is not None:
+                            snapshot = await self.reference_collector.sample()
+                            metric_version = "reference-output-v1"
+                            source = (self.reference_collector.latest or {}).get("total", {})
+                            speed_state = "E" if source.get("speed_state") in ("estimated", "partial") else None
+                        else:
+                            # A session log does not contain an equivalent live rate.
+                            # Leave it unavailable rather than silently changing the metric.
+                            self.token_snapshot = None
+                            await asyncio.sleep(1)
+                            continue
+                        if snapshot is None:
+                            self.token_snapshot = None
+                            await asyncio.sleep(1)
+                            continue
+                        now = time.time()
+                        if runtime is None:
+                            runtime = AdaptiveRuntime(History(self.token_history_path))
+                        runtime.configure(windows)
+                        speed_state = speed_state if speed_state in ("L", "E", "I") else (
+                            "L" if snapshot["rate10"] else "I")
+                        frame = Frame(str(int(now)), now, snapshot["rate10"], speed_state, metric_version)
+                        runtime.history.add(frame, now)
+                        runtime.observe(frame, now)
+                        await runtime.tick()
+                        snapshot["gear"] = (runtime.wire() or {}).get("current", 0)
+                        allowance = self.codex_allowance
+                        current = [row for row in allowance.get("quotas", []) if row[2] > now]
+                        if current:
+                            snapshot["quotas"] = current
+                        for key in ("credits", "reset_cards"):
+                            if key in allowance:
+                                snapshot[key] = allowance[key]
+                        if client.channel.capabilities.get("token_quality") == 1:
+                            snapshot["speed_state"] = speed_state
+                        async with self.lock:
+                            if client is self.client and windows == self.snapshot.get("speed_windows"):
+                                await client.update_tokens(snapshot, windows=windows)
+                                self.token_snapshot = {**snapshot, "adaptive": runtime.status()}
+                                self.token_published_at = time.monotonic()
+                    except (sqlite3.Error, *LINK_ERRORS):
+                        pass
+                await asyncio.sleep(1)
+        finally:
+            if self.reference_collector is not None:
+                await self.reference_collector.close()
+            if self.owns_probe_collector:
+                await self.probe_collector.close()
+            if runtime is not None:
+                await runtime.close()
+                runtime.history.close()
+
+    async def refresh_quota(self):
+        try:
+            allowance = await fetch_quota()
+        except (AttributeError, TypeError, *LINK_ERRORS):
+            allowance = None
+        updated = isinstance(allowance, dict)
+        if not updated:
+            allowance = self.codex_allowance
+        now = time.time()
+        if (self.reference_collector is not None or self.probe_collector is not None) and not any(
+                row[2] > now for row in allowance.get("quotas", [])):
+            try:
+                local = await asyncio.to_thread(self.token_metrics.sample)
+                allowance = {**allowance, "quotas": local["quotas"]}
+            except LINK_ERRORS:
+                pass
+        self.codex_allowance = allowance
+        return updated
+
+    async def poll_quota(self):
+        while True:
+            if self.client is None or self.client.channel.capabilities.get("token_stats") != 1:
+                await asyncio.sleep(10)
+                continue
+            updated = await self.refresh_quota()
+            await asyncio.sleep(300 if updated else 10)
+
+    async def configure_computer_metrics(self, *, cpu=None, memory=None):
+        async with self.lock:
+            client = self.client
+            if cpu is not None or memory is not None:
+                async with self.computer_metrics_lock:
+                    await asyncio.to_thread(self.computer_display.update, cpu=cpu, memory=memory, queue=True)
+                if client is not None and client.channel.capabilities.get("computer_preferences") == 1:
+                    await self.sync_computer_preferences(client, await client.status(compact=True))
+                self.computer_metrics_changed.set()
+            enabled = self.computer_display.get()
+        supported = client.channel.capabilities.get("computer_metrics") == 1 if client is not None else None
+        return {"enabled": enabled, "device_supported": supported}
+
+    async def sync_computer_preferences(self, client, heartbeat):
+        if client.channel.capabilities.get("computer_preferences") != 1:
+            return
+        state = heartbeat.get("computer_prefs")
+        if state is not None and (type(state) is not int or not 0 <= state <= 0xffffffff):
+            raise DeviceError("invalid_computer_preferences")
+        async with self.computer_metrics_lock:
+            previous = self.computer_display.get()
+            previous_client = self.computer_preference_client
+            pending = self.computer_display.pending_fields
+            if state is not None:
+                # Preserve the computer's explicitly queued choices and adopt the
+                # board's latest values for the other switches.
+                device = {"cpu": bool(state & 1), "memory": bool(state & 2)}
+                merged = {key: previous[key] if key in pending else value for key, value in device.items()}
+                await asyncio.to_thread(self.computer_display.update, **merged)
+            if state is not None and state & 4:
+                await client.acknowledge_computer_preferences(state)
+            if pending:
+                enabled = self.computer_display.get()
+                await client.set_computer_preferences(cpu_enabled=enabled["cpu"], memory_enabled=enabled["memory"])
+                await asyncio.to_thread(self.computer_display.update, synchronized=True)
+            self.computer_preference_client = client
+            if previous != self.computer_display.get() or previous_client is not client:
+                self.computer_metrics_changed.set()
+
+    async def poll_computer_metrics(self):
+        sent_client = None
+        sent_enabled = None
+        while True:
+            self.computer_metrics_changed.clear()
+            client = self.client
+            enabled = self.computer_display.get()
+            try:
+                syncs_choices = client is not None and client.channel.capabilities.get("computer_preferences") == 1
+                if (client is not None and client.channel.capabilities.get("computer_metrics") == 1 and
+                    (not syncs_choices or self.computer_preference_client is client and not self.computer_display.pending_fields)):
+                    if any(enabled.values()) or client is not sent_client or enabled != sent_enabled:
+                        sample = await asyncio.to_thread(self.computer_metrics.sample, **enabled)
+                        async with self.lock:
+                            if (client is self.client and enabled == self.computer_display.get() and
+                                    (not syncs_choices or not self.computer_display.pending_fields)):
+                                await client.update_computer_metrics(
+                                    cpu_enabled=enabled["cpu"], memory_enabled=enabled["memory"],
+                                    cpu=sample.get("cpu"), memory=sample.get("memory"))
+                                sent_client, sent_enabled = client, enabled
+                else:
+                    sent_client = sent_enabled = None
+            except LINK_ERRORS:
+                pass
+            try:
+                await asyncio.wait_for(self.computer_metrics_changed.wait(), 2)
+            except asyncio.TimeoutError:
+                pass
+
+    def token_status(self):
+        if self.no_token_probe:
+            return {"status": "unavailable", "reason": "token_collection_disabled"}
+        if self.token_snapshot is None or time.monotonic() - self.token_published_at >= 15:
+            if self.probe_collector is None and self.reference_collector is None:
+                return {"status": "unavailable", "reason": "agent_speed_probe_missing",
+                        "next_step": "安装 AgentSpeedProbe，或在启动时指定 --token-probe。"}
+            return {"status": "waiting"}
+        return {"status": "ok", **self.token_snapshot}
+
+    async def speed_windows(self, recent_seconds, long_days):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("speed_windows") != 1:
+                return {"status": "unsupported"}
+            reply = await self.client.speed_windows(recent_seconds, long_days)
+            windows = speed_windows_view(reply)
+            if windows is None:
+                raise DeviceError("invalid_speed_windows_response")
+            if self.snapshot.get("speed_windows") != windows:
+                self.token_snapshot = None
+                self.snapshot["speed_windows"] = windows
+            return {"status": "ok", **windows}
+
+    async def set_role_auto(self, enabled):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("token_stats") != 1:
+                return {"status": "unsupported"}
+            reply = await self.client.set_role_auto(enabled)
+            return {"status": "saved", "enabled": reply.get("automatic_role")}
+
+    async def diagnostics(self, include_card):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("device_diagnostics") != 1:
+                return {"status": "unsupported"}
+            return {"status": "ok", **await self.client.diagnostics(include_card=include_card)}
+
+    async def select_network(self, ssid):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("device_diagnostics") != 1:
+                return {"status": "unsupported"}
+            reply = await self.client.select_network(ssid)
+            result = {"status": reply["network_status"]}
+            if "operation" in reply:
+                result.update(operation=reply["operation"], boot=reply["boot"])
+            return result
+
+    async def show_text(self, text):
+        if self.client is None:
+            return self.snapshot
+        async with self.lock:
+            if self.client is None:
+                return self.snapshot
+            try:
+                return await self.client.show_text(text)
+            finally:
+                if not self.client.channel.online:
+                    await self.drop()
+                    self.snapshot = {"connection": "offline"}
+
+    def _existing_pairing(self, identity):
+        try:
+            existing = DeviceConfig.load(self.path)
+        except FileNotFoundError:
+            return None
+        if existing.identity != identity:
+            raise ValueError("这台电脑已配对另一台设备，请选择添加设备。")
+        return existing
+
+    @staticmethod
+    def _verify_existing_uuid(existing, observed):
+        if existing is not None and existing.device_id is not None and existing.device_id != observed:
+            raise ValueError("设备标识与已保存的配对不符。")
+
+    async def pair(self, code, address):
+        config = DeviceConfig.from_code(code, address)
+        async with self.storage_lock, self.lock:
+            existing = self._existing_pairing(config.identity)
+            device_id = await self._verify_pairing(config)
+            self._verify_existing_uuid(existing, device_id)
+            if device_id is not None:
+                config = replace(config, device_id=device_id)
+            if self.identity_registry is not None and Path(self.path) == self.identity_registry.default_path:
+                self.identity_registry.save_default(config, existing)
+            else:
+                config.save(self.path)
+        return {"device": config.identity, **({"device_id": config.device_id} if config.device_id else {})}
+
+    async def _verify_pairing(self, config, usb_port=None):
+        await self.drop()
+        self.snapshot = {"connection": "connecting"}
+        if usb_port is None or config.address is not None:
+            try:
+                async with asyncio.timeout(WIFI_FALLBACK_TIMEOUT if usb_port is not None else None):
+                    async with self.client_factory(config) as board:
+                        await board.status()
+                        device_id = board.device_id
+            except (OSError, AckTimeout):
+                if usb_port is None:
+                    raise
+            else:
+                return device_id
+        async with self.usb_client(config, usb_port) as board:
+            await board.status()
+            return board.device_id
+
+    async def pair_usb(self, port, expected_identity, credentials_file):
+        registration = UsbPort.register(port)
+        async with self.storage_lock, self.lock:
+            existing = self._existing_pairing(expected_identity)
+            registration.verify()
+            # A live controller can keep USB setup busy even when this same
+            # MCP instance owns the connection. Release it before opening USB.
+            await self.drop()
+            config = await asyncio.to_thread(probe_usb, port, expected_identity, credentials_file)
+            registration.verify()
+            device_id = await self._verify_pairing(config, usb_port=registration)
+            self._verify_existing_uuid(existing, device_id)
+            if device_id is not None:
+                config = replace(config, device_id=device_id)
+            if self.identity_registry is not None and Path(self.path) == self.identity_registry.default_path:
+                self.identity_registry.save_default(config, existing)
+            else:
+                config.save(self.path)
+            self.usb_port = registration
+        return {"device": config.identity, **({"device_id": config.device_id} if config.device_id else {})}
+
+    def pair_from_portal(self, code, address):
+        future = asyncio.run_coroutine_threadsafe(self.pair(code, address), self.loop)
+        try:
+            return future.result(timeout=30)
+        except FutureTimeout:
+            future.cancel()
+            raise TimeoutError("pairing_timeout") from None
+
+    async def upload_files(self, items):
+        if not 1 <= len(items) <= 100:
+            raise ValueError("请选择 1 至 100 个文件。")
+        checked, destinations = [], set()
+        for item in items:
+            source = Path(item.source).expanduser()
+            validate_path(item.path)
+            if not source.is_absolute() or not source.is_file():
+                raise ValueError("每个源文件必须是本机存在的绝对路径。")
+            if not 0 < source.stat().st_size <= MAX_FILE_BYTES:
+                raise ValueError("文件为空或超过 128 MiB。")
+            if item.path.casefold() in destinations:
+                raise ValueError("多个文件不能使用相同的储存卡路径。")
+            destinations.add(item.path.casefold())
+            checked.append((source, item.path))
+        async with self.storage_lock:
+            client = self.client
+            if client is None:
+                return {"status": "not_connected", "completed": [], "connection": self.snapshot}
+            completed = []
+            for source, path in checked:
+                try:
+                    client, transfer = await self._upload_card_file(client, path, source)
+                    completed.append(transfer)
+                except LINK_ERRORS as error:
+                    await self._drop_failed_upload(client)
+                    return {"status": "failed", "completed": completed,
+                            "failed": {"path": path, "reason": str(error)}}
+            return {"status": "completed", "completed": completed}
+
+    async def delete_resource(self, path):
+        async with self.storage_lock, self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("card_delete") != 1:
+                return {"status": "unsupported"}
+            reply = await self.client.delete_resource(path)
+            return {"path": path, "deleted": reply["deleted"]}
+
+    async def _reconnect_card_wifi(self, previous, deadline):
+        # Call with self.lock held. The background poll may have already
+        # replaced the failed connection while the file transfer was running.
+        current = self.client
+        if current is not None and current is not previous:
+            if (current.config.identity != previous.config.identity or
+                    current.config.key != previous.config.key or current.device_id != previous.device_id or
+                    not current.link.wireless):
+                raise DeviceError("connection_changed")
+            if current.channel.online:
+                return current
+
+        await self.drop()
+        self.snapshot = {"connection": "connecting"}
+        try:
+            async with asyncio.timeout_at(deadline):
+                self.client = await self.open_wifi(previous.config)
+        except LINK_ERRORS:
+            self.snapshot = {"connection": "offline"}
+            raise
+        if self.client.device_id != previous.device_id:
+            await self.drop()
+            self.snapshot = {"connection": "offline"}
+            raise DeviceError("device_identity_mismatch")
+        self.last_notice_count = self.last_message_cache = None
+        self.record_status(self.client.channel.capabilities)
+        return self.client
+
+    async def wait_role(self, identity):
+        deadline = asyncio.get_running_loop().time() + 120
+        client = self.client
+        reconnected = False
+        while asyncio.get_running_loop().time() < deadline:
+            wireless = getattr(getattr(client, "link", None), "wireless", False) is True
+            compact = wireless and client.channel.capabilities.get("compact_status") == 1
+            try:
+                status = await client.status(compact=True) if compact else await client.status()
+            except (AckTimeout, OSError):
+                if reconnected or not wireless:
+                    raise
+                # The activation was acknowledged. Reconnect to observe its
+                # result without sending another command to change the role.
+                boot = client.channel.boot
+                client = await self._reconnect_card_wifi(client, deadline)
+                if client.channel.boot != boot:
+                    return {"status": "activation_unconfirmed", "role": identity, "reason": "device_restarted"}
+                reconnected = True
+                continue
+            if status.get("role_state") == "ready" and status.get("role_id") == identity:
+                return {"status": "ready", "role": identity,
+                        "remembered_after_restart": status.get("role_persisted")}
+            if status.get("role_state") == "failed":
+                return {"status": "activation_failed", "role": identity}
+            await asyncio.sleep(1)
+        return {"status": "activation_unconfirmed", "role": identity}
+
+    async def install_role(self, source):
+        with tempfile.TemporaryDirectory(prefix="deskpet-role-") as directory:
+            bundle = await asyncio.to_thread(prepare_role_source, source, directory)
+            return await self._install_role_bundle(bundle)
+
+    async def _upload_card_file(self, client, path, source, *, expected_sha256=None):
+        options = {} if expected_sha256 is None else {"expected_sha256": expected_sha256}
+        try:
+            return client, await client.upload_file(path, source, **options)
+        except (AckTimeout, OSError):
+            wireless = getattr(getattr(client, "link", None), "wireless", False) is True
+            if client.channel.online or not wireless or client.channel.capabilities.get("card_fetch_async") != 1:
+                raise
+            async with self.lock:
+                deadline = asyncio.get_running_loop().time() + 30
+                client = await self._reconnect_card_wifi(client, deadline)
+        # The previous worker can still be writing after the control link drops.
+        for delay in (0, 1, 2, 4, 8, 15):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                return client, await client.upload_file(path, source, **options)
+            except CommandRejected as error:
+                if error.code != "card_busy" or delay == 15:
+                    raise
+
+    async def _install_role_bundle(self, bundle):
+        async with self.storage_lock:
+            client = self.client
+            if client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            capabilities = client.channel.capabilities
+            if any(capabilities.get(name) != 1 for name in ("card_transfer", "role_actions")):
+                return {"status": "unsupported"}
+            if bundle.portable and capabilities.get("role_zip_motion") != 1:
+                return {"status": "unsupported", "reason": "role_zip_motion_not_supported"}
+            # Full display builds before role1_required already advertised pet_view.
+            role1_required = capabilities.get("role1_required", capabilities.get("pet_view") is True)
+            if not bundle.portable and role1_required == 1:
+                return {"status": "unsupported", "reason": "role1_required"}
+            completed = []
+            try:
+                for item in bundle.files:
+                    destination = f"roles/{bundle.identity}/{bundle.version}/{item.relative}"
+                    client, transfer = await self._upload_card_file(
+                        client, destination, item.source, expected_sha256=item.sha256)
+                    completed.append(transfer)
+            except LINK_ERRORS as error:
+                await self._drop_failed_upload(client)
+                return {"status": "transfer_failed", "completed": completed, "reason": str(error)}
+            async with self.lock:
+                if self.client is not client:
+                    return {"status": "activation_unconfirmed", "role": bundle.identity, "reason": "connection_changed"}
+                try:
+                    try:
+                        await client.prepare_role(bundle.identity, bundle.version, bundle.actions, bundle.finish_action)
+                    except CommandRejected as error:
+                        result = {"status": "activation_failed", "role": bundle.identity, "reason": str(error)}
+                    else:
+                        result = await self.wait_role(bundle.identity)
+                except LINK_ERRORS as error:
+                    if self.client is not None and not self.client.channel.online:
+                        await self.drop()
+                        self.snapshot = {"connection": "offline"}
+                    return {"status": "activation_unconfirmed", "role": bundle.identity, "reason": str(error)}
+            result.update(version=bundle.version, files=len(completed))
+            return result
+
+    async def select_role(self, identity):
+        async with self.storage_lock, self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            await self.client.select_role(identity)
+            return await self.wait_role(identity)
+
+    async def role_preview(self, mode, identity):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("role_preview") != 1:
+                return {"status": "unsupported"}
+            reply = await self.client.role_preview(mode, identity)
+            if reply["preview_status"] == "selected" and reply.get("role_state") == "loading":
+                activation = await self.wait_role(reply["id"])
+                if activation["status"] != "ready":
+                    return activation
+            result = {"status": reply["preview_status"]}
+            if "id" in reply:
+                result["role"] = reply["id"]
+            if "stage" in reply:
+                result["stage"] = reply["stage"]
+            return result
+
+    async def list_roles(self):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            return {"status": "ok", "roles": await self.client.list_roles()}
+
+    async def list_actions(self):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            return {"status": "ok", "actions": await self.client.list_actions()}
+
+    async def play_role(self, action, duration_ms):
+        if duration_ms is not None and not 100 <= duration_ms <= 6000:
+            raise ValueError("动作时长须为 100 至 6000 毫秒。")
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            actions = await self.client.list_actions()
+            if action not in actions:
+                return {"action": action, "status": "unsupported", "available_actions": actions}
+            result = await self.client.play_role(actions.index(action), duration_ms or 0)
+            reply = {"action": action, "status": result.get("action_status", "unknown")}
+            if "operation" in result:
+                reply.update(operation=result["operation"], boot=result["boot"])
+            return reply
+
+    async def role_action_status(self, operation, boot):
+        if not 0 < operation <= 0xFFFFFFFF or not 0 <= boot <= 0xFFFFFFFF:
+            raise ValueError("请提供动作启动回执中的 operation 和 boot。")
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("role_action_receipt") != 1:
+                return {"status": "unsupported"}
+            reply = await self.client.role_action_status(operation, boot)
+            return {"status": reply["action_status"], "operation": operation, "boot": boot}
+
+    async def set_role_base(self, action):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("role_base") != 1:
+                return {"status": "unsupported", "reason": "device_does_not_support_base"}
+            actions = await self.client.list_actions()
+            if action not in actions:
+                return {"action": action, "status": "unsupported", "available_actions": actions}
+            result = await self.client.set_role_base(actions.index(action))
+            return {"action": action, "status": result.get("base_status", "unknown")}
+
+    async def wait_touch(self, timeout):
+        if not 0 < timeout <= 60:
+            raise ValueError("等待时间须大于 0 秒且不超过 60 秒。")
+        try:
+            event = await asyncio.wait_for(self.touches.get(), timeout)
+        except asyncio.TimeoutError:
+            return {"status": "timeout", "connection": self.snapshot}
+        dropped = self.dropped_touches
+        if self.client is not None:
+            dropped += getattr(self.client.channel, "dropped_events", 0)
+        return {"status": "received", "event": event, "dropped_events": dropped}
+
+    async def image(self, source=None):
+        async with self.storage_lock, self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            return await self.client.clear_image() if source is None else await self.client.show_image(source)
+
+    async def add_photo(self, source):
+        path = Path(source).expanduser()
+        if not path.is_absolute() or not path.is_file():
+            raise ValueError("请提供本机图片的绝对路径。")
+        fullscreen = (self.client is not None
+                      and self.client.channel.capabilities.get("photo_fullscreen") == 1)
+        if fullscreen:
+            full, thumb, screen = await asyncio.to_thread(prepare_photo_with_fullscreen, path)
+            renditions = (("screen.565", screen), ("full.565", full), ("thumb.565", thumb))
+        else:
+            full, thumb = await asyncio.to_thread(prepare_photo, path)
+            renditions = (("full.565", full), ("thumb.565", thumb))
+        identity = "p-" + hashlib.sha256(full + thumb).hexdigest()[:16]
+        with tempfile.TemporaryDirectory(prefix="deskpet-photo-") as directory:
+            items = []
+            for name, payload in renditions:
+                staged = Path(directory) / name
+                staged.write_bytes(payload)
+                items.append(CardFile(source=str(staged), path=f"photos/{identity}/{name}"))
+            return {"photo": identity, **await self.upload_files(items)}
+
+    async def photo_album(self, mode, photo, interval_seconds):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("photo_album") != 1:
+                return {"status": "unsupported"}
+            reply = await self.client.photo_album(mode, photo=photo, interval_seconds=interval_seconds)
+            fields = ("view", "interval_seconds", "playing", "count", "page", "pages",
+                      "photo", "photos", "thumbnails_drawn", "photo_drawn", "photo_draws")
+            return {"status": "ok", **{key: reply[key] for key in fields if key in reply}}
+
+    async def set_brightness(self, level):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            return {"status": "saved", "brightness": await self.client.set_brightness(level)}
+
+    async def calibrate_touch(self, cancel=False):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            return await self.client.calibrate_touch(cancel)
+
+
+def speed_windows_view(reply):
+    value = reply.get("speed_windows")
+    if not isinstance(value, dict):
+        return None
+    try:
+        return asdict(SpeedConfig(value["recent_seconds"], value["long_days"]))
+    except (KeyError, ValueError):
+        return None
+
+
+def status_view(reply, capabilities):
+    def page_name(key):
+        index = reply.get(key)
+        return SCREEN_PAGES[index] if type(index) is int and 0 <= index < len(SCREEN_PAGES) else None
+
+    status = {
+        "connection": "connected",
+        "protocol": capabilities.get("protocol"),
+        "text_supported": capabilities.get("text_present") == 1,
+        "page": reply.get("pet_page"),
+        "screen_page": page_name("screen_page"),
+        "home_page": page_name("home_page"),
+        "clock_face": reply.get("clock_face"),
+        "automatic_role": reply.get("automatic_role"),
+        "boot": reply.get("boot"),
+        "reset_reason": reply.get("reset_reason"),
+        "text_status": reply.get("text_status"),
+        "image_displayed": reply.get("image_displayed", False),
+        "brightness": reply.get("brightness"),
+        "touch_calibration": reply.get("touch_calibration", "unsupported"),
+        "role": {"state": reply.get("role_state", "unsupported"), "id": reply.get("role_id"),
+                 "action_count": reply.get("role_action_count", 0),
+                 "completion_action": reply.get("finish_action") or None,
+                 "remembered_after_restart": reply.get("role_persisted")},
+    }
+    if isinstance(reply.get("role_base_action"), str):
+        status["role"]["base_action"] = reply["role_base_action"]
+    if type(reply.get("weekly_reset")) is int and 1700000000 <= reply["weekly_reset"] <= 0xFFFFFFFF:
+        status["weekly_reset_at"] = reply["weekly_reset"]
+    if capabilities.get("speed_windows") == 1 and (windows := speed_windows_view(reply)) is not None:
+        status["speed_windows"] = windows
+    if capabilities.get("weather_device") == 1:
+        status["weather"] = {"updated": reply.get("weather_updated") or None,
+                             "device_refresh": reply.get("weather_device_refresh") is True}
+        for key, field in (("cached", "weather_cached"), ("cached_on_screen", "weather_cache_indicator")):
+            if type(reply.get(field)) is bool:
+                status["weather"][key] = reply[field]
+    if reply.get("transport") in ("usb", "wifi"):
+        status["transport"] = reply["transport"]
+    return status
+
+
+def create_server(config_path, role_dir=None, token_root=None, usb_port=None, token_collector=None, token_probe=None,
+                  *, no_token_probe=False):
+    if no_token_probe and (token_probe is not None or token_collector is not None):
+        raise ValueError("禁用 Token 采集时不能同时指定采集程序。")
+    installed_probe = Path(config_path).parent / "bin/AgentSpeedProbe"
+    if not no_token_probe and token_probe is None and token_collector is None and installed_probe.is_file():
+        token_probe = installed_probe
+    shared_probe = AgentSpeedProbe(token_probe) if token_probe is not None else None
+    session = BoardSession(config_path, token_root=token_root, usb_port=usb_port,
+                           token_collector=token_collector, probe_collector=shared_probe, no_token_probe=no_token_probe)
+    registry = DeviceRegistry(config_path)
+    notification_inbox = NotificationStore(registry.default_path.parent / "notifications.sqlite3")
+    session.identity_registry = registry
+    tasks = []
+    running = False
+    hook_configuration_lock = asyncio.Lock()
+
+    def start_session(board):
+        if running:
+            board.loop = asyncio.get_running_loop()
+            tasks.extend(asyncio.create_task(run()) for run in
+                         (board.poll, board.poll_weather, board.poll_tokens, board.poll_quota, board.poll_computer_metrics))
+
+    def make_session(path):
+        board = BoardSession(path, token_root=token_root, token_collector=token_collector, probe_collector=shared_probe,
+                             no_token_probe=no_token_probe, notification_source=notification_inbox)
+        board.identity_registry = registry
+        return board
+
+    async def configure_notifications(enabled, device_id, hook, configure, *arguments):
+        # Keep accepting a device selector from older clients. The hook is
+        # installed once for this registry, and each board keeps its own inbox.
+        if device_id is not None:
+            registry.path_for(device_id)
+        command = hook_command(registry.default_path, hook, *arguments)
+        previous = [hook_command(path, hook, *arguments) for path in registry.paths()
+                    if path != registry.default_path]
+
+        def apply():
+            changed = configure(command, enabled=enabled)
+            for legacy in previous:
+                changed = configure(legacy, enabled=False) or changed
+            return changed
+
+        async with hook_configuration_lock:
+            return await asyncio.to_thread(apply)
+
+    sessions = DeviceSessions(registry, session, make_session, start_session)
+    portal = None
+    portal_mode = None
+
+    @asynccontextmanager
+    async def lifespan(_server):
+        nonlocal running
+        running = True
+        try:
+            start_session(session)
+            for device in registry.list():
+                sessions.resolve(device['id'])
+            yield session
+        finally:
+            running = False
+            for task in tasks:
+                task.cancel()
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                for board in sessions.sessions.values():
+                    await board.drop()
+                if shared_probe is not None:
+                    await shared_probe.close()
+                if portal is not None:
+                    await asyncio.to_thread(portal.close)
+                tasks.clear()
+
+    server = FastMCP(
+        "DeskPet Platform", lifespan=lifespan,
+        instructions="用户想给小板添加、制作或安装角色时，先读 desk_read_manual(topic=roles)。"
+                     "制作完整角色时按指南的角色交付标准准备素材和验收。"
+                     "可以在电脑上生成体验角色包，或将已有的角色包安装到指定小板的储存卡。",
+    )
+
+    async def add_pairing(config, registration=None):
+        board = session.usb_client(config, registration) if registration else Client(config)
+        async with board:
+            await board.status()
+            if board.device_id is not None:
+                config = replace(config, device_id=board.device_id)
+        identity = registry.add(config)
+        added = sessions.resolve(identity)
+        if registration is not None:
+            added.usb_port = registration
+        return {"device": config.identity, "id": identity, "device_id": config.device_id}
+
+    def add_pairing_from_portal(code, address):
+        future = asyncio.run_coroutine_threadsafe(add_pairing(DeviceConfig.from_code(code, address)), session.loop)
+        try:
+            return future.result(timeout=30)
+        except FutureTimeout:
+            future.cancel()
+            raise TimeoutError("配对超时，请重试。") from None
+
+    @server.tool()
+    def desk_list_devices() -> dict[str, Any]:
+        """列出这台电脑已配对的设备。多台设备时，操作须传入对应的 id。"""
+        return {"devices": registry.list()}
+
+    @server.tool()
+    def desk_read_manual(topic: Manual = "operations") -> str:
+        """读取操作手册、SDK 二次开发手册或自定义角色指南。制作、体验或安装角色请选择 roles。无需连接小板。"""
+        return read_manual(topic)
+
+    @server.resource("deskpet://manual/operations")
+    def operations_manual() -> str:
+        """安装、配网、配对、操作与故障排查。"""
+        return read_manual("operations")
+
+    @server.resource("deskpet://manual/development")
+    def development_manual() -> str:
+        """SDK、设备协议、扩展方式和验证。"""
+        return read_manual("development")
+
+    @server.resource("deskpet://manual/roles", name="添加自定义角色", mime_type="text/markdown")
+    def roles_manual() -> str:
+        """给小板添加角色的对话示例、可运行样例和制作步骤。"""
+        return read_manual("roles")
+
+    @server.tool()
+    async def desk_status(device_id: str | None = None) -> dict[str, Any]:
+        """查询连接、设备能力和屏幕状态。储存卡操作期间返回最近一次读数。"""
+        session = sessions.resolve(device_id)
+        return await session.get_status()
+
+    @server.tool()
+    async def desk_computer_metrics(cpu: bool | None = None, memory: bool | None = None,
+                                    device_id: str | None = None) -> dict[str, Any]:
+        """查看或设置电脑 CPU、内存使用率是否显示；各设备单独保存，默认关闭。"""
+        session = sessions.resolve(device_id)
+        return await session.configure_computer_metrics(cpu=cpu, memory=memory)
+
+    @server.tool()
+    async def desk_render_metrics(reset: bool = False, device_id: str | None = None) -> dict[str, Any]:
+        """读取角色帧率、读卡、画面合成、刷屏、触摸轮询与回执耗时。reset 清空采样窗口。"""
+        session = sessions.resolve(device_id)
+        return await session.render_metrics(reset)
+
+    @server.tool()
+    async def desk_sync_clock(offset_minutes: int | None = None, device_id: str | None = None) -> dict[str, Any]:
+        """用电脑时间校准小屏，省略偏移时使用电脑本地时区。"""
+        session = sessions.resolve(device_id)
+        return await session.sync_clock(offset_minutes)
+
+    @server.tool()
+    async def desk_clock_edit(
+        mode: Literal["status", "start", "adjust", "save", "cancel"] = "status",
+        field: Literal["year", "month", "day", "hour", "minute"] | None = None,
+        step: Literal[-1, 1] | None = None,
+        device_id: str | None = None,
+    ) -> dict[str, Any]:
+        """在时钟页编辑日期和时间。adjust 每次调一个字段，save 应用草稿，cancel 放弃修改。"""
+        session = sessions.resolve(device_id)
+        return await session.clock_edit(mode, field, step)
+
+    @server.tool()
+    async def desk_set_view(page: Literal["role", "home", "clock", "settings", "roles", "photos", "weather", "messages"],
+                            make_default: bool = False, clock_face: int | None = None, device_id: str | None = None) -> dict[str, Any]:
+        """打开指定页面，可保存默认首页，或选择时钟表盘 0 到 5。"""
+        session = sessions.resolve(device_id)
+        return await session.set_view(page, make_default, clock_face)
+
+    @server.tool()
+    async def desk_add_photo(source: str, device_id: str | None = None) -> dict[str, Any]:
+        """将本机图片加入设备的离线相册，同时生成缩略图。"""
+        session = sessions.resolve(device_id)
+        return await session.add_photo(source)
+
+    @server.tool()
+    async def desk_photo_album(
+        mode: Literal["status", "grid", "open", "previous", "next", "play", "pause", "interval"] = "status",
+        photo: str | None = None,
+        interval_seconds: int | None = None,
+        device_id: str | None = None,
+    ) -> dict[str, Any]:
+        """grid 打开或刷新相册。open 传照片标识，previous/next 翻页或切图，play/pause 控制轮播，interval 保存间隔。"""
+        session = sessions.resolve(device_id)
+        return await session.photo_album(mode, photo, interval_seconds)
+
+    @server.tool()
+    async def desk_set_weather_location(latitude: float, longitude: float, label: str, device_id: str | None = None) -> dict[str, Any]:
+        """设定天气地点和屏幕上的英文名称，并刷新七天预报。"""
+        session = sessions.resolve(device_id)
+        return await session.set_weather_location(latitude, longitude, label)
+
+    @server.tool()
+    async def desk_token_status(device_id: str | None = None) -> dict[str, Any]:
+        """读取最近一次发送到小屏的 Token 速率、趋势、会话数和额度。"""
+        session = sessions.resolve(device_id)
+        return session.token_status()
+
+    @server.tool()
+    async def desk_speed_windows(recent_seconds: int | None = None, long_days: int | None = None, device_id: str | None = None) -> dict[str, Any]:
+        """读取自适应档位的比较窗口，或同时保存近期秒数和长期天数。近期可选 120、300、600、1800、3600，长期可选 1、3、7。"""
+        session = sessions.resolve(device_id)
+        return await session.speed_windows(recent_seconds, long_days)
+
+    @server.tool()
+    async def desk_set_role_auto(enabled: bool, device_id: str | None = None) -> dict[str, Any]:
+        """按 Token 速率自动选择角色档位，或保留手动选择。"""
+        session = sessions.resolve(device_id)
+        return await session.set_role_auto(enabled)
+
+    @server.tool()
+    async def desk_diagnostics(include_card: bool = True, device_id: str | None = None) -> dict[str, Any]:
+        """读取当前连接、已保存网络、重启原因及储存卡空间。"""
+        session = sessions.resolve(device_id)
+        return await session.diagnostics(include_card)
+
+    @server.tool()
+    async def desk_select_network(ssid: str, device_id: str | None = None) -> dict[str, Any]:
+        """切换到已保存的 Wi-Fi。小屏会重新连接，失败时会尝试其他已保存网络。"""
+        session = sessions.resolve(device_id)
+        return await session.select_network(ssid)
+
+    @server.tool()
+    async def desk_pair_begin(open_browser: bool = True, add_device: bool = False) -> dict[str, Any]:
+        """打开本机配对页面。添加另一台设备时设置 add_device；配对码只输入网页。"""
+        nonlocal portal, portal_mode
+        if not add_device and len(registry.list()) > 1:
+            raise ValueError("已有多台设备，请使用添加设备配对。")
+        if portal is None or portal_mode != add_device or portal.status()["state"] not in ("waiting", "checking"):
+            if portal is not None:
+                await asyncio.to_thread(portal.close)
+            portal = PairPortal(add_pairing_from_portal if add_device else session.pair_from_portal).start()
+            portal_mode = add_device
+        opened = await asyncio.to_thread(webbrowser.open, portal.url) if open_browser else False
+        return {"url": portal.url, "browser_opened": opened, "expires_in_seconds": portal.lifetime}
+
+    @server.tool()
+    async def desk_pair_usb(port: str, expected_identity: str, credentials_file: str | None = None,
+                            add_device: bool = False, device_id: str | None = None) -> dict[str, Any]:
+        """用已确认的 USB 串口配对。添加另一台设备时设置 add_device。"""
+        if add_device:
+            if device_id is not None:
+                raise ValueError("添加设备时无需指定已配对设备的 ID。")
+            if any(item["identity"] == expected_identity for item in registry.list()):
+                raise ValueError("小板已配对，请选择它的设备 ID。")
+            registration = UsbPort.register(port)
+            registration.verify()
+            config = await asyncio.to_thread(probe_usb, port, expected_identity, credentials_file)
+            registration.verify()
+            return await add_pairing(config, registration)
+        return await sessions.resolve(device_id).pair_usb(port, expected_identity, credentials_file)
+
+    @server.tool()
+    def desk_pair_status() -> dict[str, Any]:
+        """查询本机配对页面的状态，不返回配对码。"""
+        return portal.status() if portal is not None else {"state": "not_started", "device": None}
+
+    @server.tool()
+    async def desk_show_text(text: str = "DeskPet Platform ready", device_id: str | None = None) -> dict[str, Any]:
+        """在已连接设备上显示不超过两行的文字，返回设备的显示回执。"""
+        session = sessions.resolve(device_id)
+        return await session.show_text(text)
+
+    @server.tool()
+    async def desk_upload_files(files: list[CardFile], device_id: str | None = None) -> dict[str, Any]:
+        """将普通文件传到小板储存卡的 desk/ 或 photos/。source 是绝对路径。角色资源请用 desk_install_role。"""
+        if any(item.path.startswith("roles/") for item in files):
+            raise ValueError("请用 desk_install_role 校验并安装角色资源。")
+        session = sessions.resolve(device_id)
+        return await session.upload_files(files)
+
+    @server.tool()
+    async def desk_delete_resource(path: str, device_id: str | None = None) -> dict[str, Any]:
+        """删除已指定的卡上资源。用 roles/<角色标识> 或 photos/<照片标识> 删除整项，也可删除 desk 下的单个文件。"""
+        session = sessions.resolve(device_id)
+        return await session.delete_resource(path)
+
+    @server.tool()
+    def desk_list_role_sources(directory: str | None = None) -> dict[str, Any]:
+        """查询电脑上的角色候选目录，无需连接小板；可覆盖启动时配置的绝对路径，安装时会完整校验。"""
+        return list_role_sources(directory if directory is not None else role_dir)
+
+    @server.tool()
+    async def desk_create_role_example(destination: str) -> dict[str, str]:
+        """在本机生成用于体验安装和图鉴播放的 Pocket Bot 技术样例。destination 为新的 ZIP 文件绝对路径。无需连接小板。"""
+        return await asyncio.to_thread(create_role_example, destination)
+
+    @server.tool()
+    async def desk_check_role(source: str) -> dict[str, Any]:
+        """在电脑上检查角色资源是否齐全、命名和格式是否正确。source 是角色目录或 role1 ZIP 的绝对路径。无需连接小板。"""
+        with tempfile.TemporaryDirectory(prefix="deskpet-role-check-") as directory:
+            try:
+                bundle = await asyncio.to_thread(prepare_role_source, source, directory)
+            except ValueError as error:
+                return {"status": "invalid", "reason": str(error)}
+            except OSError:
+                return {"status": "invalid", "reason": "无法读取或暂存角色资源，请检查本机文件权限和可用空间。"}
+        return {"status": "valid", "role": bundle.identity, "version": bundle.version,
+                "format": "role1" if bundle.portable else "PET1",
+                "actions": list(bundle.actions), "files": [item.relative for item in bundle.files]}
+
+    @server.tool()
+    async def desk_install_role(source: str, device_id: str | None = None) -> dict[str, Any]:
+        """先在电脑上校验角色包，成功后才传到小板储存卡并启用。图鉴角色使用 role1 ZIP。可用 desk_check_role 单独检查。source 是绝对路径。"""
+        session = sessions.resolve(device_id)
+        return await session.install_role(source)
+
+    @server.tool()
+    async def desk_select_role(identity: str, device_id: str | None = None) -> dict[str, Any]:
+        """切换到已安装在储存卡上的角色，identity 是安装时返回的角色标识。"""
+        session = sessions.resolve(device_id)
+        return await session.select_role(identity)
+
+    @server.tool()
+    async def desk_role_preview(mode: Literal["start", "status", "cancel", "use"] = "status",
+                                identity: str | None = None, device_id: str | None = None) -> dict[str, Any]:
+        """试播已安装角色。start 需要角色标识，status 查看阶段，cancel 返回图鉴，use 设为当前角色。"""
+        session = sessions.resolve(device_id)
+        return await session.role_preview(mode, identity)
+
+    @server.tool()
+    async def desk_list_roles(device_id: str | None = None) -> dict[str, Any]:
+        """查询储存卡中已安装的角色。"""
+        session = sessions.resolve(device_id)
+        return await session.list_roles()
+
+    @server.tool()
+    async def desk_list_actions(device_id: str | None = None) -> dict[str, Any]:
+        """查询当前角色实际支持的动作名称。"""
+        session = sessions.resolve(device_id)
+        return await session.list_actions()
+
+    @server.tool()
+    async def desk_play_action(action: str, duration_ms: int | None = None, device_id: str | None = None) -> dict[str, Any]:
+        """播放当前角色的动作；action 使用 desk_list_actions 返回的名称。默认使用动作自身的时长。"""
+        session = sessions.resolve(device_id)
+        return await session.play_role(action, duration_ms)
+
+    @server.tool()
+    async def desk_action_status(operation: int, boot: int, device_id: str | None = None) -> dict[str, Any]:
+        """用启动回执中的 operation 和 boot 查询动作是否还在播放、完成或中断。"""
+        session = sessions.resolve(device_id)
+        return await session.role_action_status(operation, boot)
+
+    @server.tool()
+    async def desk_set_role_base(action: str, device_id: str | None = None) -> dict[str, Any]:
+        """切换当前角色的持续动作；临时动作结束后回到这个持续动作。"""
+        session = sessions.resolve(device_id)
+        return await session.set_role_base(action)
+
+    @server.tool()
+    async def desk_wait_touch(timeout: float = 15, device_id: str | None = None) -> dict[str, Any]:
+        """等待或读取小屏点击事件，最多等待 60 秒。"""
+        session = sessions.resolve(device_id)
+        return await session.wait_touch(timeout)
+
+    @server.tool()
+    async def desk_show_image(source: str, device_id: str | None = None) -> dict[str, Any]:
+        """显示电脑上的图片；source 是图片文件绝对路径，传输时会自动转换并写入储存卡。"""
+        session = sessions.resolve(device_id)
+        return await session.image(source)
+
+    @server.tool()
+    async def desk_clear_image(device_id: str | None = None) -> dict[str, Any]:
+        """退出图片，返回角色或设备状态画面。"""
+        session = sessions.resolve(device_id)
+        return await session.image()
+
+    @server.tool()
+    async def desk_set_brightness(level: int, device_id: str | None = None) -> dict[str, Any]:
+        """设置屏幕亮度并保存；level 为 0 至 100，0 会关闭背光，触摸可唤醒。"""
+        session = sessions.resolve(device_id)
+        return await session.set_brightness(level)
+
+    @server.tool()
+    async def desk_calibrate_touch(device_id: str | None = None) -> dict[str, Any]:
+        """在小屏上开始触摸位置校准，按屏幕提示依次点击三个标记。"""
+        session = sessions.resolve(device_id)
+        return await session.calibrate_touch()
+
+    @server.tool()
+    async def desk_cancel_touch_calibration(device_id: str | None = None) -> dict[str, Any]:
+        """取消触摸校准，保留此前保存的校准。"""
+        session = sessions.resolve(device_id)
+        return await session.calibrate_touch(cancel=True)
+
+    @server.tool()
+    async def desk_enable_codex_notifications(device_id: str | None = None) -> dict[str, Any]:
+        """安装一个 Codex 钩子，为所有已配对设备启用完成和待应答提醒。"""
+        path = codex_home() / "hooks.json"
+        added = await configure_notifications(True, device_id, "codex-hook",
+            lambda command, *, enabled: (install_hook if enabled else remove_hook)(path, command))
+        return {"status": "review_required" if added else "configured", "added": added, "config": str(path),
+                "next_step": "在 Codex 的 /hooks 或设置中的 Hooks 里检查并信任新增条目，然后在新会话中验证。"}
+
+    @server.tool()
+    async def desk_disable_codex_notifications(device_id: str | None = None) -> dict[str, Any]:
+        """停止新增 Codex 会话提醒；只移除本程序的 hook，保留其他 hooks 和已有提醒。"""
+        path = codex_home() / "hooks.json"
+        removed = await configure_notifications(False, device_id, "codex-hook",
+            lambda command, *, enabled: (install_hook if enabled else remove_hook)(path, command))
+        return {"status": "disabled", "removed": removed}
+
+    @server.tool()
+    async def desk_set_claude_notifications(enabled: bool, device_id: str | None = None) -> dict[str, Any]:
+        """为所有已配对设备启用或关闭 Claude Code 的完成和提问提醒。"""
+        from .claude_feedback import MATCHERS, settings_path
+
+        path = settings_path()
+        changed = await configure_notifications(enabled, device_id, "claude-hook",
+            lambda command, *, enabled: (install_hook if enabled else remove_hook)(path, command, matchers=MATCHERS, private=False))
+        if enabled:
+            return {"status": "configured", "added": changed, "config": str(path),
+                    "next_step": "打开新的 Claude Code 会话验证提醒。"}
+        return {"status": "disabled", "removed": changed}
+
+    @server.tool()
+    async def desk_set_antigravity_notifications(enabled: bool, device_id: str | None = None) -> dict[str, Any]:
+        """为所有已配对设备启用或关闭 Antigravity 完成和提问提醒。"""
+        from .antigravity_feedback import configure, settings_path
+
+        path = settings_path()
+        changed = await configure_notifications(enabled, device_id, "antigravity-hook",
+            lambda command, *, enabled: configure(path, command, enabled=enabled))
+        return {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path)}
+
+    @server.tool()
+    async def desk_set_opencode_notifications(enabled: bool, device_id: str | None = None) -> dict[str, Any]:
+        """为所有已配对设备启用或关闭 OpenCode 的完成、提问和授权提醒。"""
+        from .opencode_feedback import configure, plugin_path
+
+        path = plugin_path(hook_command(registry.default_path, "opencode-hook"))
+        changed = await configure_notifications(enabled, device_id, "opencode-hook",
+            lambda command, *, enabled: configure(plugin_path(command), command, enabled=enabled))
+        return {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path),
+                "next_step": "重启 OpenCode 后验证提醒。"}
+
+    @server.tool()
+    async def desk_set_workbuddy_notifications(
+        enabled: bool, edition: Literal["workbuddy", "workbuddy_ai"] = "workbuddy", device_id: str | None = None,
+    ) -> dict[str, Any]:
+        """为所有已配对设备启用或关闭 WorkBuddy 的完成、提问和授权提醒。"""
+        from .workbuddy_feedback import MATCHERS, settings_path
+
+        path = settings_path(edition)
+        changed = await configure_notifications(enabled, device_id, "workbuddy-hook",
+            lambda command, *, enabled: (install_hook if enabled else remove_hook)(path, command, matchers=MATCHERS, private=False),
+            "--edition", edition)
+        if enabled:
+            return {"status": "configured", "added": changed, "config": str(path),
+                    "next_step": "重启所选的 WorkBuddy 客户端，用新会话验证提醒。"}
+        return {"status": "disabled", "removed": changed}
+
+    @server.tool()
+    async def desk_list_notifications(limit: int = 30, device_id: str | None = None) -> dict[str, Any]:
+        """查看桌面屏自己的会话提醒，不读取或修改 Codex 的未读状态。"""
+        session = sessions.resolve(device_id)
+        await asyncio.to_thread(session.notifications.sync)
+        items = await asyncio.to_thread(session.notifications.list, limit)
+        return {"notifications": items, "unseen": await asyncio.to_thread(session.notifications.unseen_count)}
+
+    @server.tool()
+    async def desk_message_view(
+        mode: Literal["status", "list", "open", "previous", "next", "mark_seen"] = "status",
+        identity: int | None = None,
+        device_id: str | None = None,
+    ) -> dict[str, Any]:
+        """打开小屏的消息列表、翻页或查看详情。open 和 mark_seen 需要通知编号，标记时详情须显示该条通知。"""
+        session = sessions.resolve(device_id)
+        return await session.message_view(mode, identity)
+
+    @server.tool()
+    async def desk_mark_notification_seen(identity: int, device_id: str | None = None) -> dict[str, Any]:
+        """只标记桌面屏的一条提醒为已查看，不改变 Codex 里的未读状态。"""
+        session = sessions.resolve(device_id)
+        return {"updated": await asyncio.to_thread(session.notifications.mark_seen, identity)}
+
+    return server

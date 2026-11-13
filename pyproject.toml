@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deskpet-platform"
+version = "0.1.0"
+description = "Local Wi-Fi SDK and MCP for DeskPet-compatible displays"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography==50.0.2",
+    "mcp==1.28.1",
+    "Pillow==12.0.0",
+    "psutil==7.2.2",
+    "pydantic==2.14.3",
+    "pyserial==3.5",
+]
+
+[project.scripts]
+deskpet-platform = "deskpet_platform.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+deskpet_platform = ["manuals/*.md", "assets/agent_icons/*.png", "assets/agent_icons/LICENSE", "assets/agent_icons/README.md", "opencode_plugin.js"]
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "README.md" },
+    { file = "src/deskpet_platform/**/*.py" },
+    { file = "src/deskpet_platform/manuals/*.md" },
+    { file = "src/deskpet_platform/assets/agent_icons/*" },
+    { file = "src/deskpet_platform/opencode_plugin.js" },
+]

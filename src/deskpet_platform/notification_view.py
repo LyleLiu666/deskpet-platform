@@ -1,0 +1,189 @@
+"""Project per-device notifications onto the original scene's screen protocol."""
+from datetime import datetime
+import json
+import zlib
+
+from PIL import Image, ImageDraw
+
+from .client import _text_font
+from .notification_graphics import home_lines, notification_row
+from .notifications import SOURCE_NAMES
+
+
+def _detail_pixels(item):
+    image = Image.new("1", (288, 112))
+    draw = ImageDraw.Draw(image)
+    font = _text_font(16)
+    title = item["title"]
+    lines = []
+    while title and len(lines) < 2:
+        end = 1
+        while end < len(title) and draw.textlength(title[:end + 1], font=font) <= 288:
+            end += 1
+        lines.append(title[:end])
+        title = title[end:]
+    if title and lines:
+        while lines[-1] and draw.textlength(lines[-1] + "…", font=font) > 288:
+            lines[-1] = lines[-1][:-1]
+        lines[-1] += "…"
+    for index, line in enumerate(lines):
+        draw.text((0, index * 20), line, font=font, fill=1)
+    source = SOURCE_NAMES.get(item["source"], item["source"])
+    state = ("已应答" if item["resolved"] else "需要应答") if item["category"] == "response" else "已完成"
+    draw.text((0, 50), f"{source}  {state}", font=_text_font(14), fill=1)
+    draw.text((0, 70), "请在电脑上查看", font=_text_font(14), fill=1)
+    return image.tobytes()
+
+
+class NotificationView:
+    def __init__(self, store):
+        self.store = store
+        self.epoch = None
+        self.boot = None
+        self.version = self.attempt = 0
+        self.mode = "home"
+        self.page = self.pages = 1
+        self.anchor = None
+        self.rows = []
+        self.items = {}
+        self.signature = None
+        self.selected = None
+        self.detail_sent = self.detail_seen = False
+        self.detail_crc = None
+
+    def _reset(self, epoch, boot, device_page):
+        # A new connection resets protocol versions. On the same boot the
+        # board still has its open page and selected row.
+        same_list = (boot is not None and boot == self.boot and device_page in (1, 2, 3)
+                     and self.mode in ("list", "detail"))
+        page, anchor = (self.page, self.anchor) if same_list else (1, None)
+        selected = self.selected if same_list and device_page == 2 else None
+        self.epoch = epoch
+        self.boot = boot
+        self.version = self.attempt = 0
+        self.mode = "detail" if selected else "list" if device_page in (1, 2, 3) else "home"
+        self.page, self.pages, self.anchor, self.rows, self.items = page, 1, anchor, [], {}
+        self.signature = None
+        self.selected = selected
+        self.detail_sent = self.detail_seen = False
+        self.detail_crc = None
+
+    def touch(self, event):
+        if not self.version or event.get("version") != self.version:
+            return False
+        action = event.get("action")
+        if action == "home":
+            self.mode, self.anchor, self.page, self.selected = "home", None, 1, None
+        elif action == "list":
+            if self.mode == "home":
+                self.page, self.anchor = 1, None
+            self.mode, self.selected = "list", None
+        elif action in ("previous", "next") and self.mode == "list":
+            candidate = self.page + (1 if action == "next" else -1)
+            if not 1 <= candidate <= self.pages:
+                return False
+            self.page = candidate
+        elif action == "detail" and self.mode == "list" and event.get("id") in self.items:
+            self.selected = self.items[event["id"]]
+            self.mode = "detail"
+            self.detail_sent = self.detail_seen = False
+            self.detail_crc = None
+        else:
+            return False
+        self.signature = None
+        return True
+
+    async def refresh(self, client, *, device_page=None, role_ready=True):
+        channel = client.channel
+        if channel.capabilities.get("agent_home") != 1:
+            return False
+        if self.epoch != channel.epoch:
+            self._reset(channel.epoch, channel.boot, device_page)
+        if self.mode == "detail" and self.version:
+            return await self._detail(client)
+        if self.mode == "home":
+            summary, receipts = self.store.home_summary(include_receipts=True)
+        else:
+            summary, receipts = self.store.home_summary(), ()
+        waiting = min(65535, summary["response_count"])
+        results = min(65535, summary["completed_count"])
+        attention = 0
+        if self.mode == "home":
+            signature = json.dumps(["home", summary], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            if waiting and role_ready and device_page in (None, 0) and channel.capabilities.get("response_attention") == 1:
+                attention = self.store.pending_attention()
+            if self.signature == signature and not attention and not receipts:
+                return True
+            entries = home_lines(summary)
+            rows = [{"id": "home-" + str(index), "kind": 3 if entry["category"] == "completed" else 0,
+                     "title": entry["bitmap"].hex()} for index, entry in enumerate(entries)]
+            extra = {"agent_home": True}
+            if attention:
+                extra["response_attention"] = f"{attention:016x}"
+            items = {}
+        else:
+            page = self.store.list_page(self.page, page_size=4, anchor=self.anchor)
+            self.anchor, self.pages = page["anchor"], page["pages"]
+            if self.pages > 65535:
+                raise ValueError("notification_pages_exceed_device_limit")
+            signature = json.dumps(["list", page, waiting, results], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            if self.signature == signature:
+                return True
+            items = {f"n-{item['id']}": item for item in page["items"]}
+            rows = [{"id": key, "revision": 1, **notification_row(item)} for key, item in items.items()]
+            extra = {"pagination": [self.page - 1, self.pages]}
+        value = {"count": len(rows), "waiting": waiting, "results": results, "running": 0, **extra}
+        self.attempt += 1
+        version = self.attempt
+        async with client._operation:
+            await channel.send("snapshot_begin", version=version, **value)
+            for index, row in enumerate(rows):
+                await channel.send("row", version=version, index=index, **row)
+            result = await channel.send("snapshot_commit", version=version)
+            if result.get("committed_version") != version:
+                raise RuntimeError("notification_snapshot_not_committed")
+        self.rows, self.items, self.signature, self.version = rows, items, signature, version
+        if receipts:
+            self.store.mark_home_shown(receipts)
+        if attention:
+            self.store.acknowledge_attention(attention)
+        if self.mode == "detail":
+            identity = f"n-{self.selected['id']}"
+            self.selected = self.items.get(identity)
+            if self.selected is not None:
+                return await self._detail(client)
+            self.mode = "list"
+        return True
+
+    async def _detail(self, client):
+        item = self.selected
+        identity = f"n-{item['id']}"
+        channel = client.channel
+        async with client._operation:
+            if not self.detail_sent:
+                pixels = _detail_pixels(item)
+                checksum = zlib.crc32(pixels)
+                fields = {"id": identity, "revision": 1, "page": 0}
+                result = await channel.send("detail_begin", **fields, pages=1,
+                                            short_id=f"{item['id'] & 0xffffffff:08x}",
+                                            reported=datetime.fromtimestamp(item["created_at"]).strftime("%Y-%m-%d %H:%M"),
+                                            fresh=False, crc=checksum)
+                if result.get("detail_cancelled"):
+                    return False
+                for index in range(16):
+                    result = await channel.send("detail_chunk", **fields, index=index,
+                                                data=pixels[index * 252:(index + 1) * 252].hex())
+                    if result.get("detail_cancelled"):
+                        return False
+                result = await channel.send("detail_commit", **fields)
+                if result.get("detail_ready") is not True:
+                    return False
+                self.detail_sent = True
+                self.detail_crc = checksum
+            if not self.detail_seen:
+                status = await channel.send("heartbeat")
+                if (status.get("detail_displayed") is True and status.get("detail_crc") == self.detail_crc
+                        and status.get("detail_revision") == 1 and status.get("detail_page") == 0):
+                    self.store.mark_seen(item["id"])
+                    self.detail_seen = True
+        return True
