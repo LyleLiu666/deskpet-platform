@@ -54,6 +54,7 @@ tool_timeout_sec = 1200
 - `desk_clock_edit` 可查看小屏时间并使用同一编辑器。先调用 `desk_set_view(page="clock")` 打开时钟页，再用 `start` 开始，`adjust` 逐项修改，`save` 应用或 `cancel` 放弃。
 - `desk_add_photo` 将本机图片和缩略图一起传到相册。用 `desk_photo_album` 的 `grid` 打开或刷新缩略图，再用 `open` 和返回的照片标识打开照片。`previous` 和 `next` 在网格中翻页，在照片中切图。`play` 和 `pause` 控制轮播，`interval` 保存 5、10 或 15 秒的间隔。完整显示固件的全图页可点左右箭头切图，点中央隐藏或显示按钮，右上角进入轮播设置。支持全屏相册的固件会为照片保留宽或高铺满屏幕的版本，重新导入原图即可为早期照片补齐这个版本。
 - 完整显示固件通过小屏自己的 Wi-Fi 定位，首页右上角显示城市和天气，点按该区域可查看七天预报。断网时预报页会标示缓存。参考固件可用 `desk_set_weather_location` 为选定设备设置地点，保存后由小屏自行刷新。
+- [Open-Meteo](https://open-meteo.com/) 提供当前天气和七天预报，数据采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。DeskPet 将温度四舍五入、将天气代码映射为图标，并缓存最近预报。默认使用的 [免费接口](https://open-meteo.com/en/terms) 用于非商业用途。
 - 本机 MCP 自动读取 Codex 的数字用量。小屏右栏显示 Token 速率、时间、会话数和额度，底部显示近期趋势。用 `desk_set_role_auto` 开关自动档位。控制端断开或 15 秒没有收到数据时，小屏清除旧速率，自动档位回到待机。
 - Token 速度使用原版 `AgentSpeedProbe`：将可执行文件放在设备配置目录的 `bin/AgentSpeedProbe`，或在启动 MCP 时传入 `--token-probe <程序绝对路径>`。多台设备共用一个采集进程。原项目本身包含实测和按近期速度估算的数据；小屏显示速度与 `t/s`，`desk_token_status` 保留数据状态供查询。使用 `mcp --no-token-probe` 可跳过测速，设备配置目录中已有采集程序时也适用。未配置采集程序时，速度显示不可用。`--token-sessions` 可指定用作额度回退的 Codex 会话目录，不改变测速来源。
 - 当前小屏协议最多传输 9999.9 t/s 和 255 个会话。速度超出范围时暂停更新，会话数超出范围时显示未知；不会把它们截成上限后冒充真实值。完整范围需要后续更新小屏协议。
