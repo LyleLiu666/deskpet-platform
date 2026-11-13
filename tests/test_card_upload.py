@@ -21,6 +21,88 @@ from deskpet_platform.pairing import DeviceConfig
 
 
 class CardUploadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_retryable_http_failures_restart_transfer_after_reconnect(self):
+        class Relay:
+            def __init__(self, device_ip, _encrypted):
+                self.url = f"http://{device_ip}/fixture-{len(relays)}"
+                self.served = True
+                self.closed = False
+                relays.append(self)
+
+            def start(self):
+                return self
+
+            def close(self):
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "data.bin"
+            source.write_bytes(b"synthetic file")
+            cases = (("card_transfer_failed", "http_open", True),
+                     ("card_transfer_failed", "http_headers", True),
+                     ("card_transfer_failed", "http_body", True),
+                     ("card_transfer_failed", "http_tag", True),
+                     ("card_transfer_failed", "card_verify", False),
+                     ("card_transfer_failed", "http_status", False),
+                     ("unknown_card_transfer", None, False))
+            for code, stage, retry in cases:
+                with self.subTest(code=code, stage=stage):
+                    relays = []
+                    error = CommandRejected(code, stage)
+                    original = SimpleNamespace(online=True)
+
+                    async def accept_then_disconnect(kind, **_fields):
+                        if kind == "card_fetch":
+                            return {"transfer_status": "pending"}
+                        self.assertEqual(kind, "card_fetch_status")
+                        original.online = False
+                        raise AckTimeout("lost control connection after accepted transfer")
+
+                    original.send = AsyncMock(side_effect=accept_then_disconnect)
+                    recovered = SimpleNamespace(online=True, transport=SimpleNamespace(peer_address="127.0.0.2"),
+                                                send=AsyncMock(side_effect=[
+                                                    {"transfer_status": "pending"}, error,
+                                                    {"transfer_status": "pending"}, {"stored": True},
+                                                ]))
+
+                    async def reconnect(channel):
+                        self.assertIs(channel, original)
+                        self.assertFalse(relays[0].closed)
+                        return recovered
+
+                    async def send_file():
+                        return await upload_file(original, "127.0.0.1", bytes(32), "desk/data.bin", source,
+                                                 background=True, resume=AsyncMock(side_effect=reconnect))
+
+                    with patch("deskpet_platform.card_upload.CardRelay", Relay), patch(
+                        "deskpet_platform.card_upload.asyncio.sleep", AsyncMock()
+                    ):
+                        if retry:
+                            result = await send_file()
+                            self.assertEqual(result["bytes"], source.stat().st_size)
+                        else:
+                            with self.assertRaises(CommandRejected) as rejected:
+                                await send_file()
+                            self.assertIs(rejected.exception, error)
+
+                    initial_start, initial_status = original.send.await_args_list
+                    transfer_id = initial_start.kwargs["transfer_id"]
+                    first_poll, terminal_poll, *replacement = recovered.send.await_args_list
+                    for poll in (initial_status, first_poll, terminal_poll):
+                        self.assertEqual(poll.args, ("card_fetch_status",))
+                        self.assertEqual(poll.kwargs, {"transfer_id": transfer_id})
+                    self.assertEqual(len(relays), 2 if retry else 1)
+                    self.assertTrue(all(relay.closed for relay in relays))
+                    if retry:
+                        fresh_start, fresh_poll = replacement
+                        self.assertEqual(fresh_start.args, ("card_fetch",))
+                        self.assertNotEqual(fresh_start.kwargs["transfer_id"], transfer_id)
+                        self.assertNotEqual(fresh_start.kwargs["url"], initial_start.kwargs["url"])
+                        self.assertEqual(fresh_poll.args, ("card_fetch_status",))
+                        self.assertEqual(fresh_poll.kwargs, {"transfer_id": fresh_start.kwargs["transfer_id"]})
+                    else:
+                        self.assertEqual(replacement, [])
+
     async def test_lost_start_receipt_keeps_relay_open_and_queries_original_job(self):
         class Relay:
             url, served, closed = "http://127.0.0.1/fixture", True, False
