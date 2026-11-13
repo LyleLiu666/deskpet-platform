@@ -350,10 +350,11 @@ class RoleInstallFlowTests(unittest.IsolatedAsyncioTestCase):
             link = Link()
             device_id = "12345678-1234-4abc-8123-123456789abc"
 
-            def __init__(self, boot, *, status_lost=False, role_state="ready"):
+            def __init__(self, boot, *, status_lost=False, role_state="ready", rollback_failed=False):
                 self.channel = Channel(boot)
                 self.status_lost = status_lost
                 self.role_state = role_state
+                self.rollback_failed = rollback_failed
                 self.config = object()
                 self.activated = []
                 self.status_reads = 0
@@ -377,7 +378,10 @@ class RoleInstallFlowTests(unittest.IsolatedAsyncioTestCase):
                 if self.status_lost:
                     self.channel.online = False
                     raise AckTimeout("activation heartbeat timed out")
-                return {"role_state": self.role_state, "role_id": "sample-role", "role_persisted": True}
+                status = {"role_state": self.role_state, "role_id": "sample-role", "role_persisted": True}
+                if self.rollback_failed:
+                    status["role_rollback_ok"] = False
+                return status
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "sample-role"
@@ -385,14 +389,16 @@ class RoleInstallFlowTests(unittest.IsolatedAsyncioTestCase):
             pack.mkdir(parents=True)
             make_pack(pack)
             write_role_actions(root)
-            cases = ((77, "ready", True, "ready"),
-                     (77, "failed", True, "activation_failed"),
-                     (78, "ready", True, "activation_unconfirmed"),
-                     (77, "ready", False, "activation_unconfirmed"))
-            for boot, role_state, same_device, expected in cases:
-                with self.subTest(boot=boot, role_state=role_state, same_device=same_device):
+            cases = ((77, "ready", True, False, "ready"),
+                     (77, "failed", True, False, "activation_failed"),
+                     (77, "failed", True, True, "activation_failed"),
+                     (78, "ready", True, False, "activation_unconfirmed"),
+                     (77, "ready", False, False, "activation_unconfirmed"))
+            for boot, role_state, same_device, rollback_failed, expected in cases:
+                with self.subTest(boot=boot, role_state=role_state, same_device=same_device,
+                                  rollback_failed=rollback_failed):
                     first = Board(77, status_lost=True)
-                    replacement = Board(boot, role_state=role_state)
+                    replacement = Board(boot, role_state=role_state, rollback_failed=rollback_failed)
                     if not same_device:
                         replacement.device_id = "4a7a34c0-186d-4f84-a183-ef05537c7a8b"
                     configs = []
@@ -405,6 +411,10 @@ class RoleInstallFlowTests(unittest.IsolatedAsyncioTestCase):
                     session.client = first
                     result = await session.install_role(str(root))
                     self.assertEqual(result["status"], expected)
+                    if rollback_failed:
+                        self.assertIs(result["role_rollback_ok"], False)
+                    else:
+                        self.assertNotIn("role_rollback_ok", result)
                     self.assertEqual(configs, [first.config])
                     self.assertEqual(first.activated, ["sample-role"])
                     self.assertEqual(replacement.activated, [])

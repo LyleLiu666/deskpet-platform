@@ -866,7 +866,10 @@ class BoardSession:
                 return {"status": "ready", "role": identity,
                         "remembered_after_restart": status.get("role_persisted")}
             if status.get("role_state") == "failed":
-                return {"status": "activation_failed", "role": identity}
+                result = {"status": "activation_failed", "role": identity}
+                if status.get("role_rollback_ok") is False:
+                    result["role_rollback_ok"] = False
+                return result
             await asyncio.sleep(1)
         return {"status": "activation_unconfirmed", "role": identity}
 
