@@ -6,6 +6,8 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 
 本仓库提供电脑端源码。兼容的开发板是 **ESP32-2432S028 双 USB 版**（ST7789 屏幕、XPT2046 触摸、4 MiB Flash）。已预刷兼容固件的设备可直接配对。板端二进制包的发布状态见[刷机说明](docs/flash.md)。
 
+[交给你的 Agent 安装](#交给你的-agent-安装) · [手动安装](#手动安装) · [开始使用二维码](#开始使用二维码)
+
 ## Agent Speed 致谢
 
 本项目目前使用 Agent Speed 的 AgentSpeedProbe，并在开发其 Python 移植版。该移植基于 zoefix/agent-speed 的 Swift 实现，保留原项目的 MIT 许可证和版权声明。DeskPet Platform 提供设备接入；Python 移植版增加了测试和部分修复，目前仍在验证。感谢原项目作者的工作。
@@ -71,3 +73,11 @@ Token 速度使用原版 `AgentSpeedProbe`。在设备配置目录的 `bin/Agent
 - [SDK 示例](examples/status.py) · [设备点击回传](examples/tap.py)
 - [兼容板型和刷机说明](docs/flash.md)
 - [角色包与动作接口](docs/role-format.md)
+
+## 开始使用二维码
+
+手机扫码可打开本页的安装步骤。在电脑上打开同一链接并完成安装，再按小板上的提示配网和配对。[打开安装步骤](https://github.com/LyleLiu666/deskpet-platform#交给你的-agent-安装)
+
+<img src="docs/assets/start-qr.png" width="240" height="240" alt="DeskPet 安装步骤二维码">
+
+[下载二维码原图](docs/assets/start-qr.png)
