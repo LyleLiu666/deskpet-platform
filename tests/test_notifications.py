@@ -79,7 +79,7 @@ class NotificationTests(unittest.TestCase):
     def test_codex_event_is_deduplicated_and_never_changes_codex_unread(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            codex = root / "codex.sqlite"
+            codex = root / "state_5.sqlite"
             with closing(sqlite3.connect(codex)) as db, db:
                 db.execute("CREATE TABLE threads (id TEXT, name TEXT, title TEXT)")
                 db.execute("CREATE TABLE thread_read_receipts (id TEXT, unread INTEGER)")
@@ -88,7 +88,7 @@ class NotificationTests(unittest.TestCase):
             store = notifications.NotificationStore(root / "desk" / "notifications.sqlite3")
             event = {"hook_event_name": "Stop", "session_id": "session-1", "turn_id": "turn-1",
                      "cwd": "/tmp/example", "last_assistant_message": "private reply"}
-            with patch.object(notifications, "CODEX_STATE", codex):
+            with patch.dict(os.environ, {"CODEX_HOME": str(root)}):
                 first = store.add_codex_event(event)
                 self.assertEqual(store.add_codex_event(event), first)
             items = store.list()
@@ -105,6 +105,20 @@ class NotificationTests(unittest.TestCase):
             with closing(sqlite3.connect(codex)) as db:
                 self.assertEqual(db.execute("SELECT unread FROM thread_read_receipts").fetchone()[0], 1)
             self.assertEqual((root / "desk" / "notifications.sqlite3").stat().st_mode & 0o777, 0o600)
+
+    def test_codex_title_uses_the_selected_profile_without_reading_the_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory) / "custom profile"
+            profile.mkdir()
+            with closing(sqlite3.connect(profile / "state_5.sqlite")) as db, db:
+                db.execute("CREATE TABLE threads (id TEXT, name TEXT, title TEXT)")
+                db.execute("INSERT INTO threads VALUES (?, ?, ?)", ("custom", "Custom title", "fallback"))
+            with patch.dict(os.environ, {"CODEX_HOME": str(profile)}), \
+                 patch("deskpet_platform.notifications.sqlite3.connect", wraps=sqlite3.connect) as connect:
+                self.assertEqual(notifications.session_title("custom", "/tmp/fallback"), "Custom title")
+                self.assertEqual(notifications.session_title("missing", "/tmp/fallback"), "fallback")
+            self.assertEqual([call.args[0] for call in connect.call_args_list],
+                             [(profile / "state_5.sqlite").resolve().as_uri() + "?mode=ro"] * 2)
 
     def test_invalid_or_non_stop_events_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -158,7 +172,7 @@ class NotificationTests(unittest.TestCase):
                        "last_assistant_message": "private reply"}
             output = io.StringIO()
             with patch("sys.stdin", io.StringIO(json.dumps(payload))), patch("sys.stdout", output), \
-                 patch.object(notifications, "CODEX_STATE", config.parent / "empty-codex.sqlite"), \
+                 patch.dict(os.environ, {"CODEX_HOME": str(config.parent)}), \
                  patch("deskpet_platform.codex_hook.subprocess.Popen") as spawn:
                 receive(config)
             self.assertEqual(output.getvalue(), "{}\n")
@@ -250,7 +264,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             session = BoardSession(root / "device.json")
-            with patch.object(notifications, "CODEX_STATE", root / "no-codex.sqlite"):
+            with patch.dict(os.environ, {"CODEX_HOME": str(root)}):
                 first = session.notifications.add_codex_event(
                     {"hook_event_name": "Stop", "session_id": "one", "turn_id": "turn"})
                 second = session.notifications.add_codex_event(

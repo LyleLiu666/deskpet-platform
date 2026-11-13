@@ -21,10 +21,6 @@ EVENT_MATCHERS = {
 }
 
 
-def codex_home():
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
-
-
 def hook_command(config, hook="codex-hook", *arguments):
     return shlex.join([sys.executable, "-m", "deskpet_platform", "--config", str(config), hook, *arguments])
 

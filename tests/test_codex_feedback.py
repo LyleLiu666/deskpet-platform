@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -26,7 +27,7 @@ class CodexFeedbackTests(unittest.TestCase):
                 "prompt": "<send_user_message_question_reply>\n" + json.dumps(items) + "\n</send_user_message_question_reply>"}
 
     def test_questions_and_responses_are_exact_and_private(self):
-        with patch("deskpet_platform.notifications.CODEX_STATE", Path(self.temp.name) / "missing.sqlite"):
+        with patch.dict(os.environ, {"CODEX_HOME": self.temp.name}):
             self.assertEqual(codex_feedback.deliver(self.store, self.event), 2)
             codex_feedback.deliver(self.store, self.event)
         self.assertEqual(self.store.home_summary()["response_sources"][0]["count"], 2)

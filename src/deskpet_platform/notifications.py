@@ -10,7 +10,6 @@ import time
 import asyncio
 
 
-CODEX_STATE = Path.home() / ".codex/state_5.sqlite"
 SOURCE_NAMES = {"codex": "Codex", "claude_code": "Claude Code", "workbuddy": "WorkBuddy",
                 "antigravity": "Antigravity", "opencode": "OpenCode"}
 
@@ -21,9 +20,14 @@ def notification_text(item, *, detail=True):
     return heading + "\n" + item["title"][:20] if detail else heading
 
 
+def codex_home():
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+
+
 def session_title(session, cwd):
     try:
-        with closing(sqlite3.connect(CODEX_STATE.as_uri() + "?mode=ro", uri=True, timeout=0.1)) as db:
+        state = (codex_home() / "state_5.sqlite").resolve().as_uri()
+        with closing(sqlite3.connect(state + "?mode=ro", uri=True, timeout=0.1)) as db:
             row = db.execute("SELECT name,title FROM threads WHERE id=?", (session,)).fetchone()
         if row:
             for value in row:

@@ -24,13 +24,13 @@ from .agent_speed_probe import AgentSpeedProbe
 from .card_upload import MAX_FILE_BYTES, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
 from .client import Client, SCREEN_PAGES
-from .codex_hook import codex_home, hook_command, install_hook, remove_hook
+from .codex_hook import hook_command, install_hook, remove_hook
 from .codex_quota import fetch_quota
 from .computer_metrics import ComputerMetrics, DisplayPreferences
 from .device_registry import DeviceRegistry
 from .device_sessions import DeviceSessions
 from .image_display import prepare_photo, prepare_photo_with_fullscreen
-from .notifications import NotificationStore, deliver_next, notification_text, request_worker_yield
+from .notifications import NotificationStore, codex_home, deliver_next, notification_text, request_worker_yield
 from .notification_cache import NotificationCache
 from .notification_view import NotificationView
 from .pair_portal import PairPortal
