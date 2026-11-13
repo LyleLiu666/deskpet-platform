@@ -18,6 +18,13 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from .channel import AckTimeout, CommandRejected, DeviceError
 
 MAX_FILE_BYTES = 128 * 1024 * 1024
+BACKGROUND_RECEIPT_GRACE = 60
+
+
+def transfer_timeout(size, *, background):
+    # A busy board can write considerably more slowly than it reads HTTP.
+    bytes_per_second = (8 if background else 48) * 1024
+    return max(300, 60 + math.ceil(size / bytes_per_second))
 
 
 def validate_path(path):
@@ -119,7 +126,7 @@ def encrypt_file(source, destination, key, iv, path, size, crc):
     return digest.hexdigest()
 
 
-async def wait_for_fetch(channel, fields, resume):
+async def wait_for_fetch(channel, fields, resume, accepted):
     if resume:
         # This ID is independent of a control connection's epoch and sequence.
         status_fields = {"transfer_id": secrets.token_hex(16)}
@@ -152,11 +159,35 @@ async def wait_for_fetch(channel, fields, resume):
         interrupted = None
         if result.get("transfer_status") != "pending":
             return result
+        accepted.set()
         if not status_fields:
             status_fields = {"operation": result["seq"]}
         kind, request = "card_fetch_status", status_fields
         # The board continues writing between polls.
         await asyncio.sleep(1)
+
+
+async def wait_for_background_fetch(channel, fields, resume, relay, deadline):
+    loop = asyncio.get_running_loop()
+    if deadline <= loop.time():
+        raise DeviceError("card_transfer_unconfirmed")
+    accepted = asyncio.Event()
+    fetch = asyncio.create_task(wait_for_fetch(channel, fields, resume, accepted))
+    try:
+        _, pending = await asyncio.wait({fetch}, timeout=max(0, deadline - loop.time()))
+        if pending:
+            # Preserve both the authenticated receipt and its one-use HTTP
+            # connection while the board finishes an accepted transfer.
+            if accepted.is_set() and relay.served:
+                hard_deadline = deadline + BACKGROUND_RECEIPT_GRACE
+                await asyncio.wait({fetch}, timeout=max(0, hard_deadline - loop.time()))
+            if not fetch.done():
+                raise DeviceError("card_transfer_unconfirmed")
+        return fetch.result()
+    finally:
+        if not fetch.done():
+            fetch.cancel()
+        await asyncio.gather(fetch, return_exceptions=True)
 
 
 async def upload_file(channel, device_ip, key, path, source, *, expected_sha256=None, background=False, resume=None):
@@ -165,8 +196,7 @@ async def upload_file(channel, device_ip, key, path, source, *, expected_sha256=
         raise ValueError("设备配对凭据不可用。")
     source = Path(source)
     size, crc = await asyncio.to_thread(file_info, source)
-    # Allow for SPI card writes and readback while the role is still playing.
-    transfer_timeout = max(300, 60 + math.ceil(size / (48 * 1024)))
+    timeout = transfer_timeout(size, background=background)
     iv = secrets.token_bytes(12)
 
     async def resume_fetch(previous):
@@ -180,21 +210,25 @@ async def upload_file(channel, device_ip, key, path, source, *, expected_sha256=
         actual_sha256 = await asyncio.to_thread(encrypt_file, source, encrypted, key, iv, path, size, crc)
         if expected_sha256 is not None and not hmac.compare_digest(actual_sha256, expected_sha256):
             raise ValueError("角色文件自检查后已变化，请重新安装。")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
         # Each HTTP retry uses a fresh one-use address, as in the reference controller.
         for attempt in range(3):
             relay = CardRelay(device_ip, encrypted).start()
             try:
                 fields = dict(path=path, bytes=size, crc32=crc, iv=iv.hex(), url=relay.url)
                 if background:
-                    async with asyncio.timeout(transfer_timeout):
-                        result = await wait_for_fetch(channel, fields, resume_fetch if resume else None)
+                    result = await wait_for_background_fetch(
+                        channel, fields, resume_fetch if resume else None, relay, deadline
+                    )
                 else:
-                    result = await channel.send("card_fetch", timeout=transfer_timeout, **fields)
+                    result = await channel.send("card_fetch", timeout=timeout, **fields)
                 if result.get("stored") is not True or (not relay.served and result.get("unchanged") is not True):
                     raise RuntimeError("设备未确认储存卡文件已写入。")
                 break
             except CommandRejected as error:
-                if attempt == 2 or error.stage not in ("http_open", "http_headers", "http_body", "http_tag"):
+                if (attempt == 2 or (background and deadline <= loop.time()) or
+                        error.stage not in ("http_open", "http_headers", "http_body", "http_tag")):
                     raise
             finally:
                 await asyncio.to_thread(relay.close)

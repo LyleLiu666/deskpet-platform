@@ -6,14 +6,14 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 import urllib.error
 import urllib.request
 import zlib
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from deskpet_platform.card_upload import MAX_FILE_BYTES, upload_file
+from deskpet_platform.card_upload import BACKGROUND_RECEIPT_GRACE, MAX_FILE_BYTES, transfer_timeout, upload_file
 from deskpet_platform.channel import AckTimeout, Channel, CommandRejected
 from deskpet_platform.client import Client
 from deskpet_platform.mcp_server import BoardSession, CardFile
@@ -21,6 +21,104 @@ from deskpet_platform.pairing import DeviceConfig
 
 
 class CardUploadTests(unittest.IsolatedAsyncioTestCase):
+    def test_background_deadline_accounts_for_large_slow_writes(self):
+        for size, deadline in ((1024**2, 300), (8 * 1024**2, 1084), (MAX_FILE_BYTES, 16444)):
+            with self.subTest(size=size):
+                self.assertEqual(transfer_timeout(size, background=True), deadline)
+        self.assertEqual(transfer_timeout(MAX_FILE_BYTES, background=True) + BACKGROUND_RECEIPT_GRACE, 16504)
+
+    async def test_expired_background_budget_keeps_original_relay_and_never_starts_another_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "data.bin"
+            source.write_bytes(b"synthetic data")
+            for outcome in ("stored", "http_body", "unconfirmed", "unclaimed", "unacknowledged"):
+                with self.subTest(outcome=outcome):
+                    config = DeviceConfig("02:00:00:00:00:01", bytes(32))
+                    original = Client(config)
+                    original.link.peer_address = "127.0.0.1"
+                    original.channel.capabilities = {
+                        "card_transfer": 1, "card_fetch_async": 1, "card_fetch_receipt": 1,
+                    }
+                    original.channel.online = True
+                    session = BoardSession(Path(directory) / "device.json")
+                    session.client = original
+                    relay = SimpleNamespace(url="http://127.0.0.1/fixture", served=outcome != "unclaimed",
+                                            close=lambda: None)
+                    waiting = asyncio.Event()
+                    finish = asyncio.Event()
+                    cancelled = asyncio.Event()
+
+                    async def send(kind, **_fields):
+                        if kind == "card_fetch" and outcome != "unacknowledged":
+                            return {"transfer_status": "pending"}
+                        waiting.set()
+                        try:
+                            await finish.wait()
+                        except asyncio.CancelledError:
+                            cancelled.set()
+                            # Real Channel invalidates the connection when a
+                            # request is interrupted by cancellation.
+                            original.channel.online = False
+                            raise
+                        if outcome == "http_body":
+                            raise CommandRejected("card_transfer_failed", "http_body")
+                        return {"stored": True}
+
+                    original.channel.send = AsyncMock(side_effect=send)
+                    real_wait = asyncio.wait
+                    waits = []
+
+                    async def cross_deadline(tasks, *, timeout):
+                        [task] = tasks
+                        await asyncio.wait_for(waiting.wait(), 1)
+                        waits.append(timeout)
+                        self.assertFalse(relay.close.called or task.cancelled())
+                        if len(waits) == 1:
+                            return set(), tasks
+                        self.assertEqual(len(waits), 2)
+                        self.assertTrue(original.channel.online)
+                        if outcome in ("stored", "http_body"):
+                            finish.set()
+                            return await real_wait(tasks)
+                        return set(), tasks
+
+                    relay.close = Mock()
+                    original.close = AsyncMock()
+                    clock = Mock(side_effect=(0, 0, 0, .5, .5))
+                    upload_asyncio = Mock(wraps=asyncio, wait=AsyncMock(side_effect=cross_deadline), sleep=AsyncMock())
+                    upload_asyncio.get_running_loop.return_value = SimpleNamespace(time=clock)
+                    with patch("deskpet_platform.card_upload.CardRelay") as relay_factory, patch(
+                        "deskpet_platform.card_upload.asyncio", upload_asyncio
+                    ), patch.object(
+                        session, "open_wifi", AsyncMock()
+                    ) as reconnect, patch("deskpet_platform.card_upload.transfer_timeout", return_value=0.5), patch(
+                        "deskpet_platform.card_upload.BACKGROUND_RECEIPT_GRACE", 2
+                    ):
+                        # The clock crosses the nominal deadline in the fake
+                        # wait. The running task still has the same relay.
+                        relay_factory.return_value.start.return_value = relay
+                        result = await session.upload_files([CardFile(source=str(source), path="desk/data.bin")])
+                        relay_factory.assert_called_once()
+                    relay.close.assert_called_once()
+                    reconnect.assert_not_called()
+                    self.assertEqual(waits, [0.5] if outcome in ("unclaimed", "unacknowledged") else [0.5, 2])
+                    calls = original.channel.send.await_args_list
+                    self.assertEqual(calls[0].args, ("card_fetch",))
+                    if outcome == "unacknowledged":
+                        self.assertEqual(len(calls), 1)
+                    else:
+                        self.assertEqual(len(calls), 2)
+                        self.assertEqual(calls[1].args, ("card_fetch_status",))
+                        self.assertEqual(calls[1].kwargs, {"transfer_id": calls[0].kwargs["transfer_id"]})
+                    if outcome == "stored":
+                        self.assertEqual(result["status"], "completed")
+                    else:
+                        self.assertEqual(result["status"], "failed")
+                        reason = "device_error: card_transfer_failed (http_body)" if outcome == "http_body" \
+                            else "card_transfer_unconfirmed"
+                        self.assertEqual(result["failed"]["reason"], reason)
+                    self.assertEqual(cancelled.is_set(), outcome not in ("stored", "http_body"))
+
     async def test_board_side_handshake_expiration_reconnects_without_replaying_an_accepted_transfer(self):
         mac = "02:00:00:00:00:01"
 
