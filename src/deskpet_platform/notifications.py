@@ -45,7 +45,7 @@ class NotificationStore:
         self.path = Path(path)
         self.source = source
 
-    def _connect(self):
+    def _connect(self, *, timeout=2):
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -55,7 +55,7 @@ class NotificationStore:
             os.close(descriptor)
         if self.path.is_symlink() or self.path.stat().st_mode & 0o077:
             raise ValueError("notification_store_requires_private_permissions")
-        db = sqlite3.connect(self.path.resolve().as_uri(), uri=True, timeout=2)
+        db = sqlite3.connect(self.path.resolve().as_uri(), uri=True, timeout=timeout)
         try:
             db.execute("""CREATE TABLE IF NOT EXISTS notifications (
                 id INTEGER PRIMARY KEY, source TEXT NOT NULL, session TEXT NOT NULL, turn TEXT NOT NULL,
@@ -405,12 +405,16 @@ async def run_worker(config_path, *, client_factory=None, max_seconds=86400, pol
                             poll_interval=poll_interval, handoff_delay=handoff_delay))
             if not workers or all(task.done() for _, task in workers.values()):
                 return
+            idle_due = idle_since is not None and now - idle_since >= idle_seconds
+            # Take the version before syncing the per-board stores, so a
+            # committed event after those checks is visible at handoff.
+            through = await asyncio.to_thread(_inbox_version, inbox) if idle_due else None
             active = await asyncio.gather(*[asyncio.to_thread(_sync_active, store) for store, _ in workers.values()])
             if any(active):
                 idle_since = None
             elif idle_since is None:
                 idle_since = now
-            elif now - idle_since >= idle_seconds:
+            elif through is not None and _release_idle_dispatch(inbox, descriptor, through):
                 return
             await asyncio.sleep(poll_interval)
     finally:
@@ -420,6 +424,32 @@ async def run_worker(config_path, *, client_factory=None, max_seconds=86400, pol
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         os.close(descriptor)
+
+
+_INBOX_VERSION = "SELECT COALESCE(MAX(id),0) FROM notifications"
+
+
+def _inbox_version(inbox):
+    try:
+        with closing(inbox._connect()) as db:
+            return db.execute(_INBOX_VERSION).fetchone()[0]
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+
+
+def _release_idle_dispatch(inbox, descriptor, through):
+    try:
+        with closing(inbox._connect(timeout=0)) as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute(_INBOX_VERSION).fetchone()[0] != through:
+                return False
+            # The next hook starts its worker after committing. Release the
+            # dispatch lock before that commit is possible. The per-board
+            # locks remain held until each old connection has closed.
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return True
+    except (OSError, sqlite3.Error, ValueError):
+        return False
 
 
 def _sync_active(store):

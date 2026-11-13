@@ -167,6 +167,76 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
             await asyncio.gather(task,return_exceptions=True)
 
+    async def test_stop_arriving_during_dispatcher_shutdown_reaches_both_boards(self):
+        closing = asyncio.Event()
+        allow_close = asyncio.Event()
+
+        class ClosingBoard(NotificationBoard):
+            async def close(self):
+                closing.set()
+                await allow_close.wait()
+
+        boards = {FIRST.identity: ClosingBoard(FIRST), SECOND.identity: NotificationBoard(SECOND)}
+
+        def factory(config):
+            return Client(config, link_factory=boards[config.identity].link)
+
+        options = dict(client_factory=factory, poll_interval=.01, idle_seconds=.02, max_seconds=2)
+        previous = asyncio.create_task(run_worker(self.config, **options))
+        contender = None
+        try:
+            await asyncio.wait_for(closing.wait(), 1)
+            stop = {"hook_event_name": "Stop", "session_id": "test", "turn_id": "at-idle-exit"}
+            self.submit(stop).assert_called_once()
+            # The process launched by the hook reaches the real dispatch lock
+            # while the previous process is still shutting down its boards.
+            contender = asyncio.create_task(run_worker(self.config, **options))
+            second = boards[SECOND.identity]
+            await self.wait_for(lambda: second.snapshots and second.snapshots[-1]["results"] == 1, timeout=1.5)
+            self.assertFalse(previous.done())
+            self.assertEqual(boards[FIRST.identity].snapshots[-1]["results"], 0)
+            allow_close.set()
+            await self.wait_for(lambda: boards[FIRST.identity].snapshots[-1]["results"] == 1, timeout=1.5)
+            for store in (self.inbox, self.second):
+                self.assertEqual(len(store.list()), 1)
+        finally:
+            allow_close.set()
+            tasks = [task for task in (previous, contender) if task is not None]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_stop_between_idle_scan_and_unlock_stays_with_the_dispatcher(self):
+        from deskpet_platform import notifications
+
+        boards = {item.identity: NotificationBoard(item) for item in (FIRST, SECOND)}
+
+        def factory(config):
+            return Client(config, link_factory=boards[config.identity].link)
+
+        stop = {"hook_event_name": "Stop", "session_id": "test", "turn_id": "during-idle-scan"}
+        release = notifications._release_idle_dispatch
+        scanned = asyncio.Event()
+
+        def finish_idle_scan(*args):
+            # This hook commits after both inactivity checks. A contender
+            # would see the still-held lock and leave before we can unlock.
+            if not scanned.is_set():
+                self.submit(stop).assert_called_once()
+                scanned.set()
+            return release(*args)
+
+        with patch.object(notifications, "_release_idle_dispatch", side_effect=finish_idle_scan):
+            task = asyncio.create_task(run_worker(self.config, client_factory=factory, poll_interval=.01,
+                                                  idle_seconds=.02, max_seconds=2))
+            try:
+                await asyncio.wait_for(scanned.wait(), 1)
+                await self.wait_for(lambda: all(board.snapshots and board.snapshots[-1]["results"] == 1
+                                                    for board in boards.values()), timeout=1.5)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
     async def test_hook_installation_is_shared_by_all_manual_selections(self):
         path = self.root / "codex-profile/hooks.json"
         default_path = self.root / ".codex/hooks.json"
