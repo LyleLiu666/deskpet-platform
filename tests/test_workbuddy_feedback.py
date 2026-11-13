@@ -68,6 +68,27 @@ class WorkBuddyFeedbackTests(unittest.TestCase):
         self.assertEqual(self.store.home_summary()["response_count"], 0)
         self.assertNotIn(b"private prompt", self.store.path.read_bytes())
 
+    def test_sdk_pre_tool_with_complete_answers_does_not_open_a_pending_request(self):
+        questions = [{"question": "First private prompt"}, {"question": "Second private prompt"}]
+        event = {"hook_event_name": "PreToolUse", "session_id": "session", "tool_name": "AskUserQuestion",
+                 "tool_use_id": "call-1", "tool_input": {"questions": questions}}
+        answered = {**event, "tool_input": {"questions": questions,
+                    "answers": {"First private prompt": "One", "Second private prompt": "Two"}}}
+        partial = {**event, "tool_use_id": "call-2", "tool_input": {"questions": questions,
+                   "answers": {"First private prompt": "One", "Second private prompt": " "}}}
+        self.assertFalse(workbuddy_feedback.deliver(self.store, answered))
+        self.assertEqual(self.store.list(), [])
+        self.assertTrue(workbuddy_feedback.deliver(self.store, partial))
+        self.assertTrue(workbuddy_feedback.deliver(self.store, event))
+        self.assertEqual(self.store.home_summary()["response_count"], 1)
+        self.assertEqual(sum(row["resolved"] for row in self.store.list()), 1)
+
+        self.assertTrue(workbuddy_feedback.deliver(self.store, {**answered, "tool_use_id": "call-2"}))
+        self.assertEqual(self.store.home_summary()["response_count"], 0)
+        self.assertTrue(all(row["resolved"] for row in self.store.list()))
+        self.assertFalse(workbuddy_feedback.deliver(self.store, {**answered, "hook_event_name": "PostToolUse"}))
+        self.assertNotIn(b"private prompt", self.store.path.read_bytes())
+
     def test_permission_reminder_uses_the_explicit_generation_and_stop(self):
         event = {"hook_event_name": "Notification", "notification_type": "permission_prompt",
                  "session_id": "session-a", "generation_id": "generation", "message": "private prompt"}

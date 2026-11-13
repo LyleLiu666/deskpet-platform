@@ -60,6 +60,19 @@ def _latest_completed_turn(path, projects):
     return None
 
 
+def _all_questions_answered(questions, answers):
+    if not isinstance(answers, dict):
+        return False
+    for question in questions:
+        prompt = question.get("question") if isinstance(question, dict) else None
+        if not isinstance(prompt, str) or not prompt.strip():
+            return False
+        answer = answers.get(prompt)
+        if not isinstance(answer, str) or not answer.strip():
+            return False
+    return True
+
+
 def deliver(store, event, *, edition="workbuddy"):
     if not isinstance(event, dict):
         return False
@@ -98,8 +111,13 @@ def deliver(store, event, *, edition="workbuddy"):
     identity = "question-" + hashlib.sha256(use.encode()).hexdigest()[:40]
     if kind == "PreToolUse":
         details = event.get("tool_input")
-        if isinstance(details, dict) and isinstance(details.get("questions"), list) and details["questions"]:
-            return bool(store.add_agent_event("workbuddy", session, identity, "response", title))
+        questions = details.get("questions") if isinstance(details, dict) else None
+        if not isinstance(questions, list) or not questions:
+            return False
+        # The SDK can deliver PreToolUse with the user's answers already attached.
+        if _all_questions_answered(questions, details.get("answers")):
+            return bool(store.resolve_agent_event("workbuddy", session, identity))
+        return bool(store.add_agent_event("workbuddy", session, identity, "response", title))
     if kind in ("PostToolUse", "PostToolUseFailure"):
         return bool(store.resolve_agent_event("workbuddy", session, identity))
     return False
