@@ -206,6 +206,32 @@ class Client:
             keys = ("transport", "uptime_ms", "reset_reason", "wifi_connected", "ssid", "rssi", "saved_networks",
                     "network_switch")
             result = {key: reply[key] for key in keys if key in reply}
+            if self.channel.capabilities.get("network_profiles_hex") == 1:
+                if "ssid_hex" in reply:
+                    result["ssid"] = self._network_name(reply["ssid_hex"])
+                if "network_switch" in result:
+                    switch = dict(result["network_switch"])
+                    if "target_hex" in switch:
+                        switch["target"] = self._network_name(switch.pop("target_hex"))
+                    result["network_switch"] = switch
+                count = reply.get("saved_count")
+                if type(count) is not int or not 0 <= count <= 16:
+                    raise DeviceError("invalid_network_profiles_response")
+                names = []
+                seen = set()
+                while len(names) < count:
+                    page = await self.channel.send("network_profiles", offset=len(names))
+                    values = page.get("saved_networks_hex")
+                    end = page.get("next_offset")
+                    if (page.get("saved_count") != count or not isinstance(values, list) or
+                            not 1 <= len(values) <= 8 or type(end) is not int or
+                            end != len(names) + len(values) or end > count):
+                        raise DeviceError("invalid_network_profiles_response")
+                    names.extend(self._network_name(value) for value in values)
+                    seen.update(values)
+                    if len(seen) != len(names):
+                        raise DeviceError("invalid_network_profiles_response")
+                result["saved_networks"] = names
             if include_card:
                 try:
                     card = await self.channel.send("card_status")
@@ -217,6 +243,13 @@ class Client:
                         raise
                     result["card"] = {"status": "busy"}
             return result
+
+    @staticmethod
+    def _network_name(value):
+        if (not isinstance(value, str) or not 2 <= len(value) <= 64 or len(value) % 2 or
+                any(char not in "0123456789abcdef" for char in value)):
+            raise DeviceError("invalid_network_profiles_response")
+        return bytes.fromhex(value).decode("utf-8", errors="replace")
 
     async def select_network(self, ssid):
         if self.channel.capabilities.get("device_diagnostics") != 1:

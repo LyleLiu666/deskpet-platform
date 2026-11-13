@@ -467,6 +467,41 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
             client.channel.card = {**client.channel.card, "mount_count": 2}
             self.assertEqual((await session.diagnostics(True))["card"]["mount_count"], 2)
 
+    async def test_display_diagnostics_reads_all_bounded_network_pages(self):
+        names = ["网络一", 'Quote " and \\', "Control \u0001", *(f"Fixture {i}" for i in range(13))]
+        encoded = [name.encode().hex() for name in names]
+
+        class DisplayChannel:
+            capabilities = {"device_diagnostics": 1, "network_profiles_hex": 1}
+
+            def __init__(self):
+                self.offsets = []
+                self.duplicate = False
+
+            async def send(self, command, **fields):
+                if command == "network_status":
+                    return {"wifi_connected": True, "ssid_hex": encoded[0], "saved_count": 16,
+                            "network_switch": {"operation": 3, "target_hex": encoded[1]}}
+                if command != "network_profiles":
+                    raise AssertionError(command)
+                offset = fields["offset"]
+                self.offsets.append(offset)
+                page = encoded[offset:offset + 8]
+                if self.duplicate and offset:
+                    page = [encoded[0], *page[1:]]
+                return {"saved_networks_hex": page, "saved_count": 16, "next_offset": offset + len(page)}
+
+        client = Client(DeviceConfig(DEVICE, KEY))
+        client.channel = DisplayChannel()
+        result = await client.diagnostics(include_card=False)
+        self.assertEqual(client.channel.offsets, [0, 8])
+        self.assertEqual(result["saved_networks"], names)
+        self.assertEqual(result["ssid"], names[0])
+        self.assertEqual(result["network_switch"], {"operation": 3, "target": names[1]})
+        client.channel.duplicate = True
+        with self.assertRaisesRegex(DeviceError, "invalid_network_profiles_response"):
+            await client.diagnostics(include_card=False)
+
     async def test_render_metrics_reports_written_frames_separately_from_processed_frames(self):
         class MetricsClient:
             class Channel:

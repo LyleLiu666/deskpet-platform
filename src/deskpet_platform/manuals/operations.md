@@ -45,7 +45,7 @@ tool_timeout_sec = 1200
 - MCP 启动命令可在 `mcp` 后增加 `--role-dir <角色素材目录的绝对路径>`。素材目录由你在电脑上选择。`desk_list_role_sources` 查询这个目录里的可安装角色；也可向该工具传入其他角色素材目录的绝对路径。
 - 用 `desk_find_usb_device` 读取候选串口上的小板 MAC 和持久 UUID。传入 `ports`（macOS 可用 `ls /dev/cu.usbserial-*` 查看路径），并用 `device_id` 指定要找的小板。查询无需配对，Wi-Fi 正在使用时也可读取。老固件可能没有这条查询命令，已配对设备的 UUID 仍可从 `desk_list_devices` 查看。
 - MCP 启动时可用 `--usb-port` 指定已确认的备用串口，未接 USB 时仍可启动并使用 Wi-Fi。Wi-Fi 连不上或握手超时时会尝试 USB，可继续控制小板和传卡。备用串口在启动后才出现或被替换时，电脑先比对配对记录中的 MAC 和 UUID，再接入 USB。旧配对尚无 UUID 时，可先让支持 UUID 的小板经 Wi-Fi 完成一次认证或重新配对。若串口路径改变，先用 `desk_find_usb_device` 找到新路径。无线连通验证通过且当前动作和传输结束后，MCP 会自动切回 Wi-Fi，并保存新地址供下次连接。`desk_status` 可查看当前连接方式。
-- 用 `desk_select_network` 切换已保存的 Wi-Fi。切换会短暂断开无线控制。重连后用 `desk_diagnostics` 查看本次操作的 `network_switch`、当前网络和卡空间。切换成功后，目标网络成为重启后的首选。目标连不上时，小屏会优先恢复原连接。
+- 用 `desk_select_network` 按网络名称切换已保存的 Wi-Fi。切换会短暂断开无线控制。重连后用 `desk_diagnostics` 核对 `network_switch` 的操作编号及结果，并查看当前网络和卡空间。切换成功后，目标网络成为重启后的首选。目标连不上时，小屏会尝试恢复原连接。网络名称须为有效 UTF‑8，旧固件不支持该命令时可从小屏的 Wi-Fi 设置切换。
 - 储存卡恢复连接后，重新打开角色图鉴或相册以探测介质并在需要时重新挂载。返回角色页会重新加载上次保存的角色。`desk_diagnostics` 的 `card.mount_count` 是本次开机以来成功挂载的次数。
 - `desk_set_view` 可打开角色、应用菜单、时钟、角色图鉴、相册、天气、消息或设置。可把角色、应用菜单、时钟或相册设为默认首页。相册作为默认首页时，开机自动轮播已有照片。
 - `desk_role_preview` 可以试播已安装的角色。用 `start` 并传入角色标识开始，用 `status` 查进度，`cancel` 返回图鉴，`use` 启用正在试播的角色。阶段 0 为待机，1 至 5 为对应档位，6 为爆气。试播播完会自动返回图鉴并恢复原角色。
