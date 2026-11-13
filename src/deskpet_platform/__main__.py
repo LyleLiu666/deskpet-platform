@@ -54,6 +54,9 @@ def main():
     pair.add_argument("--add-device", action="store_true", help="Add another board without replacing an existing one")
     status = commands.add_parser("status", help="Check a paired board; run without an MCP owner")
     status.add_argument("--device-id", help="Device ID from desk_list_devices")
+    find_usb = commands.add_parser("find-usb", help="Read UUID and MAC from explicitly selected USB ports")
+    find_usb.add_argument("ports", nargs="+", metavar="PORT")
+    find_usb.add_argument("--device-id", help="Only report a board with this persistent UUID")
     mcp = commands.add_parser("mcp", help="Start the local stdio MCP")
     mcp.add_argument(
         "--role-dir", type=Path, help="Optional absolute path to local role resources")
@@ -109,9 +112,14 @@ def main():
                       token_probe=args.token_probe, no_token_probe=args.no_token_probe).run(transport="stdio")
         return
     try:
-        if args.command == "pair" and not sys.stdin.isatty():
-            parser.exit(2, "请在本机交互式终端输入配对码。\n")
-        print(json.dumps(asyncio.run(interact(args)), ensure_ascii=False))
+        if args.command == "find-usb":
+            from .usb_link import find_usb_devices
+            result = find_usb_devices(args.ports, args.device_id)
+        else:
+            if args.command == "pair" and not sys.stdin.isatty():
+                parser.exit(2, "请在本机交互式终端输入配对码。\n")
+            result = asyncio.run(interact(args))
+        print(json.dumps(result, ensure_ascii=False))
     except FileNotFoundError:
         parser.exit(2, "尚未配对，请运行 deskpet-platform pair。\n")
     except (OSError, RuntimeError, ValueError, TimeoutError) as error:

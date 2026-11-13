@@ -1,7 +1,7 @@
 """Local serial transport for the authenticated-by-physical-access board session."""
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import fcntl
 import os
 from pathlib import Path
@@ -100,6 +100,24 @@ def read_usb_identity(port, *, serial_factory=default_serial_factory):
         raise TimeoutError("USB 小板未返回 UUID，请检查串口和固件版本。")
     finally:
         device.close()
+
+
+def find_usb_devices(ports, device_id=None):
+    """Probe only the explicitly selected ports without acquiring control."""
+    if not 1 <= len(ports) <= 8 or len(set(ports)) != len(ports):
+        raise ValueError("请指定 1 至 8 个不同的小板 USB 串口。")
+    if device_id is not None and not valid_device_uuid(device_id):
+        raise ValueError("请提供有效的小板 UUID。")
+    devices, unavailable = [], []
+    for port in ports:
+        try:
+            observed = read_usb_identity(port)
+        except (OSError, ValueError) as error:
+            unavailable.append({"port": port, "reason": str(error)})
+            continue
+        if device_id is None or observed.device_id == device_id:
+            devices.append({"port": port, **asdict(observed)})
+    return {"devices": devices, "unavailable": unavailable}
 
 
 class UsbLink:

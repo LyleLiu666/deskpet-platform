@@ -77,7 +77,7 @@ class DeviceSessionsTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             server = create_server(Path(directory) / "device.json")
             paths = ["/dev/cu.first", "/dev/cu.second"]
-            with patch("deskpet_platform.mcp_server.read_usb_identity") as read:
+            with patch("deskpet_platform.usb_link.read_usb_identity") as read:
                 read.side_effect = [UsbIdentity(B.identity, B.device_id), UsbIdentity(A.identity, A.device_id)]
                 result = await server.call_tool("desk_find_usb_device", {"ports": paths, "device_id": A.device_id})
             self.assertEqual(result[1], {"devices": [{"port": paths[1], "identity": A.identity,

@@ -24,8 +24,9 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
    本机 stdio MCP，参数为 mcp，保留我已有的 MCP 配置。使用 Codex 时，
    按操作手册设置 DeskPet 的写卡等待时间。
 2. 先用 desk_list_devices 查看已配对设备。已有这台小板时复用配对；
-   添加另一台时使用 add_device=true。通过 USB 配对前确认串口和小板的
-   MAC。已有本机私有 Wi-Fi 凭据文件时可用 desk_pair_usb 同时配网。
+   添加另一台时使用 add_device=true。通过 USB 配对前，用已安装的
+   deskpet-platform find-usb 查询明确指定的候选串口，核对小板的 UUID
+   和 MAC。已有本机私有 Wi-Fi 凭据文件时可用 desk_pair_usb 同时配网。
    如果这台小板已经配对，传入列表里对应的 device_id。
    需要手动配网时，请让我用手机扫小板上的两个配网码，在手机上输入
    Wi-Fi 密码。小板联网后，用 desk_pair_begin 打开电脑配对页，请我
