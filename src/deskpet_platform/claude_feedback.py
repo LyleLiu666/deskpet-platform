@@ -7,38 +7,46 @@ import time
 
 
 TOOL = "AskUserQuestion"
-MATCHERS = {"Stop": None, "PreToolUse": TOOL, "PostToolUse": TOOL, "PostToolUseFailure": TOOL}
+MATCHERS = {"Stop": None, "PreToolUse": TOOL, "PostToolUse": TOOL, "PostToolUseFailure": TOOL,
+            "UserPromptSubmit": None}
 
 
 def settings_path():
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser() / "settings.json"
 
 
-def _turn_id(event):
-    prompt_id = event.get("prompt_id")
-    if isinstance(prompt_id, str) and 0 < len(prompt_id) <= 120 and prompt_id.isprintable():
-        return "prompt-" + prompt_id
+def _transcript_entries(event):
     path_value = event.get("transcript_path")
     if not isinstance(path_value, str) or not path_value:
-        return None
-    path = Path(path_value).expanduser().resolve()
-    projects = (settings_path().parent / "projects").resolve()
-    if path.suffix != ".jsonl" or not path.is_relative_to(projects) or not path.is_file():
-        return None
-    # Earlier Claude Code versions omit a turn ID. Read a bounded transcript
-    # tail to locate the last assistant UUID. Conversation text stays local.
-    with path.open("rb") as stream:
-        offset = max(0, stream.seek(0, os.SEEK_END) - 256 * 1024)
-        stream.seek(offset)
-        data = stream.read(256 * 1024)
-    lines = data.splitlines()[bool(offset):]
+        return
+    try:
+        path = Path(path_value).expanduser().resolve()
+        projects = (settings_path().parent / "projects").resolve()
+        if path.suffix != ".jsonl" or not path.is_relative_to(projects) or not path.is_file():
+            return
+        with path.open("rb") as stream:
+            limit = 256 * 1024
+            offset = max(0, stream.seek(0, os.SEEK_END) - limit)
+            stream.seek(offset)
+            lines = stream.read(limit).splitlines()[bool(offset):]
+    except (OSError, ValueError, RuntimeError):
+        return
     for line in reversed(lines):
         try:
             entry = json.loads(line)
         except (ValueError, UnicodeError):
             continue
-        if not isinstance(entry, dict) or entry.get("sessionId") != event["session_id"] or entry.get("isSidechain"):
-            continue
+        if isinstance(entry, dict) and entry.get("sessionId") == event["session_id"] and not entry.get("isSidechain"):
+            yield entry
+
+
+def _turn_id(event):
+    prompt_id = event.get("prompt_id")
+    if isinstance(prompt_id, str) and 0 < len(prompt_id) <= 120 and prompt_id.isprintable():
+        return "prompt-" + prompt_id
+    # Older Claude Code versions omit a turn ID. The assistant UUID is stable
+    # across duplicate deliveries of the same Stop.
+    for entry in _transcript_entries(event):
         if entry.get("type") == "user":
             message = entry.get("message")
             content = message.get("content") if isinstance(message, dict) else None
@@ -52,6 +60,33 @@ def _turn_id(event):
     return None
 
 
+def _question_id(use):
+    if isinstance(use, str) and 0 < len(use) <= 128 and use.isprintable():
+        return "question-" + hashlib.sha256(use.encode()).hexdigest()[:40]
+    return None
+
+
+def _settle_dismissed_questions(store, event):
+    # Claude Code 2.1.281 records Escape as a rejected tool result without
+    # firing PostToolUse or PostToolUseFailure. Inspect only native result IDs
+    # when the next hook arrives. Prompt and result text stay out of the inbox.
+    dismissed = set()
+    for entry in _transcript_entries(event):
+        if entry.get("type") != "user" or entry.get("toolDenialKind") != "user-rejected":
+            continue
+        message = entry.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error") is True:
+                identity = _question_id(block.get("tool_use_id"))
+                if identity:
+                    dismissed.add(identity)
+    return bool(dismissed and store.resolve_agent_events(
+        "claude_code", event["session_id"], dismissed, remember_missing=False))
+
+
 def deliver(store, event):
     if not isinstance(event, dict):
         return False
@@ -62,9 +97,12 @@ def deliver(store, event):
     title = Path(cwd).name if isinstance(cwd, str) else ""
     title = title if title.strip() and title.isprintable() else "Claude Code"
     kind = event.get("hook_event_name")
+    if kind == "UserPromptSubmit":
+        return _settle_dismissed_questions(store, event)
     if kind == "Stop":
         if event.get("stop_hook_active") is True:
             return False
+        settled = _settle_dismissed_questions(store, event)
         identity = None
         for attempt in range(5):
             if attempt:
@@ -72,13 +110,13 @@ def deliver(store, event):
             identity = _turn_id(event)
             if identity:
                 break
-        return bool(identity and store.add_agent_event("claude_code", session, identity, "completed", title))
+        completed = identity and store.add_agent_event("claude_code", session, identity, "completed", title)
+        return bool(completed or settled)
     if event.get("tool_name") != TOOL:
         return False
-    use = event.get("tool_use_id")
-    if not isinstance(use, str) or not 0 < len(use) <= 128 or not use.isprintable():
+    identity = _question_id(event.get("tool_use_id"))
+    if identity is None:
         return False
-    identity = "question-" + hashlib.sha256(use.encode()).hexdigest()[:40]
     if kind == "PreToolUse":
         details = event.get("tool_input")
         if isinstance(details, dict) and isinstance(details.get("questions"), list) and details["questions"]:

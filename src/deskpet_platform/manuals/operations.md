@@ -74,7 +74,7 @@ tool_timeout_sec = 1200
 - `desk_delete_resource` 可删除 `roles/<角色标识>` 对应的完整角色、`photos/<照片标识>` 对应的照片及缩略图，或 `desk/` 下的单个文件。删除当前角色或试播前保存的角色前，先切换到其他角色。
 - 每种 Agent 在电脑上启用一次，提醒会发给这套配置中所有已配对的小屏。离线设备重新连接后会补收。每台小屏各自保存投递与已读状态。在 Agent 里答复后，各设备都清除该条待应答提示。调亮度、切换角色和查看单台设备的提醒仍按设备 ID 选择。
 - 用 `desk_enable_codex_notifications` 启用 Codex 提醒，再到 Codex 的 `/hooks` 或设置中的 Hooks 审核并信任新增条目。工具会返回写入的 `hooks.json` 路径。为 MCP 设置 `CODEX_HOME` 后，启用和停用操作都使用该目录。小屏可通过 Wi-Fi 连接时，关闭 MCP 后也可由本机后台进程投递。`desk_list_notifications` 和 `desk_mark_notification_seen` 管理小屏自己的提醒记录。`desk_disable_codex_notifications` 移除本程序的 hook，保留已有提醒。[Codex Hooks 说明](https://developers.openai.com/codex/hooks)
-- 用 `desk_set_claude_notifications` 启用或关闭 Claude Code 提醒。完成提醒已通过真实 Claude Code 2.1.32 的隔离会话验证。结构化提问及处理结果已通过样本测试。[Claude Code Hooks 说明](https://code.claude.com/docs/en/hooks)
+- 用 `desk_set_claude_notifications` 启用或关闭 Claude Code 提醒。已启用旧版提醒的用户可再次启用以更新钩子。Claude Code 2.1.281 的隔离会话验证了完成、提问和答复。按 Esc 取消的问题会在下次发送消息或完成一轮时清除。[Claude Code Hooks 说明](https://code.claude.com/docs/en/hooks)
 - 用 `desk_set_antigravity_notifications` 启用或关闭 Antigravity 的完成和提问提醒。已启用旧版提醒的用户可再次启用以更新钩子。Antigravity CLI 1.5.7 已通过真实完成和提问钩子测试。桌面应用和授权弹窗仍待验证。[Antigravity Hooks 说明](https://antigravity.google/docs/hooks)
 - 用 `desk_set_opencode_notifications` 启用或关闭 OpenCode 完成、提问和授权提醒。启用后重启 OpenCode。OpenCode 1.18.25 的隔离实例已验证完成、提问、答复和拒绝授权。实机验证拒绝授权只清除对应请求。日常桌面配置仍待验收。[OpenCode 插件配置](https://opencode.ai/docs/plugins/)
 - 用 `desk_set_workbuddy_notifications` 启用或关闭 WorkBuddy 的完成、提问和授权提醒。WorkBuddy 使用默认的 `workbuddy`，WorkBuddy AI 使用 `workbuddy_ai`。启用后重启相应应用。提问按请求编号清除。授权按会话轮次合并，并在该轮结束时清除。两版内置 CLI 已通过完成提醒测试，WorkBuddy 5.1.5 另通过授权提示和拒绝后清除的实机测试。桌面应用及 WorkBuddy AI 授权仍待验收。

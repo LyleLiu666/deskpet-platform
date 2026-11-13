@@ -48,6 +48,35 @@ class ClaudeFeedbackTests(unittest.TestCase):
                                                             "hook_event_name": "PostToolUseFailure"}))
         self.assertEqual(self.store.home_summary()["response_count"], 0)
 
+    def test_native_dismissal_settles_only_an_existing_request_in_that_session(self):
+        event = {"hook_event_name": "PreToolUse", "session_id": "session", "tool_name": "AskUserQuestion",
+                 "tool_use_id": "cancelled", "tool_input": {"questions": [{"question": "fixture"}]}}
+        for request in (event, {**event, "tool_use_id": "still-pending"}, {**event, "session_id": "other"}):
+            self.assertTrue(claude_feedback.deliver(self.store, request))
+        transcript = self.root / "claude/projects/project/session.jsonl"
+        transcript.parent.mkdir(parents=True)
+
+        def rejection(tool_use_id, **fields):
+            return {"type": "user", "sessionId": "session", "toolDenialKind": "user-rejected",
+                    "message": {"content": [{"type": "tool_result", "is_error": True,
+                                             "tool_use_id": tool_use_id}]}, **fields}
+
+        transcript.write_text("\n".join(json.dumps(entry) for entry in (
+            rejection("cancelled"), rejection("still-pending", isSidechain=True), rejection("unseen"),
+        )))
+        followup = {"hook_event_name": "UserPromptSubmit", "session_id": "session",
+                    "transcript_path": str(transcript)}
+        self.assertTrue(claude_feedback.deliver(self.store, followup))
+        self.assertFalse(claude_feedback.deliver(self.store, followup))
+        self.assertEqual(self.store.home_summary()["response_count"], 2)
+        self.assertTrue(claude_feedback.deliver(self.store, {**event, "tool_use_id": "unseen"}))
+        self.assertEqual(self.store.home_summary()["response_count"], 3)
+
+        stop = {**followup, "hook_event_name": "Stop", "prompt_id": "next-turn"}
+        self.assertTrue(claude_feedback.deliver(self.store, stop))
+        self.assertEqual(self.store.home_summary()["response_count"], 2)
+        self.assertEqual(sum(row["category"] == "completed" for row in self.store.list()), 1)
+
     def test_installer_preserves_unrelated_claude_settings(self):
         path = claude_feedback.settings_path()
         path.parent.mkdir(parents=True)
@@ -62,6 +91,7 @@ class ClaudeFeedbackTests(unittest.TestCase):
         self.assertEqual(path.stat().st_mode & 0o777, 0o644)
         installed = json.loads(path.read_text())
         self.assertEqual(installed["hooks"]["PreToolUse"][0]["matcher"], "AskUserQuestion")
+        self.assertEqual(installed["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"], command)
         self.assertEqual(installed["hooks"]["Stop"][0], existing["hooks"]["Stop"][0])
         self.assertTrue(codex_hook.remove_hook(path, command, **options))
         self.assertEqual(json.loads(path.read_text()), existing)

@@ -300,12 +300,13 @@ class NotificationStore:
         """Remember a response even if its opening event is delivered later."""
         return self.resolve_agent_events(source, session, (event_id,))
 
-    def resolve_agent_events(self, source, session, event_ids):
+    def resolve_agent_events(self, source, session, event_ids, *, remember_missing=True):
         """Close a tool's settled requests in a single inbox update."""
         with closing(self._connect()) as db, db:
             now = time.time()
             events = [(source, session, event_id, now) for event_id in event_ids]
-            db.executemany("INSERT OR IGNORE INTO notification_resolutions VALUES (?,?,?,?)", events)
+            if remember_missing:
+                db.executemany("INSERT OR IGNORE INTO notification_resolutions VALUES (?,?,?,?)", events)
             return db.executemany("""UPDATE notifications SET resolved=? WHERE source=? AND session=? AND turn=?
                 AND category='response' AND resolved IS NULL""",
                                   ((now, source, session, event_id) for source, session, event_id, now in events)).rowcount
