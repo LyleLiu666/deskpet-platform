@@ -61,6 +61,51 @@ class CodexFeedbackTests(unittest.TestCase):
         codex_feedback.deliver(self.store, self.event)
         self.assertEqual(self.store.home_summary()["response_sources"][0]["count"], 1)
 
+    def test_cli_reply_closes_exact_questions_and_keeps_payload_private(self):
+        questions = [{"id": "first", "title": "private opening"}, {"id": "second"}]
+        event = {**self.event, "tool_name": codex_feedback.CLI_TOOL, "tool_input": {"questions": questions}}
+        post = {**event, "hook_event_name": "PostToolUse"}
+        payload = {"answers": {"second": {"answers": ["private answer"]}}}
+        self.assertEqual(codex_feedback.cli_question_outcomes(questions, json.dumps(payload)),
+                         ("cancelled", "answered"))
+        self.assertEqual(codex_feedback.cli_question_outcomes(questions, {"answers": {}}),
+                         ("cancelled", "cancelled"))
+        self.assertEqual(codex_feedback.cli_question_outcomes(questions, {**payload, "accepted": False}),
+                         ("cancelled", "cancelled"))
+        self.assertEqual(codex_feedback.deliver(self.store, event), 2)
+        self.assertEqual(codex_feedback.deliver(self.store, {**post, "tool_response": "broken"}), 0)
+        self.assertEqual(codex_feedback.deliver(self.store, {
+            **post, "tool_response": {"answers": {"unrelated": {"answers": ["private answer"]}}},
+        }), 0)
+        self.assertEqual(self.store.home_summary()["response_count"], 2)
+        self.assertEqual(codex_feedback.deliver(self.store, {**post, "tool_response": payload}), 2)
+        self.assertEqual(codex_feedback.deliver(self.store, {**post, "tool_response": payload}), 0)
+        self.assertEqual(self.store.home_summary()["response_count"], 0)
+        self.assertNotIn(b"private", self.store.path.read_bytes())
+
+    def test_install_appends_cli_groups_without_rewriting_existing_async_hooks(self):
+        path = Path(self.temp.name) / "hooks.json"
+        command = codex_hook.hook_command(path.with_name("device.json"))
+        codex_hook.install_hook(path, command, matchers=dict(codex_hook.EVENT_MATCHERS))
+        previous = json.loads(path.read_text())
+        unrelated = {"matcher": "*", "hooks": [{"type": "command", "command": "unrelated"}]}
+        previous["hooks"]["PostToolUse"].append(unrelated)
+        path.write_text(json.dumps(previous))
+        self.assertTrue(codex_hook.install_hook(path, command))
+        self.assertFalse(codex_hook.install_hook(path, command))
+        upgraded = json.loads(path.read_text())
+        for event, matcher in codex_hook.CLI_EVENT_MATCHERS.items():
+            groups = upgraded["hooks"][event]
+            self.assertEqual(groups[:-1], previous["hooks"][event])
+            self.assertEqual(groups[-1], {"matcher": matcher, "hooks": [
+                {"type": "command", "command": command, "timeout": 2},
+            ]})
+        self.assertTrue(codex_hook.remove_hook(path, command))
+        self.assertFalse(codex_hook.remove_hook(path, command))
+        self.assertEqual(json.loads(path.read_text())["hooks"], {
+            "PostToolUse": [{**previous["hooks"]["PostToolUse"][0], "hooks": []}, unrelated],
+        })
+
     def test_configured_hooks_receive_questions_and_clear_them_on_answer(self):
         hooks_path = self.store.path.parent / "hooks.json"
         config_path = self.store.path.parent / "device.json"

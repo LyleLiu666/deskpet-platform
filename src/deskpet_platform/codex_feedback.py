@@ -6,6 +6,7 @@ from .notifications import session_title
 
 
 TOOL = "request_user_input_async"
+CLI_TOOL = "request_user_input"
 OPEN = "<send_user_message_question_reply>"
 CLOSE = "</send_user_message_question_reply>"
 
@@ -48,6 +49,40 @@ def answers(prompt):
     return [question_id(call, index) for call, index in answer_references(prompt)]
 
 
+def cli_question_outcomes(questions, response):
+    """Return exact question-index resolutions from Codex's synchronous tool."""
+    if not isinstance(questions, list) or not 1 <= len(questions) <= 3 or not all(isinstance(q, dict) for q in questions):
+        return ()
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except ValueError:
+            return ()
+    if not isinstance(response, dict):
+        return ()
+    if response.get("accepted") is False:
+        return ("cancelled",) * len(questions)
+    answers = response.get("answers")
+    if not isinstance(answers, dict):
+        return ()
+    identifiers = [question.get("id") for question in questions]
+    if not all(isinstance(identity, str) and identity for identity in identifiers):
+        return ()
+    if len(set(identifiers)) != len(identifiers) or answers.keys() - set(identifiers):
+        return ()
+    outcomes = []
+    for identity in identifiers:
+        if identity not in answers:
+            outcomes.append("cancelled")
+            continue
+        item = answers[identity]
+        values = item.get("answers") if isinstance(item, dict) else None
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            return ()
+        outcomes.append("answered" if any(value.strip() for value in values) else "cancelled")
+    return tuple(outcomes)
+
+
 def deliver(store, event):
     if not isinstance(event, dict):
         raise ValueError("invalid_feedback_event")
@@ -57,7 +92,7 @@ def deliver(store, event):
     kind = event.get("hook_event_name")
     if kind == "UserPromptSubmit":
         return sum(store.resolve_agent_event("codex", session, identity) for identity in answers(event.get("prompt")))
-    if kind not in ("PreToolUse", "PostToolUse") or event.get("tool_name") != TOOL:
+    if kind not in ("PreToolUse", "PostToolUse") or event.get("tool_name") not in (TOOL, CLI_TOOL):
         return 0
     details = event.get("tool_input")
     questions = details.get("questions") if isinstance(details, dict) else None
@@ -66,6 +101,11 @@ def deliver(store, event):
     identities = [question_id(event.get("tool_use_id"), index) for index in range(len(questions))]
     if kind == "PostToolUse":
         response = event.get("tool_response")
+        if event["tool_name"] == CLI_TOOL:
+            if cli_question_outcomes(questions, response):
+                # The device inbox only records whether an item remains pending.
+                return store.resolve_agent_events("codex", session, identities)
+            return 0
         if isinstance(response, str):
             try:
                 response = json.loads(response)

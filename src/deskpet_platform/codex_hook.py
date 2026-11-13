@@ -19,6 +19,7 @@ EVENT_MATCHERS = {
     "PostToolUse": codex_feedback.TOOL,
     "UserPromptSubmit": None,
 }
+CLI_EVENT_MATCHERS = {event: f"^{codex_feedback.CLI_TOOL}$" for event in ("PreToolUse", "PostToolUse")}
 
 
 def hook_command(config, hook="codex-hook", *arguments):
@@ -75,7 +76,10 @@ def install_hook(path, command, *, matchers=EVENT_MATCHERS, private=True):
     config = _load(path, private=private)
     hooks = config.setdefault("hooks", {})
     added = False
-    for event, matcher in matchers.items():
+    entries = tuple(matchers.items())
+    if matchers is EVENT_MATCHERS:
+        entries += tuple(CLI_EVENT_MATCHERS.items())
+    for event, matcher in entries:
         existing = hooks.setdefault(event, [])
         _validate_groups(existing, event)
         if any(group.get("matcher") == matcher and any(_matches(hook, command) for hook in group["hooks"])
@@ -127,7 +131,9 @@ def remove_hook(path, command, *, matchers=EVENT_MATCHERS, private=True):
 
 def _remove_groups(existing, command):
     updated, removed = [], False
-    for index, group in enumerate(existing):
+    # Remove matching suffix groups entirely, but reserve any slot before
+    # a surviving group so its Codex trust key keeps the same index.
+    for group in reversed(existing):
         remaining, group_removed = [], False
         for hook_index, hook in enumerate(group["hooks"]):
             if _matches(hook, command):
@@ -139,9 +145,9 @@ def _remove_groups(existing, command):
                 remaining.append(hook)
         if not group_removed:
             updated.append(group)
-        elif remaining or index < len(existing) - 1:
+        elif remaining or updated:
             updated.append({**group, "hooks": remaining})
-    return updated, removed
+    return list(reversed(updated)), removed
 
 
 def receive_event(config, event, *, handle=None):
