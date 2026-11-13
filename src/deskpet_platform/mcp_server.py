@@ -15,6 +15,7 @@ from typing import Any, Literal, get_args
 import webbrowser
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict
 
 from .adaptive_speed.config import Config as SpeedConfig
@@ -1262,7 +1263,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
             future.cancel()
             raise TimeoutError("配对超时，请重试。") from None
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
     def desk_list_devices() -> dict[str, Any]:
         """列出这台电脑已配对的设备。多台设备时，操作须传入对应的 id。"""
         return {"devices": registry.list()}
@@ -1285,7 +1286,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
                 devices.append({"port": port, **asdict(observed)})
         return {"devices": devices, "unavailable": unavailable}
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
     def desk_read_manual(topic: Manual = "operations") -> str:
         """读取操作手册、SDK 二次开发手册或自定义角色指南。制作、体验或安装角色请选择 roles。无需连接小板。"""
         return read_manual(topic)

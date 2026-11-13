@@ -886,8 +886,8 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                     async with ClientSession(reader, writer) as session:
                         initialized = await session.initialize()
                         self.assertIn("topic=roles", initialized.instructions)
-                        tools = {tool.name for tool in (await session.list_tools()).tools}
-                        self.assertEqual(tools, {"desk_read_manual", "desk_list_devices", "desk_find_usb_device", "desk_show_text", "desk_status", "desk_render_metrics", "desk_computer_metrics",
+                        tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+                        self.assertEqual(set(tools), {"desk_read_manual", "desk_list_devices", "desk_find_usb_device", "desk_show_text", "desk_status", "desk_render_metrics", "desk_computer_metrics",
                                                  "desk_sync_clock", "desk_clock_edit", "desk_set_view", "desk_add_photo", "desk_photo_album", "desk_set_weather_location",
                                                  "desk_token_status", "desk_speed_windows", "desk_set_role_auto",
                                                  "desk_diagnostics", "desk_select_network",
@@ -899,6 +899,12 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                                                  "desk_set_claude_notifications", "desk_set_antigravity_notifications",
                                                  "desk_set_opencode_notifications", "desk_set_workbuddy_notifications",
                                                  "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view"})
+                        for name in ("desk_list_devices", "desk_read_manual"):
+                            self.assertIs(tools[name].annotations.readOnlyHint, True)
+                            self.assertIs(tools[name].annotations.openWorldHint, False)
+                        for name in ("desk_status", "desk_show_text", "desk_pair_usb"):
+                            annotations = tools[name].annotations
+                            self.assertFalse(annotations and annotations.readOnlyHint)
                         resources = {str(resource.uri) for resource in (await session.list_resources()).resources}
                         for topic, phrase in (("operations", "操作手册"), ("development", "二次开发手册"),
                                               ("roles", "添加自定义角色")):
