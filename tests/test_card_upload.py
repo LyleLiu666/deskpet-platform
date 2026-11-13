@@ -12,6 +12,7 @@ import urllib.request
 import zlib
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from PIL import Image
 
 from deskpet_platform.card_upload import BACKGROUND_RECEIPT_GRACE, MAX_FILE_BYTES, transfer_timeout, upload_file
 from deskpet_platform.channel import AckTimeout, Channel, CommandRejected
@@ -322,6 +323,42 @@ class CardUploadTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(next_start.args, ("card_fetch",))
             self.assertNotEqual(next_start.kwargs["transfer_id"], transfer_id)
             self.assertEqual(next_status.kwargs, {"transfer_id": next_start.kwargs["transfer_id"]})
+
+    async def test_photo_reimport_adds_fullscreen_without_changing_legacy_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            photo = root / "photo.png"
+            Image.new("RGB", (20, 15), "red").save(photo)
+            written = {}
+
+            async def upload(path, source):
+                written[path] = Path(source).read_bytes()
+                return {"path": path, "bytes": len(written[path])}
+
+            client = SimpleNamespace(channel=SimpleNamespace(capabilities={}), upload_file=upload)
+            session = BoardSession(root / "device.json", token_root=root / "sessions", no_token_probe=True)
+            session.client = client
+
+            legacy = await session.add_photo(str(photo))
+            self.assertEqual(legacy["status"], "completed")
+            prefix = f"photos/{legacy['photo']}/"
+            full, thumb, screen = (prefix + name for name in ("full.565", "thumb.565", "screen.565"))
+            self.assertEqual([receipt["path"] for receipt in legacy["completed"]], [full, thumb])
+            self.assertEqual(len(written[full]), 320 * 176 * 2)
+            self.assertEqual(len(written[thumb]), 96 * 72 * 2)
+            legacy_bytes = written.copy()
+            fullscreen_bytes = b"\x00\xf8" * (320 * 240)
+
+            client.channel.capabilities["photo_fullscreen"] = 1
+            upgraded = await session.add_photo(str(photo))
+            self.assertEqual(upgraded["status"], "completed")
+            self.assertEqual(upgraded["photo"], legacy["photo"])
+            self.assertEqual([receipt["path"] for receipt in upgraded["completed"]], [screen, full, thumb])
+            self.assertEqual(written, {**legacy_bytes, screen: fullscreen_bytes})
+
+            client.channel.capabilities.clear()
+            self.assertEqual(await session.add_photo(str(photo)), legacy)
+            self.assertEqual(written, {**legacy_bytes, screen: fullscreen_bytes})
 
     async def test_photo_upload_reconnects_and_waits_for_the_previous_writer(self):
         with tempfile.TemporaryDirectory() as directory:
