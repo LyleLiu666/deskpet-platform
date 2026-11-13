@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 import zlib
 import urllib.request
 from zipfile import ZipFile
@@ -22,6 +22,7 @@ from deskpet_platform.channel import AckTimeout, CommandRejected, DeviceError
 from deskpet_platform.client import Client
 from deskpet_platform.mcp_server import BoardSession, status_view
 from deskpet_platform.pairing import DeviceConfig
+from deskpet_platform.usb_link import UsbIdentity, UsbPort
 from deskpet_platform.wifi_link import WifiLink, probe_board
 from deskpet_platform.wifi_secure import RecordCodec, proof, session_key
 from test_role_pack import make_pack, write_role_actions
@@ -172,10 +173,34 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
         usb.__aenter__.return_value = usb
         with tempfile.TemporaryDirectory() as directory:
             session = BoardSession(Path(directory) / "device.json", client_factory=lambda _: wifi)
-            session.usb_port = object()
+            session.usb_port = Mock(spec=UsbPort)
             with patch.object(session, "usb_client", return_value=usb) as usb_client:
                 self.assertIs(await session.connect(config), usb)
             usb_client.assert_called_once_with(config, session.usb_port)
+
+    async def test_usb_reconnect_revalidates_the_device_after_node_replacement(self):
+        uuid = "01020304-0506-4708-890a-0b0c0d0e0f10"
+        config = DeviceConfig(DEVICE, KEY, device_id=uuid)
+        wifi, usb = AsyncMock(), AsyncMock()
+        wifi.__aenter__.side_effect = OSError("wifi_absent")
+        usb.__aenter__.return_value = usb
+        before = UsbPort("/dev/cu.synthetic", (1,))
+        current = UsbPort(before.path, (2,))
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json", client_factory=lambda _: wifi)
+            session.usb_port = before
+            with patch.object(UsbPort, "_identity", return_value=current.node), \
+                 patch("deskpet_platform.mcp_server.read_usb_identity") as read, \
+                 patch.object(session, "usb_client", return_value=usb) as usb_client:
+                read.return_value = UsbIdentity("02:00:00:00:00:02", uuid)
+                with self.assertRaisesRegex(DeviceError, "device_identity_mismatch"):
+                    await session.connect(config)
+                usb_client.assert_not_called()
+                self.assertIs(session.usb_port, before)
+                read.return_value = UsbIdentity(DEVICE, uuid)
+                self.assertIs(await session.connect(config), usb)
+                usb_client.assert_called_once_with(config, current)
+                self.assertEqual(session.usb_port, current)
 
     async def test_usb_handoff_saves_the_verified_address_for_a_new_session(self):
         before = DeviceConfig(DEVICE, KEY, "192.168.1.41")
@@ -741,7 +766,7 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                         initialized = await session.initialize()
                         self.assertIn("topic=roles", initialized.instructions)
                         tools = {tool.name for tool in (await session.list_tools()).tools}
-                        self.assertEqual(tools, {"desk_read_manual", "desk_list_devices", "desk_show_text", "desk_status", "desk_render_metrics", "desk_computer_metrics",
+                        self.assertEqual(tools, {"desk_read_manual", "desk_list_devices", "desk_find_usb_device", "desk_show_text", "desk_status", "desk_render_metrics", "desk_computer_metrics",
                                                  "desk_sync_clock", "desk_clock_edit", "desk_set_view", "desk_add_photo", "desk_photo_album", "desk_set_weather_location",
                                                  "desk_token_status", "desk_speed_windows", "desk_set_role_auto",
                                                  "desk_diagnostics", "desk_select_network",

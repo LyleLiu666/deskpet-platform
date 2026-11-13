@@ -9,6 +9,7 @@ from deskpet_platform.device_registry import DeviceRegistry
 from deskpet_platform.device_sessions import DeviceSessions
 from deskpet_platform.mcp_server import BoardSession, create_server
 from deskpet_platform.pairing import DeviceConfig
+from deskpet_platform.usb_link import UsbIdentity
 
 KEY = bytes(range(32))
 A = DeviceConfig('02:00:00:00:00:01', KEY, device_id='01020304-0506-4708-890a-0b0c0d0e0f10')
@@ -71,6 +72,17 @@ class DeviceSessionsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await server.call_tool('desk_show_text', {'text': 'B', 'device_id': B.device_id}))[1]['device'], B.identity)
                 with self.assertRaises(Exception):
                     await server.call_tool('desk_show_text', {'text': 'unknown', 'device_id': '01020304-0506-4708-890a-0b0c0d0e0f12'})
+
+    async def test_mcp_finds_the_current_port_by_uuid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server = create_server(Path(directory) / "device.json")
+            paths = ["/dev/cu.first", "/dev/cu.second"]
+            with patch("deskpet_platform.mcp_server.read_usb_identity") as read:
+                read.side_effect = [UsbIdentity(B.identity, B.device_id), UsbIdentity(A.identity, A.device_id)]
+                result = await server.call_tool("desk_find_usb_device", {"ports": paths, "device_id": A.device_id})
+            self.assertEqual(result[1], {"devices": [{"port": paths[1], "identity": A.identity,
+                                                     "device_id": A.device_id}], "unavailable": []})
+            self.assertEqual([call.args[0] for call in read.call_args_list], paths)
 
     async def test_adding_usb_device_authenticates_before_storing_without_replacing_first(self):
         with tempfile.TemporaryDirectory() as directory:

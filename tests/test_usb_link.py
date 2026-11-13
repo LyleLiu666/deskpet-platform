@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from deskpet_platform.card_upload import upload_usb
-from deskpet_platform.usb_link import MacSerial, UsbLink, UsbPort
+from deskpet_platform.usb_link import MacSerial, UsbLink, UsbPort, read_usb_identity
 
 
 class UsbLinkTests(unittest.IsolatedAsyncioTestCase):
@@ -59,6 +59,38 @@ class UsbLinkTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(OSError, "usb_port_changed"):
                 await link.open()
             self.assertEqual(opened, [])
+
+    def test_identity_follows_the_board_after_port_reassignment(self):
+        first = "02:00:00:00:00:01"
+        second = "02:00:00:00:00:02"
+        uuid_a = "01020304-0506-4708-890a-0b0c0d0e0f10"
+        uuid_b = "01020304-0506-4708-890a-0b0c0d0e0f11"
+
+        class Board:
+            def __init__(self, mac, uuid):
+                self.replies = iter((b"startup\r\n", f"DESK IDENTITY {mac} ".encode(), uuid.encode() + b"\r\n"))
+                self.commands = []
+
+            def open(self):
+                assert self.dtr is self.rts is False
+
+            def write(self, command):
+                self.commands.append(command)
+
+            def read_until(self, *, size):
+                return next(self.replies)
+
+            def close(self):
+                self.closed = True
+
+        with patch.object(UsbPort, "_identity", side_effect=[(1,), (1,), (1,), (1,), (2,), (2,), (2,), (2,)]):
+            for mac, uuid in ((first, uuid_a), (second, uuid_b)):
+                board = Board(mac, uuid)
+                registration = UsbPort.register("/dev/cu.synthetic")
+                observed = read_usb_identity(registration, serial_factory=lambda **_: board)
+                self.assertEqual((observed.identity, observed.device_id), (mac, uuid))
+                self.assertEqual(board.commands, [b"DESK IDENTITY?\n"])
+                self.assertTrue(board.closed)
 
     async def test_serial_upload_checks_every_offset_and_hash_before_publishing(self):
         class Channel:

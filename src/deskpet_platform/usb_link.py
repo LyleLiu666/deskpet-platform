@@ -14,6 +14,7 @@ import time
 import serial
 
 from .device_lock import DeviceLock
+from .pairing import DEVICE_ID, valid_device_uuid
 
 
 class MacSerial(serial.Serial):
@@ -57,6 +58,44 @@ class UsbPort:
             raise OSError("usb_port_changed: 请重新确认调试板串口。")
 
 
+@dataclass(frozen=True)
+class UsbIdentity:
+    identity: str
+    device_id: str | None
+
+
+def read_usb_identity(port, *, serial_factory=default_serial_factory):
+    """Read a board's identity without requesting control or resetting it."""
+    registration = port if isinstance(port, UsbPort) else UsbPort.register(port)
+    registration.verify()
+    device = serial_factory(port=None, baudrate=115200, timeout=0.25, write_timeout=1, exclusive=True)
+    try:
+        device.port, device.dtr, device.rts = registration.path, False, False
+        device.open()
+        registration.verify()
+        device.write(b"DESK IDENTITY?\n")
+        deadline = time.monotonic() + 2
+        pending = bytearray()
+        while time.monotonic() < deadline:
+            pending.extend(device.read_until(size=128))
+            if not pending.endswith(b"\n"):
+                if len(pending) >= 128:
+                    pending.clear()
+                continue
+            fields = pending.decode("ascii", errors="replace").split()
+            pending.clear()
+            if len(fields) != 4 or fields[:2] != ["DESK", "IDENTITY"]:
+                continue
+            _, _, identity, value = fields
+            if not DEVICE_ID.fullmatch(identity) or (value != "-" and not valid_device_uuid(value)):
+                raise ValueError("小板返回的身份格式无效。")
+            registration.verify()
+            return UsbIdentity(identity, None if value == "-" else value)
+        raise TimeoutError("USB 小板未返回 UUID，请检查串口和固件版本。")
+    finally:
+        device.close()
+
+
 class UsbLink:
     wireless = False
     peer_address = None
@@ -72,10 +111,12 @@ class UsbLink:
     def _open(self):
         if self.registration is not None:
             self.registration.verify()
-        device = self.serial_factory(port=None, baudrate=115200, timeout=0.25, write_timeout=2)
+        device = self.serial_factory(port=None, baudrate=115200, timeout=0.25, write_timeout=2, exclusive=True)
         try:
             device.port, device.dtr, device.rts = self.port, False, False
             device.open()
+            if self.registration is not None:
+                self.registration.verify()
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 device.write(f"DESK CONTROL {self.identity}\n".encode("ascii"))

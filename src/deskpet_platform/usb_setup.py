@@ -33,7 +33,7 @@ def probe_usb(port, expected_identity, credentials_file=None, *, serial_factory=
     if not Path(port).is_absolute() or not port.startswith("/dev/"):
         raise ValueError("请提供已确认属于该板的 USB 串口绝对路径。")
     network = load_network(credentials_file) if credentials_file is not None else None
-    with serial_factory(port=None, baudrate=115200, timeout=0.25, write_timeout=1) as device:
+    with serial_factory(port=None, baudrate=115200, timeout=0.25, write_timeout=1, exclusive=True) as device:
         device.port, device.dtr, device.rts = port, False, False
         device.open()
 

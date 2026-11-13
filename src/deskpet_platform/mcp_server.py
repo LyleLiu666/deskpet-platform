@@ -41,7 +41,7 @@ from .role_sources import list_role_sources
 from .role_staging import prepare_role_source
 from .token_metrics import TokenMetrics
 from .usb_setup import probe_usb
-from .usb_link import UsbLink, UsbPort
+from .usb_link import UsbLink, UsbPort, read_usb_identity
 from .weather import fetch_relay_weather, fetch_weather
 from .wifi_link import probe_board
 
@@ -131,7 +131,19 @@ class BoardSession:
         except (OSError, AckTimeout):
             if self.usb_port is None:
                 raise
-            return await self.usb_client(config, self.usb_port).__aenter__()
+            registration = self.usb_port
+            try:
+                registration.verify()
+            except OSError:
+                if config.device_id is None:
+                    raise
+                registration = UsbPort.register(registration.path)
+                observed = await asyncio.to_thread(read_usb_identity, registration)
+                if (observed.identity, observed.device_id) != (config.identity, config.device_id):
+                    raise DeviceError("device_identity_mismatch")
+            board = await self.usb_client(config, registration).__aenter__()
+            self.usb_port = registration
+            return board
 
     async def open_wifi(self, config):
         async with asyncio.timeout(WIFI_FALLBACK_TIMEOUT if self.usb_port is not None else None):
@@ -1235,6 +1247,24 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     def desk_list_devices() -> dict[str, Any]:
         """列出这台电脑已配对的设备。多台设备时，操作须传入对应的 id。"""
         return {"devices": registry.list()}
+
+    @server.tool()
+    async def desk_find_usb_device(ports: list[str], device_id: str | None = None) -> dict[str, Any]:
+        """读取指定 USB 小板的持久 UUID 和 MAC，可按 UUID 查当前串口。查询无需配对，不接管控制。"""
+        if not 1 <= len(ports) <= 8 or len(set(ports)) != len(ports):
+            raise ValueError("请指定 1 至 8 个不同的小板 USB 串口。")
+        if device_id is not None and not valid_device_uuid(device_id):
+            raise ValueError("请提供有效的小板 UUID。")
+        devices, unavailable = [], []
+        for port in ports:
+            try:
+                observed = await asyncio.to_thread(read_usb_identity, port)
+            except (OSError, ValueError) as error:
+                unavailable.append({"port": port, "reason": str(error)})
+                continue
+            if device_id is None or observed.device_id == device_id:
+                devices.append({"port": port, **asdict(observed)})
+        return {"devices": devices, "unavailable": unavailable}
 
     @server.tool()
     def desk_read_manual(topic: Manual = "operations") -> str:

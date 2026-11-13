@@ -30,7 +30,8 @@
 - `desk_set_brightness` 设置 0–100 的屏幕亮度。设为 0 后触摸屏幕可重新点亮。
 - `desk_calibrate_touch` 在屏幕启动三点校准。按屏幕提示触摸三个标记，校准后 `desk_wait_touch` 返回点击位置。长按 3 秒或调用 `desk_cancel_touch_calibration` 可取消校准。校准后，点击角色可播放该角色提供的 `touched` 动作。
 - MCP 启动命令可在 `mcp` 后增加 `--role-dir <角色素材目录的绝对路径>`。素材目录由你在电脑上选择。`desk_list_role_sources` 查询这个目录里的可安装角色；也可向该工具传入其他角色素材目录的绝对路径。
-- MCP 启动时可用 `--usb-port` 登记已确认的串口。Wi-Fi 连不上或握手超时时会自动切到 USB，仍可控制小板和传卡。无线连通验证通过且当前动作和传输结束后，MCP 会自动切回 Wi-Fi，并保存新地址供下次连接。`desk_status` 可查看当前连接方式。重新插拔后先确认串口对应的小板，再登记。
+- 用 `desk_find_usb_device` 读取候选串口上的小板 MAC 和持久 UUID。传入 `ports`（macOS 可用 `ls /dev/cu.usbserial-*` 查看路径），并用 `device_id` 指定要找的小板。查询无需配对，Wi-Fi 正在使用时也可读取。老固件可能没有这条查询命令，已配对设备的 UUID 仍可从 `desk_list_devices` 查看。
+- MCP 启动时可用 `--usb-port` 登记已确认的串口。Wi-Fi 连不上或握手超时时会自动切到 USB，仍可控制小板和传卡。原串口重新出现时，电脑先比对 MAC 和 UUID，再恢复 USB 控制。若串口路径改变，先用 `desk_find_usb_device` 找到新路径。无线连通验证通过且当前动作和传输结束后，MCP 会自动切回 Wi-Fi，并保存新地址供下次连接。`desk_status` 可查看当前连接方式。
 - 用 `desk_select_network` 切换已保存的 Wi-Fi。切换会短暂断开无线控制。重连后用 `desk_diagnostics` 查看本次操作的 `network_switch`、当前网络和卡空间。切换成功后，目标网络成为重启后的首选。目标连不上时，小屏会优先恢复原连接。
 - 储存卡恢复连接后，重新打开角色图鉴或相册以探测介质并在需要时重新挂载。返回角色页会重新加载上次保存的角色。`desk_diagnostics` 的 `card.mount_count` 是本次开机以来成功挂载的次数。
 - `desk_set_view` 可打开角色、应用菜单、时钟、角色图鉴、相册、天气、消息或设置。可把角色、应用菜单、时钟或相册设为默认首页。相册作为默认首页时，开机自动轮播已有照片。
