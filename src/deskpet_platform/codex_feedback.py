@@ -17,7 +17,7 @@ def question_id(call, index):
     return "question-" + hashlib.sha256((call + ":" + str(index)).encode()).hexdigest()[:40]
 
 
-def answers(prompt):
+def answer_references(prompt):
     if not isinstance(prompt, str):
         return []
     prompt = prompt.strip()
@@ -37,10 +37,15 @@ def answers(prompt):
             identity = json.loads(value["questionItemId"])
             if not isinstance(identity, list) or len(identity) != 3 or identity[0] != TOOL:
                 continue
-            found.append(question_id(identity[1], identity[2]))
+            question_id(identity[1], identity[2])
+            found.append((identity[1], identity[2]))
         except (KeyError, TypeError, ValueError):
             continue
     return list(dict.fromkeys(found))
+
+
+def answers(prompt):
+    return [question_id(call, index) for call, index in answer_references(prompt)]
 
 
 def deliver(store, event):

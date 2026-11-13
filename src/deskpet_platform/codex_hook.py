@@ -144,24 +144,27 @@ def _remove_groups(existing, command):
     return updated, removed
 
 
+def receive_event(config, event, *, handle=None):
+    config = notification_config(config)
+    store = NotificationStore(config.parent / "notifications.sqlite3")
+    if handle is not None:
+        changed = handle(store, event)
+    elif event.get("hook_event_name") == "Stop":
+        changed = store.add_codex_event(event)
+    else:
+        changed = codex_feedback.deliver(store, event)
+    if changed:
+        subprocess.Popen([sys.executable, "-m", "deskpet_platform", "--config", str(config), "notification-worker"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True)
+
+
 def receive(config, *, handle=None, response=None):
     try:
         raw = sys.stdin.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             raise ValueError("hook_event_too_large")
-        event = json.loads(raw)
-        config = notification_config(config)
-        store = NotificationStore(config.parent / "notifications.sqlite3")
-        if handle is not None:
-            changed = handle(store, event)
-        elif event.get("hook_event_name") == "Stop":
-            changed = store.add_codex_event(event)
-        else:
-            changed = codex_feedback.deliver(store, event)
-        if changed:
-            subprocess.Popen([sys.executable, "-m", "deskpet_platform", "--config", str(config), "notification-worker"],
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True, close_fds=True)
+        receive_event(config, json.loads(raw), handle=handle)
     except Exception:
         pass
     print(json.dumps(response or {}))

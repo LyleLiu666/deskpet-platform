@@ -67,6 +67,7 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        self.enterContext(patch.dict(os.environ, {"CODEX_HOME": str(self.root / "codex-profile")}))
         self.config = self.root / "device.json"
         FIRST.save(self.config)
         registry = DeviceRegistry(self.config)
@@ -80,15 +81,13 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
             while not condition():
                 await asyncio.sleep(.05)
 
-    def submit(self, event, config=None, handler=None):
+    def submit(self, event, config=None):
         with patch("sys.stdin", io.StringIO(json.dumps(event))), redirect_stdout(io.StringIO()), \
              patch("deskpet_platform.codex_hook.subprocess.Popen") as spawn:
-            receive(config or self.config, handle=handler)
+            receive(config or self.config)
         return spawn
 
-    async def test_background_routes_to_both_boards_and_retries_offline_inbox(self):
-        from deskpet_platform.opencode_feedback import deliver
-
+    async def test_codex_hook_routes_to_both_boards_and_retries_offline_inbox(self):
         boards = {item.identity: NotificationBoard(item) for item in (FIRST, SECOND)}
         first, second = boards[FIRST.identity], boards[SECOND.identity]
         stop = {"hook_event_name": "Stop", "session_id": "test", "turn_id": "complete", "cwd": "/example"}
@@ -96,8 +95,12 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.submit(stop).assert_called_once()  # Redelivery starts no new inbox record.
         self.assertEqual(len(self.inbox.list()), 1)
         self.assertEqual(self.second.list(), [])
-        question = {"session": "test", "id": "ask", "kind": "asked", "request": "question", "title": "Question"}
-        self.submit(question, handler=deliver).assert_called_once()
+        question = {
+            "hook_event_name": "PreToolUse", "session_id": "test", "turn_id": "first-question", "cwd": "/example",
+            "tool_name": "request_user_input_async", "tool_use_id": "call_online",
+            "tool_input": {"questions": [{"title": "Private question"}]},
+        }
+        self.submit(question).assert_called_once()
 
         def factory(config):
             return Client(config, link_factory=boards[config.identity].link)
@@ -106,34 +109,60 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
         try:
             await self.wait_for(lambda: all(len(board.attention) == 1 for board in boards.values()))
             self.assertEqual([(board.snapshots[-1]["results"], board.snapshots[-1]["waiting"])
-                              for board in boards.values()], [(1,1),(1,1)])
-            self.assertTrue(all(record["shown"] for store in (self.inbox,self.second) for record in store.list()))
+                              for board in boards.values()], [(1, 1), (1, 1)])
+            await self.wait_for(lambda: all(record["shown"] for store in (self.inbox, self.second)
+                                            for record in store.list()))
             first_id = next(record["id"] for record in self.inbox.list() if record["category"] == "completed")
             self.inbox.mark_seen(first_id)
+            second_completed = next(record for record in self.second.list() if record["category"] == "completed")
+            self.assertFalse(second_completed["seen"])
             async with Client(FIRST, link_factory=first.link) as manual:
                 await manual.set_brightness(30)
             second.available = False
-            question = {**question, "id": "offline"}
-            self.submit(question, handler=deliver)
-            await self.wait_for(lambda: len(first.attention) == 2)
-            self.assertEqual(len(second.attention),1)
-            self.assertTrue(any(record["category"] == "response" and not record["shown"] for record in self.second.list()))
-            second.available = True
-            await self.wait_for(lambda: len(second.attention) == 2)
+            offline_question = {**question, "turn_id": "offline-question", "tool_use_id": "call_offline"}
+            offline_stop = {**stop, "turn_id": "offline-completion"}
+            self.submit(offline_question).assert_called_once()
+            self.submit({**stop, "turn_id": "offline-question"}).assert_not_called()
+            self.submit(offline_stop).assert_called_once()
+            await self.wait_for(lambda: len(first.attention) == 2 and first.snapshots[-1]["results"] == 1)
+            self.assertEqual(len(second.attention), 1)
             self.assertEqual(second.snapshots[-1]["results"], 1)
-            self.assertEqual(first.snapshots[-1]["results"], 0)
-            self.assertEqual(len(self.second.list()), 3)
-            self.assertTrue(all(record["shown"] for record in self.second.list()))
+            await self.wait_for(lambda: len(self.second.list()) == 4)
+            self.assertCountEqual([record["category"] for record in self.second.list() if not record["shown"]],
+                                  ["completed", "response"])
+            second.available = True
+            await self.wait_for(lambda: len(second.attention) == 2 and second.snapshots[-1]["results"] == 2)
+            await self.wait_for(lambda: all(record["shown"] for record in self.second.list()))
             async with Client(SECOND, link_factory=second.link) as manual:
                 await manual.set_brightness(80)
             self.assertEqual((first.brightness, second.brightness), ([30], [80]))
-            self.submit(question, handler=deliver)
-            await asyncio.sleep(1.2)
-            self.assertEqual([len(board.attention) for board in (first,second)], [2,2])
-            self.submit({**question,"kind":"resolved"},handler=deliver)
-            await self.wait_for(lambda: all(board.snapshots[-1]["waiting"] == 1 for board in (first,second)))
+            self.submit(offline_question, self.second_path).assert_called_once()
+            self.submit(offline_stop, self.second_path).assert_called_once()
+            answer = {
+                "hook_event_name": "UserPromptSubmit", "session_id": "test",
+                "prompt": "<send_user_message_question_reply>\n" + json.dumps([{
+                    "questionItemId": json.dumps(["request_user_input_async", "call_offline", 0]),
+                    "answer": "Private answer",
+                }]) + "\n</send_user_message_question_reply>",
+            }
+            self.submit(answer).assert_called_once()
+            self.submit(answer).assert_not_called()
+            await self.wait_for(lambda: all(board.snapshots[-1]["waiting"] == 1 for board in boards.values()))
+            self.assertEqual([len(board.attention) for board in boards.values()], [2, 2])
+            self.assertEqual([board.snapshots[-1]["results"] for board in boards.values()], [1, 2])
+
+            post_tool = {**question, "hook_event_name": "PostToolUse"}
+            self.submit({**post_tool, "tool_response": '{"accepted": true}'}).assert_not_called()
+            self.submit({**post_tool, "tool_response": '{"accepted": false}'}).assert_called_once()
+            self.submit({**post_tool, "tool_response": '{"accepted": false}'}).assert_not_called()
+            await self.wait_for(lambda: all(board.snapshots[-1]["waiting"] == 0 for board in boards.values()))
+            for store in (self.inbox, self.second):
+                responses = [record for record in store.list() if record["category"] == "response"]
+                self.assertEqual(len(responses), 2)
+                self.assertTrue(all(record["shown"] and record["resolved"] for record in responses))
+
             self.submit({**stop, "turn_id": "after-manual-control"})
-            await self.wait_for(lambda: first.snapshots[-1]["results"] == 1 and second.snapshots[-1]["results"] == 2)
+            await self.wait_for(lambda: first.snapshots[-1]["results"] == 2 and second.snapshots[-1]["results"] == 3)
         finally:
             task.cancel()
             await asyncio.gather(task,return_exceptions=True)
