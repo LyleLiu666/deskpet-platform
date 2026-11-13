@@ -134,7 +134,13 @@ async def wait_for_fetch(channel, fields, resume):
         except CommandRejected as error:
             if interrupted is not None and error.code == "unknown_card_transfer":
                 raise interrupted from error
-            raise
+            if not resume or error.code != "handshake_required":
+                raise
+            channel.online = False
+            channel = await resume(channel)
+            # The board rejects an expired epoch before dispatch. Retry the
+            # rejected command, without replacing an accepted transfer.
+            continue
         except (DeviceError, OSError) as error:
             disconnected = isinstance(error, (AckTimeout, OSError)) or str(error) == "handshake_required"
             if not resume or not disconnected or channel.online:

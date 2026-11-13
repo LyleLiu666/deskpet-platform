@@ -14,13 +14,73 @@ import zlib
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from deskpet_platform.card_upload import MAX_FILE_BYTES, upload_file
-from deskpet_platform.channel import AckTimeout, CommandRejected
+from deskpet_platform.channel import AckTimeout, Channel, CommandRejected
 from deskpet_platform.client import Client
 from deskpet_platform.mcp_server import BoardSession, CardFile
 from deskpet_platform.pairing import DeviceConfig
 
 
 class CardUploadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_board_side_handshake_expiration_reconnects_without_replaying_an_accepted_transfer(self):
+        mac = "02:00:00:00:00:01"
+
+        class Wire:
+            peer_address = "127.0.0.1"
+
+            def __init__(self, reject):
+                self.requests = []
+                self.reject = reject
+
+            async def write(self, raw):
+                self.request = json.loads(raw[3:])
+                if self.request["type"] != "hello":
+                    self.requests.append(self.request)
+
+            async def readline(self):
+                request = self.request
+                reply = {"epoch": request["epoch"], "seq": request["seq"], "boot": 1, "ok": True}
+                if request["type"] == "hello":
+                    reply.update(mac=mac, protocol=1, rx_bytes=2048)
+                elif request["type"] == self.reject:
+                    reply.update(ok=False, error="handshake_required")
+                elif request["type"] == "card_fetch":
+                    reply["transfer_status"] = "pending"
+                elif request["type"] == "card_fetch_status":
+                    reply["stored"] = True
+                else:
+                    raise AssertionError(request)
+                return b"P1," + json.dumps(reply).encode() + b"\n"
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "data.bin"
+            source.write_bytes(b"synthetic file")
+            for rejected in ("card_fetch", "card_fetch_status"):
+                with self.subTest(rejected=rejected):
+                    old_wire, new_wire = Wire(rejected), Wire(None)
+                    original, recovered = Channel(old_wire, mac), Channel(new_wire, mac)
+                    await original.handshake()
+                    await recovered.handshake()
+                    relay = SimpleNamespace(url="http://127.0.0.1/fixture", served=True, close=lambda: None)
+                    resume = AsyncMock(return_value=recovered)
+
+                    with patch("deskpet_platform.card_upload.CardRelay") as relay_factory, patch(
+                        "deskpet_platform.card_upload.asyncio.sleep", AsyncMock()
+                    ):
+                        relay_factory.return_value.start.return_value = relay
+                        result = await upload_file(original, "127.0.0.1", bytes(32), "desk/data.bin", source,
+                                                   background=True, resume=resume)
+                        relay_factory.assert_called_once()
+                    resume.assert_awaited_once_with(original)
+                    self.assertFalse(original.online)
+                    self.assertEqual(result["bytes"], source.stat().st_size)
+                    self.assertEqual([request["type"] for request in new_wire.requests],
+                                     ["card_fetch", "card_fetch_status"] if rejected == "card_fetch"
+                                     else ["card_fetch_status"])
+                    self.assertEqual({request["transfer_id"] for request in old_wire.requests + new_wire.requests},
+                                     {old_wire.requests[0]["transfer_id"]})
+                    if rejected == "card_fetch":
+                        self.assertEqual(new_wire.requests[0]["url"], old_wire.requests[0]["url"])
+
     async def test_only_retryable_http_failures_restart_transfer_after_reconnect(self):
         class Relay:
             def __init__(self, device_ip, _encrypted):
