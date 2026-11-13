@@ -73,7 +73,7 @@ class BoardSession:
         self.background = background
         self.client_factory = client_factory
         self.identity_registry = None
-        self.usb_port = UsbPort.register(usb_port) if usb_port is not None else None
+        self.usb_port = UsbPort.register(usb_port, allow_missing=True) if usb_port is not None else None
         self.client = None
         self.next_wifi_probe = 0.0
         self.snapshot = {"connection": "starting"}

@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 import zlib
 import urllib.request
 from zipfile import ZipFile
@@ -171,12 +171,15 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
         wifi, usb = AsyncMock(), AsyncMock()
         wifi.__aenter__.side_effect = AckTimeout("fixture_hello_timeout")
         usb.__aenter__.return_value = usb
-        with tempfile.TemporaryDirectory() as directory:
-            session = BoardSession(Path(directory) / "device.json", client_factory=lambda _: wifi)
-            session.usb_port = Mock(spec=UsbPort)
+        path = "/dev/cu.synthetic"
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            UsbPort, "_identity", return_value=(1,),
+        ), patch("deskpet_platform.mcp_server.read_usb_identity") as read:
+            session = BoardSession(Path(directory) / "device.json", client_factory=lambda _: wifi, usb_port=path)
             with patch.object(session, "usb_client", return_value=usb) as usb_client:
                 self.assertIs(await session.connect(config), usb)
-            usb_client.assert_called_once_with(config, session.usb_port)
+                usb_client.assert_called_once_with(config, UsbPort(path, (1,)))
+                read.assert_not_called()
 
     async def test_usb_reconnect_revalidates_the_device_after_node_replacement(self):
         uuid = "01020304-0506-4708-890a-0b0c0d0e0f10"
@@ -201,6 +204,35 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(await session.connect(config), usb)
                 usb_client.assert_called_once_with(config, current)
                 self.assertEqual(session.usb_port, current)
+
+    async def test_usb_fallback_waits_for_an_unplugged_port_and_checks_both_ids(self):
+        uuid = "01020304-0506-4708-890a-0b0c0d0e0f10"
+        config = DeviceConfig(DEVICE, KEY, device_id=uuid)
+        path = "/dev/cu.synthetic-unplugged"
+        wifi, usb = AsyncMock(), AsyncMock()
+        wifi.__aenter__.side_effect = [wifi, OSError("wifi_absent"), OSError("wifi_absent"), OSError("wifi_absent")]
+        usb.__aenter__.return_value = usb
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            UsbPort, "_identity", side_effect=FileNotFoundError,
+        ) as node, patch("deskpet_platform.mcp_server.read_usb_identity") as read:
+            session = BoardSession(Path(directory) / "device.json", client_factory=lambda _: wifi, usb_port=path)
+            with patch.object(session, "usb_client", return_value=usb) as usb_client:
+                self.assertIs(await session.connect(config), wifi)
+                read.assert_not_called()
+                node.side_effect = None
+                node.return_value = (1,)
+                registration = UsbPort(path, (1,))
+                for other in (UsbIdentity(DEVICE, "01020304-0506-4708-890a-0b0c0d0e0f11"),
+                              UsbIdentity("02:00:00:00:00:02", uuid)):
+                    read.return_value = other
+                    with self.assertRaisesRegex(DeviceError, "device_identity_mismatch"):
+                        await session.connect(config)
+                usb_client.assert_not_called()
+                read.return_value = UsbIdentity(DEVICE, uuid)
+                self.assertIs(await session.connect(config), usb)
+                read.assert_called_with(registration)
+                usb_client.assert_called_once_with(config, registration)
+                self.assertEqual(session.usb_port, registration)
 
     async def test_usb_handoff_saves_the_verified_address_for_a_new_session(self):
         before = DeviceConfig(DEVICE, KEY, "192.168.1.41")
@@ -749,6 +781,27 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_real_mcp_starts_with_unplugged_usb_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            port = Path("/dev") / ("cu.deskpet-unplugged-" + root.name)
+            self.assertFalse(port.exists())
+            command = StdioServerParameters(command=sys.executable, args=[
+                "-m", "deskpet_platform", "--config", str(root / "device.json"),
+                "mcp", "--usb-port", str(port), "--no-token-probe",
+            ], env={"HOME": str(root / "home"), "CODEX_HOME": str(root / "codex")})
+            async with asyncio.timeout(10):
+                async with stdio_client(command) as (reader, writer):
+                    async with ClientSession(reader, writer) as session:
+                        await session.initialize()
+                        listed = await session.call_tool("desk_list_devices")
+                        self.assertEqual(listed.structuredContent, {"devices": []})
+                        result = await session.call_tool("desk_find_usb_device", {"ports": [str(port)]})
+                        self.assertFalse(result.isError)
+                        self.assertEqual(result.structuredContent["devices"], [])
+                        self.assertEqual([item["port"] for item in result.structuredContent["unavailable"]],
+                                         [str(port)])
 
     async def test_real_mcp_lists_and_reads_manuals_without_pairing(self):
         with tempfile.TemporaryDirectory() as directory:

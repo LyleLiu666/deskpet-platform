@@ -38,7 +38,7 @@ default_serial_factory = MacSerial if sys.platform == "darwin" else serial.Seria
 @dataclass(frozen=True)
 class UsbPort:
     path: str
-    node: tuple
+    node: tuple | None
 
     @staticmethod
     def _identity(path):
@@ -48,13 +48,19 @@ class UsbPort:
         return info.st_ino, info.st_rdev, getattr(info, "st_birthtime", info.st_ctime_ns)
 
     @classmethod
-    def register(cls, path):
+    def register(cls, path, *, allow_missing=False):
         if not isinstance(path, str) or not path.startswith("/dev/"):
             raise ValueError("请提供已确认属于该板的 USB 串口绝对路径。")
-        return cls(path, cls._identity(path))
+        try:
+            node = cls._identity(path)
+        except FileNotFoundError:
+            if not allow_missing:
+                raise
+            node = None
+        return cls(path, node)
 
     def verify(self):
-        if self._identity(self.path) != self.node:
+        if self.node is None or self._identity(self.path) != self.node:
             raise OSError("usb_port_changed: 请重新确认调试板串口。")
 
 
