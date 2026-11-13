@@ -25,7 +25,7 @@ from .agent_speed_probe import AgentSpeedProbe
 from .card_upload import MAX_FILE_BYTES, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
 from .client import Client, SCREEN_PAGES
-from .codex_hook import hook_command, install_hook, remove_hook
+from .codex_hook import configure_codex_hooks, hook_command, install_hook, remove_hook
 from .codex_quota import fetch_quota
 from .computer_metrics import ComputerMetrics, DisplayPreferences
 from .device_registry import DeviceRegistry
@@ -1190,7 +1190,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         board.identity_registry = registry
         return board
 
-    async def configure_notifications(enabled, device_id, hook, configure, *arguments):
+    def notification_commands(device_id, hook, *arguments):
         # Keep accepting a device selector from older clients. The hook is
         # installed once for this registry, and each board keeps its own inbox.
         if device_id is not None:
@@ -1198,6 +1198,10 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         command = hook_command(registry.default_path, hook, *arguments)
         previous = [hook_command(path, hook, *arguments) for path in registry.paths()
                     if path != registry.default_path]
+        return command, previous
+
+    async def configure_notifications(enabled, device_id, hook, configure, *arguments):
+        command, previous = notification_commands(device_id, hook, *arguments)
 
         def apply():
             changed = configure(command, enabled=enabled)
@@ -1557,8 +1561,8 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     async def desk_enable_codex_notifications(device_id: str | None = None) -> dict[str, Any]:
         """安装一个 Codex 钩子，为所有已配对设备启用完成和待应答提醒。"""
         path = codex_home() / "hooks.json"
-        added = await configure_notifications(True, device_id, "codex-hook",
-            lambda command, *, enabled: (install_hook if enabled else remove_hook)(path, command))
+        command, previous = notification_commands(device_id, "codex-hook")
+        added = await asyncio.to_thread(configure_codex_hooks, path, command, previous, enabled=True)
         return {"status": "review_required" if added else "configured", "added": added, "config": str(path),
                 "next_step": "在 Codex 的 /hooks 或设置中的 Hooks 里检查并信任新增条目，然后在新会话中验证。"}
 
@@ -1566,8 +1570,8 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     async def desk_disable_codex_notifications(device_id: str | None = None) -> dict[str, Any]:
         """停止新增 Codex 会话提醒；只移除本程序的 hook，保留其他 hooks 和已有提醒。"""
         path = codex_home() / "hooks.json"
-        removed = await configure_notifications(False, device_id, "codex-hook",
-            lambda command, *, enabled: (install_hook if enabled else remove_hook)(path, command))
+        command, previous = notification_commands(device_id, "codex-hook")
+        removed = await asyncio.to_thread(configure_codex_hooks, path, command, previous, enabled=False)
         return {"status": "disabled", "removed": removed}
 
     @server.tool()

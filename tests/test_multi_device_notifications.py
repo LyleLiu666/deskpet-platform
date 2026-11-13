@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from mcp.server.fastmcp.exceptions import ToolError
+
 from deskpet_platform.client import Client
 from deskpet_platform.codex_hook import hook_command, install_hook, receive
 from deskpet_platform.device_registry import DeviceRegistry
@@ -258,6 +260,27 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
             groups = json.loads(path.read_text())["hooks"]["Stop"]
             self.assertEqual([hook["command"] for group in groups for hook in group["hooks"]], ["unrelated hook"])
         self.assertEqual(default_path.read_bytes(), default_content)
+
+    async def test_codex_hook_configuration_leaves_file_unchanged_if_legacy_removal_is_unsafe(self):
+        path = Path(os.environ["CODEX_HOME"]) / "hooks.json"
+        legacy = hook_command(self.second_path)
+        current = hook_command(self.config)
+        install_hook(path, legacy)
+        config = json.loads(path.read_text())
+        config["hooks"]["Stop"][0]["hooks"].append({"type": "command", "command": "unrelated hook"})
+        path.write_text(json.dumps(config))
+        server = create_server(self.config, no_token_probe=True)
+
+        before = path.read_bytes()
+        with self.assertRaisesRegex(ToolError, "其他同组 hook"):
+            await server.call_tool("desk_enable_codex_notifications", {"device_id": SECOND.device_id})
+        self.assertEqual(path.read_bytes(), before)
+
+        install_hook(path, current)
+        before = path.read_bytes()
+        with self.assertRaisesRegex(ToolError, "其他同组 hook"):
+            await server.call_tool("desk_disable_codex_notifications", {"device_id": FIRST.device_id})
+        self.assertEqual(path.read_bytes(), before)
 
     async def test_failed_home_commit_does_not_record_delivery_or_attention(self):
         from deskpet_platform.notification_view import NotificationView

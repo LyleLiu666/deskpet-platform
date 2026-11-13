@@ -1,4 +1,5 @@
 """Install and receive local Codex hooks without replacing existing hooks."""
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -74,6 +75,13 @@ def _write(path, config, *, private=True):
 def install_hook(path, command, *, matchers=EVENT_MATCHERS, private=True):
     path = Path(path)
     config = _load(path, private=private)
+    added = _add_to_config(config, command, matchers)
+    if added:
+        _write(path, config, private=private)
+    return added
+
+
+def _add_to_config(config, command, matchers):
     hooks = config.setdefault("hooks", {})
     added = False
     entries = tuple(matchers.items())
@@ -90,8 +98,6 @@ def install_hook(path, command, *, matchers=EVENT_MATCHERS, private=True):
             group["matcher"] = matcher
         existing.append(group)
         added = True
-    if added:
-        _write(path, config, private=private)
     return added
 
 
@@ -112,6 +118,13 @@ def remove_hook(path, command, *, matchers=EVENT_MATCHERS, private=True):
     if not path.exists() and not path.is_symlink():
         return False
     config = _load(path, private=private)
+    removed = _remove_from_config(config, command, matchers)
+    if removed:
+        _write(path, config, private=private)
+    return removed
+
+
+def _remove_from_config(config, command, matchers):
     hooks = config.get("hooks", {})
     removed = False
     for event in matchers:
@@ -124,9 +137,29 @@ def remove_hook(path, command, *, matchers=EVENT_MATCHERS, private=True):
             else:
                 del hooks[event]
             removed = True
-    if removed:
-        _write(path, config, private=private)
     return removed
+
+
+def configure_codex_hooks(path, command, previous_commands, *, enabled):
+    """Publish a single validated update for the shared command and all old commands."""
+    path = Path(path)
+    if not enabled and not path.exists() and not path.is_symlink():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path.with_name(f".{path.name}.deskpet.lock"), flags, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        config = _load(path)
+        changed = (_add_to_config(config, command, EVENT_MATCHERS) if enabled else
+                   _remove_from_config(config, command, EVENT_MATCHERS))
+        for previous in previous_commands:
+            changed = _remove_from_config(config, previous, EVENT_MATCHERS) or changed
+        if changed:
+            _write(path, config)
+        return changed
+    finally:
+        os.close(descriptor)
 
 
 def _remove_groups(existing, command):
