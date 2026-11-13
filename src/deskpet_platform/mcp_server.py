@@ -320,8 +320,18 @@ class BoardSession:
         async with self.lock:
             if self.client is None:
                 return {"status": "not_connected", "connection": self.snapshot}
-            if self.client.channel.capabilities.get("message_view") != 1:
-                return {"status": "unsupported"}
+            capabilities = self.client.channel.capabilities
+            if capabilities.get("message_view") != 1:
+                if capabilities.get("agent_home") != 1 or capabilities.get("screen_views") != 1:
+                    return {"status": "unsupported"}
+                if mode != "list":
+                    return {"status": "unsupported", "next_step": "用 list 打开小屏提醒列表，再在小屏上翻页或查看详情。"}
+                if identity is not None:
+                    raise ValueError("打开小屏提醒列表无需填写通知编号。")
+                reply = await self.client.set_view("messages")
+                if reply.get("screen_page") != SCREEN_PAGES.index("messages"):
+                    raise DeviceError("message_list_not_confirmed")
+                return {"status": "ok", "view": "list"}
             reply = await self.client.message_view(mode, identity)
             fields = ("view", "cached_count", "cached_unread", "page", "pages", "messages", "message")
             return {"status": "ok", **{key: reply[key] for key in fields if key in reply}}
@@ -1638,7 +1648,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         identity: int | None = None,
         device_id: str | None = None,
     ) -> dict[str, Any]:
-        """打开小屏的消息列表、翻页或查看详情。open 和 mark_seen 需要通知编号，标记时详情须显示该条通知。"""
+        """用 list 打开小屏提醒列表。完整显示固件在小屏上翻页和打开详情。参考固件也支持远程翻页、查看和标记，open 和 mark_seen 需要通知编号。"""
         session = sessions.resolve(device_id)
         return await session.message_view(mode, identity)
 

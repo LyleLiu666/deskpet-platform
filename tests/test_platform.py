@@ -80,6 +80,40 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await client.set_view("weather", make_default=True)
 
+    async def test_message_list_uses_the_display_firmware_navigation_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json", no_token_probe=True)
+            self.assertEqual((await session.message_view("list", None))["status"], "not_connected")
+            client = Client(DeviceConfig(DEVICE, KEY))
+            client.channel = AsyncMock()
+            client.channel.capabilities = {"agent_home": 1, "screen_views": 1}
+            client.channel.send.return_value = {"screen_page": 7}
+            session.client = client
+
+            self.assertEqual(await session.message_view("list", None), {"status": "ok", "view": "list"})
+            client.channel.send.assert_awaited_once_with("screen_view", page=7, make_default=False)
+            for mode, identity in (("open", 2), ("previous", None), ("next", None), ("mark_seen", 2)):
+                self.assertEqual((await session.message_view(mode, identity))["status"], "unsupported")
+            with self.assertRaises(ValueError):
+                await session.message_view("list", 2)
+            client.channel.send.assert_awaited_once()
+
+            client.channel.send.side_effect = CommandRejected("screen_busy")
+            with self.assertRaisesRegex(CommandRejected, "screen_busy"):
+                await session.message_view("list", None)
+
+            client.channel.send.reset_mock(side_effect=True)
+            client.channel.send.return_value = {"screen_page": 0}
+            with self.assertRaisesRegex(DeviceError, "message_list_not_confirmed"):
+                await session.message_view("list", None)
+
+            client.channel.send.reset_mock()
+            client.channel.capabilities["message_view"] = 1
+            client.channel.send.return_value = {"view": "list", "cached_count": 3}
+            self.assertEqual(await session.message_view("list", None),
+                             {"status": "ok", "view": "list", "cached_count": 3})
+            client.channel.send.assert_awaited_once_with("message_view", mode="list")
+
     async def test_clock_sync_distinguishes_automatic_initialization_from_explicit_sync(self):
         client = Client(DeviceConfig(DEVICE, KEY))
         client.channel = AsyncMock()
