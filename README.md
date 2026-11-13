@@ -21,7 +21,8 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 
 1. 按本仓库 README 和操作手册安装 DeskPet Platform。macOS 优先用
    install-macos.command。把安装后的 deskpet-platform 绝对路径注册为
-   本机 stdio MCP，参数为 mcp，保留我已有的 MCP 配置。
+   本机 stdio MCP，参数为 mcp，保留我已有的 MCP 配置。使用 Codex 时，
+   按操作手册设置 DeskPet 的写卡等待时间。
 2. 先用 desk_list_devices 查看已配对设备。已有这台小板时复用配对；
    添加另一台时使用 add_device=true。通过 USB 配对前确认串口和小板的
    MAC。已有本机私有 Wi-Fi 凭据文件时可用 desk_pair_usb 同时配网。

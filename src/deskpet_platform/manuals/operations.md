@@ -6,6 +6,19 @@
 2. 用 USB 将小板连接到电脑。调用 `desk_pair_usb`，把已确认的串口填入 `port`，把登记的设备 MAC 填入 `expected_identity`。需要同时配网时，在 `credentials_file` 中提供本机 Wi‑Fi 凭据文件的绝对路径。文件权限为 `0600`，JSON 包含 `ssid` 和 `password` 两个字符串，开放网络的密码为空。
 3. 用 `desk_status` 检查连接，再调用 `desk_show_text`。返回 `shown` 或 `finished` 表示设备报告实际绘制。小板已联网但电脑暂时无法访问时，可以通过 USB 完成配对。若 USB 配网失败，小板会尝试恢复原有网络。
 
+### Codex 的写卡等待时间
+
+用 Codex 通过 Wi-Fi 传输单个 8 MiB 文件时，在 Codex 的 `config.toml` 中为 DeskPet 的 MCP 条目设置 1,200 秒。已登记时，在现有表中补这一项。
+
+```toml
+[mcp_servers.deskpet]
+command = "/安装路径/deskpet-platform"
+args = ["mcp"]
+tool_timeout_sec = 1200
+```
+
+大文件和批量安装需要按文件大小和数量延长客户端等待时间。设置后从新会话连接。
+
 ### 手机扫码配网和配对
 
 1. 给小板供电。完整显示固件从应用菜单进入 **桌面设置 → Wi-Fi**。参考固件在屏幕未显示配网二维码时，长按屏幕 3 秒打开 Wi-Fi 设置。用手机扫描左侧二维码加入小板热点，再扫描右侧二维码打开设置页。选择 2.4 GHz Wi-Fi 并输入密码，列表中找不到网络时可手动输入名称。联网后，让手机和电脑回到与小板相同的网络。
