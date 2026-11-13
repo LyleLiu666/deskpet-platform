@@ -14,13 +14,75 @@ import zlib
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from deskpet_platform.card_upload import MAX_FILE_BYTES, upload_file
-from deskpet_platform.channel import CommandRejected
+from deskpet_platform.channel import AckTimeout, CommandRejected
 from deskpet_platform.client import Client
 from deskpet_platform.mcp_server import BoardSession, CardFile
 from deskpet_platform.pairing import DeviceConfig
 
 
 class CardUploadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lost_start_receipt_keeps_relay_open_and_queries_original_job(self):
+        class Relay:
+            url, served, closed = "http://127.0.0.1/fixture", True, False
+            def __init__(self, *_args): pass
+            def start(self): return self
+            def close(self): self.closed = True
+
+        relay = Relay()
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "data.bin"
+            source.write_bytes(b"synthetic file")
+            config = DeviceConfig("02:00:00:00:00:01", bytes(32))
+            original = Client(config)
+            recovered = Client(config)
+            original.device_id = recovered.device_id = "test-board"
+            original.link.peer_address = "127.0.0.1"
+            for client in (original, recovered):
+                client.channel.capabilities = {"card_transfer": 1, "card_fetch_async": 1, "card_fetch_receipt": 1}
+                client.channel.online = True
+            original.close = AsyncMock()
+
+            async def lose_receipt(kind, **fields):
+                self.assertEqual(kind, "card_fetch")
+                self.assertRegex(fields["transfer_id"], "^[0-9a-f]{32}$")
+                recovered.channel.send = AsyncMock(side_effect=[
+                    {"transfer_status": "pending"}, {"stored": True},
+                    {"transfer_status": "pending"}, {"stored": True},
+                ])
+                original.channel.online = False
+                raise AckTimeout("lost start receipt")
+
+            original.channel.send = AsyncMock(side_effect=lose_receipt)
+            session = BoardSession(Path(directory) / "device.json")
+            session.client = original
+
+            async def reconnect(config):
+                self.assertFalse(relay.closed)
+                self.assertEqual(config, original.config)
+                return recovered
+
+            with patch.object(session, "open_wifi", reconnect), patch(
+                "deskpet_platform.card_upload.CardRelay", return_value=relay
+            ), patch("deskpet_platform.card_upload.asyncio.sleep", AsyncMock()):
+                result = await session.upload_files([
+                    CardFile(source=str(source), path="desk/data.bin"),
+                    CardFile(source=str(source), path="desk/next.bin"),
+                ])
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual([item["path"] for item in result["completed"]], ["desk/data.bin", "desk/next.bin"])
+            self.assertIs(session.client, recovered)
+            self.assertTrue(relay.closed)
+            original.channel.send.assert_awaited_once()
+            transfer_id = original.channel.send.await_args.kwargs["transfer_id"]
+            self.assertEqual(recovered.channel.send.await_count, 4)
+            for status in recovered.channel.send.await_args_list[:2]:
+                self.assertEqual(status.args, ("card_fetch_status",))
+                self.assertEqual(status.kwargs, {"transfer_id": transfer_id})
+            next_start, next_status = recovered.channel.send.await_args_list[2:]
+            self.assertEqual(next_start.args, ("card_fetch",))
+            self.assertNotEqual(next_start.kwargs["transfer_id"], transfer_id)
+            self.assertEqual(next_status.kwargs, {"transfer_id": next_start.kwargs["transfer_id"]})
+
     async def test_photo_upload_reconnects_and_waits_for_the_previous_writer(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -259,7 +259,7 @@ class Client:
                 raise
         return event
 
-    async def upload_file(self, path, source, *, expected_sha256=None):
+    async def upload_file(self, path, source, *, expected_sha256=None, resume=None):
         """Transfer one file to the board's card, reporting a verified write."""
         if self.channel.capabilities.get("card_transfer") != 1:
             raise DeviceError("card_transfer_not_supported")
@@ -270,7 +270,8 @@ class Client:
         lock = self._upload if background else self._operation
         async with lock:
             return await upload_file(self.channel, self.link.peer_address, self.config.key, path, source,
-                                     expected_sha256=expected_sha256, background=background)
+                                     expected_sha256=expected_sha256, background=background,
+                                     resume=resume if self.channel.capabilities.get("card_fetch_receipt") == 1 else None)
 
     async def delete_resource(self, path):
         if self.channel.capabilities.get("card_delete") != 1:

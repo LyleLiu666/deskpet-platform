@@ -15,7 +15,7 @@ import threading
 import zlib
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from .channel import CommandRejected
+from .channel import AckTimeout, CommandRejected, DeviceError
 
 MAX_FILE_BYTES = 128 * 1024 * 1024
 
@@ -119,7 +119,41 @@ def encrypt_file(source, destination, key, iv, path, size, crc):
     return digest.hexdigest()
 
 
-async def upload_file(channel, device_ip, key, path, source, *, expected_sha256=None, background=False):
+async def wait_for_fetch(channel, fields, resume):
+    if resume:
+        # This ID is independent of a control connection's epoch and sequence.
+        status_fields = {"transfer_id": secrets.token_hex(16)}
+        fields = {**fields, **status_fields}
+    else:
+        status_fields = {}
+    kind, request = "card_fetch", {"background": True, **fields}
+    interrupted = None
+    while True:
+        try:
+            result = await channel.send(kind, **request)
+        except CommandRejected as error:
+            if interrupted is not None and error.code == "unknown_card_transfer":
+                raise interrupted from error
+            raise
+        except (DeviceError, OSError) as error:
+            disconnected = isinstance(error, (AckTimeout, OSError)) or str(error) == "handshake_required"
+            if not resume or not disconnected or channel.online:
+                raise
+            interrupted = error
+            channel = await resume(channel)
+            kind, request = "card_fetch_status", status_fields
+            continue
+        interrupted = None
+        if result.get("transfer_status") != "pending":
+            return result
+        if not status_fields:
+            status_fields = {"operation": result["seq"]}
+        kind, request = "card_fetch_status", status_fields
+        # The board continues writing between polls.
+        await asyncio.sleep(1)
+
+
+async def upload_file(channel, device_ip, key, path, source, *, expected_sha256=None, background=False, resume=None):
     validate_path(path)
     if not isinstance(key, bytes) or len(key) != 32:
         raise ValueError("设备配对凭据不可用。")
@@ -128,6 +162,13 @@ async def upload_file(channel, device_ip, key, path, source, *, expected_sha256=
     # Allow for SPI card writes and readback while the role is still playing.
     transfer_timeout = max(300, 60 + math.ceil(size / (48 * 1024)))
     iv = secrets.token_bytes(12)
+
+    async def resume_fetch(previous):
+        nonlocal channel, device_ip
+        channel = await resume(previous)
+        device_ip = channel.transport.peer_address or device_ip
+        return channel
+
     with tempfile.TemporaryDirectory(prefix="deskpet-card-") as directory:
         encrypted = Path(directory) / "payload"
         actual_sha256 = await asyncio.to_thread(encrypt_file, source, encrypted, key, iv, path, size, crc)
@@ -140,13 +181,7 @@ async def upload_file(channel, device_ip, key, path, source, *, expected_sha256=
                 fields = dict(path=path, bytes=size, crc32=crc, iv=iv.hex(), url=relay.url)
                 if background:
                     async with asyncio.timeout(transfer_timeout):
-                        result = await channel.send("card_fetch", background=True, **fields)
-                        operation = result["seq"]
-                        while result.get("transfer_status") == "pending":
-                            # The card works independently; frequent status queries
-                            # compete with the transfer and the normal heartbeat.
-                            await asyncio.sleep(1)
-                            result = await channel.send("card_fetch_status", operation=operation)
+                        result = await wait_for_fetch(channel, fields, resume_fetch if resume else None)
                 else:
                     result = await channel.send("card_fetch", timeout=transfer_timeout, **fields)
                 if result.get("stored") is not True or (not relay.served and result.get("unchanged") is not True):

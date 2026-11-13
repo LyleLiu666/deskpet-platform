@@ -865,8 +865,20 @@ class BoardSession:
 
     async def _upload_card_file(self, client, path, source, *, expected_sha256=None):
         options = {} if expected_sha256 is None else {"expected_sha256": expected_sha256}
+
+        async def resume(_channel):
+            nonlocal client
+            async with self.lock:
+                deadline = asyncio.get_running_loop().time() + 30
+                client = await self._reconnect_card_wifi(client, deadline)
+            return client.channel
+
+        if (getattr(getattr(client, "link", None), "wireless", False) is True and
+                client.channel.capabilities.get("card_fetch_receipt") == 1):
+            options["resume"] = resume
         try:
-            return client, await client.upload_file(path, source, **options)
+            result = await client.upload_file(path, source, **options)
+            return client, result
         except (AckTimeout, OSError):
             wireless = getattr(getattr(client, "link", None), "wireless", False) is True
             if client.channel.online or not wireless or client.channel.capabilities.get("card_fetch_async") != 1:
@@ -879,7 +891,8 @@ class BoardSession:
             if delay:
                 await asyncio.sleep(delay)
             try:
-                return client, await client.upload_file(path, source, **options)
+                result = await client.upload_file(path, source, **options)
+                return client, result
             except CommandRejected as error:
                 if error.code != "card_busy" or delay == 15:
                     raise

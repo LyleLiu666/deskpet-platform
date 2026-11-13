@@ -32,6 +32,7 @@ asyncio.run(main())
 - 电脑向 UDP 34915 端口发送 `DESK-LINK-1,<设备标识>,<本机临时 TCP 端口>`。小板主动回连。H1 / D1 / H2 交换随机值和 HMAC-SHA256 证明，再从长期密钥和两端随机值派生会话密钥。
 - 后续的 TCP 记录是 `F,<序号>,<十六进制密文及认证标签>`。两方向各自从 1 开始计数。AES-GCM 的 nonce 为四字节方向标识加八字节大端序号，附加认证数据是 `desk-link-v1`。认证失败、跳号或超时后重新建链。具体编码见电脑端的 `wifi_secure.py`。
 - 记录内承载逐行的 `P1,<JSON>`。根据板端握手声明的能力，SDK 提供储存卡传输、角色、图片、亮度及触摸校准命令。消息字段可查看电脑端的 `client.py` 和 `channel.py`。
+- 固件声明 `card_fetch_receipt` 时，MCP 可在 Wi-Fi 控制连接中断后重新连接同一台设备，按 `transfer_id` 查询原写卡任务的回执。旧固件继续使用当前连接的 `operation` 查询。
 - 使用 `desk_render_metrics(reset=true)` 开始采样，让同一角色、同一档位播放固定时长，再调用 `desk_render_metrics`。旧版的 `fps` 按采样窗口内处理的帧数计算。新版的 `displayed_fps` 只计算至少有一个动画分块写入屏幕的帧，`displayed_frame_gap_ms` 可查看写屏帧之间的最长间隔。
 - `load_us`、`background_us` 和 `composite_us` 记录读帧、背景处理和合成。`background_cached` 表示当前角色的背景是否已缓存。`display_us` 包括提交分块时的触摸采样与像素比较，`spi_us` 只计屏幕写入。
 - `touch_dispatch_ms` 从固件首次采样到抬手起算，到处理点击为止。`touch_role_feedback_ms` 从同一时刻起算，到本地 `touched` 动作首帧写屏完成为止。没有写屏的动作不计入反馈时间。`touch_ack_ms` 从设备发出点击事件到收到电脑回执。

@@ -1,4 +1,5 @@
 import os
+from email import message_from_bytes
 from pathlib import Path
 import shutil
 import subprocess
@@ -25,11 +26,16 @@ class InstallFreshnessTests(unittest.TestCase):
             subprocess.run(["uv", "build", "--offline"], cwd=project, check=True, capture_output=True, text=True)
             with tarfile.open(next((project / "dist").glob("*.tar.gz"))) as archive:
                 members = {item.name.partition("/")[2]: item for item in archive.getmembers()}
-                self.assertIn("LICENSE", members)
                 self.assertIn("uv.lock", members)
+                self.assertEqual(archive.extractfile(members["LICENSE"]).read(), (ROOT / "LICENSE").read_bytes())
                 self.assertTrue(members["install-macos.command"].mode & 0o100)
             with ZipFile(next((project / "dist").glob("*.whl"))) as archive:
-                self.assertTrue(any(name.endswith(".dist-info/licenses/LICENSE") for name in archive.namelist()))
+                metadata = next(name for name in archive.namelist() if name.endswith(".dist-info/METADATA"))
+                project_metadata = message_from_bytes(archive.read(metadata))
+                self.assertEqual(project_metadata["License-Expression"], "PolyForm-Noncommercial-1.0.0")
+                self.assertIn("LICENSE", project_metadata.get_all("License-File", []))
+                license_file = metadata.removesuffix("METADATA") + "licenses/LICENSE"
+                self.assertEqual(archive.read(license_file), (ROOT / "LICENSE").read_bytes())
                 expected = ["manuals/operations.md", "manuals/development.md", "manuals/roles.md",
                             "role_example.py", "opencode_plugin.js",
                             "assets/agent_icons/LICENSE"]
@@ -46,7 +52,7 @@ class InstallFreshnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="deskpet-install-test-") as directory:
             project = Path(directory) / "project"
             project.mkdir()
-            for name in ("pyproject.toml", "uv.lock", "README.md"):
+            for name in ("LICENSE", "pyproject.toml", "uv.lock", "README.md"):
                 shutil.copy2(ROOT / name, project / name)
             shutil.copytree(ROOT / "src/deskpet_platform", project / "src/deskpet_platform",
                             ignore=shutil.ignore_patterns("__pycache__"))

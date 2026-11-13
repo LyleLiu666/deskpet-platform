@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Local Wi-Fi SDK and MCP for DeskPet-compatible displays"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
 dependencies = [
     "cryptography==50.0.2",
     "mcp==1.28.1",
@@ -30,6 +32,7 @@ deskpet_platform = ["manuals/*.md", "assets/agent_icons/*.png", "assets/agent_ic
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "README.md" },
+    { file = "LICENSE" },
     { file = "src/deskpet_platform/**/*.py" },
     { file = "src/deskpet_platform/manuals/*.md" },
     { file = "src/deskpet_platform/assets/agent_icons/*" },
