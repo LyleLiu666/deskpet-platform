@@ -354,6 +354,39 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
             client.close.assert_awaited_once()
             self.assertIsNone(session.client)
 
+    async def test_expired_control_session_is_dropped_and_poll_can_reconnect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "device.json"
+            DeviceConfig(DEVICE, KEY, "192.168.1.42").save(config_path)
+            session = BoardSession(config_path)
+            expired, replacement = AsyncMock(), AsyncMock()
+            for client in (expired, replacement):
+                client.channel.capabilities = {}
+                client.channel.dropped_events = 0
+                client.link.wireless = True
+            expired.status.side_effect = CommandRejected("handshake_required")
+            replacement.status.return_value = {"screen_page": 0}
+            session.client = expired
+            session.snapshot = {"connection": "connected"}
+
+            self.assertEqual((await session.get_status())["connection"], "offline")
+            expired.close.assert_awaited_once()
+            self.assertIsNone(session.client)
+
+            # Polling must also recover when it sees the stale epoch first.
+            session.client = expired
+            expired.close.reset_mock()
+            with patch.object(session, "connect", return_value=replacement) as connect, patch(
+                "deskpet_platform.mcp_server.asyncio.sleep",
+                side_effect=[None, asyncio.CancelledError],
+            ):
+                with self.assertRaises(asyncio.CancelledError):
+                    await session.poll()
+            expired.close.assert_awaited_once()
+            connect.assert_awaited_once()
+            self.assertIs(session.client, replacement)
+            self.assertEqual(session.snapshot["connection"], "connected")
+
     async def test_usb_pairing_verifies_over_usb_when_the_reported_wifi_address_is_unreachable(self):
         config = DeviceConfig(DEVICE, KEY, "192.168.1.42")
         wifi, usb = AsyncMock(), AsyncMock()

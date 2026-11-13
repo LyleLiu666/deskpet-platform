@@ -209,6 +209,13 @@ class BoardSession:
             "next_step": "请停止占用小板的服务。" if busy else "检查供电、Wi-Fi 和配对，详见操作手册。",
         }
 
+    async def record_status_rejection(self, error):
+        if error.code == "handshake_required":
+            await self.record_link_error(error)
+        elif self.client is None:
+            self.snapshot = {"connection": "offline"}
+        self.snapshot["device_error"] = error.code
+
     async def get_status(self):
         if self.client is None or self.storage_lock.locked():
             return self.snapshot.copy()
@@ -218,7 +225,7 @@ class BoardSession:
             try:
                 heartbeat = await self.client.status()
             except CommandRejected as error:
-                self.snapshot["device_error"] = error.code
+                await self.record_status_rejection(error)
             except LINK_ERRORS as error:
                 await self.record_link_error(error)
             else:
@@ -287,9 +294,7 @@ class BoardSession:
                 except FileNotFoundError:
                     self.snapshot = {"connection": "not_paired", "next_step": "在本机运行 deskpet-platform pair。"}
                 except CommandRejected as error:
-                    if self.client is None:
-                        self.snapshot = {"connection": "offline"}
-                    self.snapshot["device_error"] = error.code
+                    await self.record_status_rejection(error)
                 except LINK_ERRORS as error:
                     await self.record_link_error(error)
             await asyncio.sleep(1 if self.client is not None else 3)
