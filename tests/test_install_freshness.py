@@ -52,7 +52,7 @@ class InstallFreshnessTests(unittest.TestCase):
                             "role_example.py", "opencode_plugin.js",
                             "assets/agent_icons/LICENSE"]
                 expected.extend("assets/agent_icons/" + icon + ".png" for icon in
-                                ("antigravity", "claudecode", "codex", "opencode", "workbuddy"))
+                                ("antigravity", "chatgpt", "claudecode", "opencode", "workbuddy"))
                 for relative in expected:
                     self.assertIn("deskpet_platform/" + relative, archive.namelist())
                 self.assertFalse(any(name.startswith(("resources/", "third_party/", "firmware/"))

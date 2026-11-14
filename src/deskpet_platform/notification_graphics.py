@@ -10,7 +10,7 @@ from .client import _text_font
 from .notifications import SOURCE_NAMES
 
 
-ICON_FILES = {"codex": "codex", "claude_code": "claudecode", "workbuddy": "workbuddy",
+ICON_FILES = {"codex": "chatgpt", "claude_code": "claudecode", "workbuddy": "workbuddy",
               "antigravity": "antigravity", "opencode": "opencode"}
 HOME_NAMES = {**SOURCE_NAMES, "claude_code": "Claude"}
 SCALE = 3

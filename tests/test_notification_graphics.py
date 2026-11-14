@@ -6,6 +6,10 @@ from deskpet_platform import notification_graphics as graphics
 
 
 class NotificationGraphicsTests(unittest.TestCase):
+    def test_codex_keeps_its_source_name_with_the_chatgpt_mark(self):
+        self.assertEqual(graphics.ICON_FILES["codex"], "chatgpt")
+        self.assertEqual(graphics.SOURCE_NAMES["codex"], "Codex")
+
     def test_all_requested_sources_have_distinct_packaged_marks(self):
         sources = ("codex", "claude_code", "workbuddy", "antigravity", "opencode")
         bitmaps = [graphics.list_title({"source": source, "title": "example"}) for source in sources]
