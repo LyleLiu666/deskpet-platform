@@ -32,22 +32,38 @@ class NotificationCache:
         self.epoch = None
         self.transfer = None
         self.confirmed = None
+        self.confirmed_epoch = None
         self.poll_at = 0
+        self.retry_at = 0
+
+    def committed_records(self, channel):
+        if self.confirmed is not None and channel.epoch == self.confirmed_epoch and channel.boot == self.confirmed[0]:
+            return self.confirmed[2]
 
     async def step(self, client):
         channel = client.channel
         if channel.capabilities.get("agent_cache_selective") != 1:
             return
+        cache_first = channel.capabilities.get("agent_cache_first") == 1
         if channel.epoch != self.epoch:
             self.epoch = channel.epoch
             self.transfer = None
-            self.poll_at = 0
+            self.poll_at = self.retry_at = 0
         if self.transfer is None:
-            if time.monotonic() < self.poll_at:
+            now = time.monotonic()
+            if now < self.retry_at:
+                return
+            committed = self.committed_records(channel)
+            if now < self.poll_at and (not cache_first or committed is None or committed == self.store.cache_records()):
                 return
             self.transfer = self._sync(channel)
         async with client._operation:
-            for _ in range(8):
+            # Bound the amount of work between heartbeats. Use spare time on
+            # fast links to make a complete card commit sooner.
+            deadline = time.monotonic() + .25
+            for index in range(32 if cache_first else 8):
+                if cache_first and index and time.monotonic() >= deadline:
+                    return
                 if not channel.events.empty():
                     return
                 try:
@@ -58,8 +74,7 @@ class NotificationCache:
                     return
                 except CommandRejected as error:
                     self.transfer = None
-                    self.poll_at = time.monotonic() + 5
-                    self.confirmed = None
+                    self.poll_at = self.retry_at = time.monotonic() + 5
                     if error.code in ("card_busy", "role_busy"):
                         return
                     await channel.send("cache_abort")
@@ -67,10 +82,18 @@ class NotificationCache:
 
     async def _sync(self, channel):
         state = await channel.send("cache_state")
-        yield
-        if not state.get("cache_available") or state.get("cache_busy"):
+        if not state.get("cache_available"):
+            self.confirmed_epoch = None
+            self.confirmed = None
             return
         generation = state["cache_generation"]
+        if self.confirmed is not None and (channel.boot, generation) == self.confirmed[:2]:
+            self.confirmed_epoch = channel.epoch
+        elif self.confirmed_epoch != channel.epoch:
+            self.confirmed_epoch = None
+        yield
+        if state.get("cache_busy"):
+            return
         records = self.store.cache_records()
         if (channel.boot, generation, records) == self.confirmed:
             return
@@ -117,6 +140,10 @@ class NotificationCache:
         reply = await channel.send("cache_begin", generation=generation + 1, count=len(prepared))
         yield
         if reply.get("cache_busy") or reply.get("cache_changed"):
+            if reply.get("cache_changed"):
+                # Another card writer changed the generation before upload.
+                # Keep the earlier commit only when the next probe recognizes it.
+                self.confirmed_epoch = None
             return
         for item, bitmap in prepared:
             await channel.send("cache_item", **item)
@@ -129,4 +156,5 @@ class NotificationCache:
         if reply.get("cache_generation") != generation + 1:
             raise RuntimeError("notification_cache_not_committed")
         self.confirmed = (channel.boot, generation + 1, records)
+        self.confirmed_epoch = channel.epoch
         yield

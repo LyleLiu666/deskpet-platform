@@ -307,7 +307,6 @@ class BoardSession:
                     if self.client.channel.capabilities.get("agent_home") == 1:
                         try:
                             await self.refresh_agent_notifications(heartbeat)
-                            await self.notification_cache.step(self.client)
                         except (sqlite3.Error, ValueError):
                             self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
                     elif time.monotonic() >= self.next_notification_attempt:
@@ -337,8 +336,15 @@ class BoardSession:
 
     async def refresh_agent_notifications(self, heartbeat):
         if self.client is not None:
+            channel = self.client.channel
+            cache_first = channel.capabilities.get("agent_cache_first") == 1
+            if cache_first:
+                await self.notification_cache.step(self.client)
             await self.notification_view.refresh(self.client, device_page=heartbeat.get("pet_page"),
-                                                 role_ready=heartbeat.get("role_state") == "ready")
+                                                 role_ready=heartbeat.get("role_state") == "ready",
+                                                 cached_records=self.notification_cache.committed_records(channel))
+            if not cache_first:
+                await self.notification_cache.step(self.client)
 
     async def message_view(self, mode, identity):
         async with self.lock:
@@ -352,7 +358,12 @@ class BoardSession:
                     return {"status": "unsupported", "next_step": "用 list 打开小屏提醒列表，再在小屏上翻页或查看详情。"}
                 if identity is not None:
                     raise ValueError("打开小屏提醒列表无需填写通知编号。")
-                reply = await self.client.set_view("messages")
+                try:
+                    reply = await self.client.set_view("messages")
+                except CommandRejected as error:
+                    if error.code != "cache_not_ready":
+                        raise
+                    return {"status": "cache_not_ready", "next_step": "请确认储存卡已插入，并等待后台下载提醒。"}
                 if reply.get("screen_page") != SCREEN_PAGES.index("messages"):
                     raise DeviceError("message_list_not_confirmed")
                 return {"status": "ok", "view": "list"}

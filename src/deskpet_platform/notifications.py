@@ -207,6 +207,8 @@ class NotificationStore:
                 FROM notifications ORDER BY id DESC LIMIT 100""").fetchall()
         records = self._items(rows)
         for record, row in zip(records, rows):
+            # Showing a reminder on the device does not change its TF rendition.
+            del record["shown"]
             record["cache_id"] = self._cache_id(row[0], row[5], row[8], row[9], row[2])
         return records
 
@@ -250,6 +252,19 @@ class NotificationStore:
             now = time.time()
             db.executemany("UPDATE notifications SET shown=COALESCE(shown,?) WHERE id=?",
                            ((now, identity) for identity in identities))
+
+    def cached_home_receipts(self, identities):
+        if not identities:
+            return (), 0
+        placeholders = ",".join("?" for _ in identities)
+        with closing(self._connect()) as db:
+            rows = db.execute(f"""SELECT id,shown IS NULL,category='response' AND
+                         id>COALESCE((SELECT through_id FROM notification_attention WHERE id=1),0)
+                FROM notifications WHERE id IN ({placeholders}) AND
+                  ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL))""",
+                identities).fetchall()
+        return tuple(identity for identity, shown_pending, _ in rows if shown_pending), max(
+            (identity for identity, _, attention_pending in rows if attention_pending), default=0)
 
     def next_pending(self, *, text_only=False):
         # Shown legacy records have no action flag. Only an explicit retry keeps a shown record pending.

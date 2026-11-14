@@ -102,6 +102,9 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(CommandRejected, "screen_busy"):
                 await session.message_view("list", None)
 
+            client.channel.send.side_effect = CommandRejected("cache_not_ready")
+            self.assertEqual((await session.message_view("list", None))["status"], "cache_not_ready")
+
             client.channel.send.reset_mock(side_effect=True)
             client.channel.send.return_value = {"screen_page": 0}
             with self.assertRaisesRegex(DeviceError, "message_list_not_confirmed"):

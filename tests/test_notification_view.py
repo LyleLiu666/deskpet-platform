@@ -219,6 +219,40 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(listing["pagination"], [0, 1])
         self.assertEqual(listing["count"], 1)
 
+    async def test_cache_first_live_list_matches_committed_page_and_keeps_full_history(self):
+        channel = self.client.channel
+        channel.capabilities["agent_cache_first"] = 1
+        for index in range(105):
+            self.store.add_agent_event("codex", "s", str(index), "completed", "Task")
+        committed = self.store.cache_records()
+        newer = self.store.add_agent_event("workbuddy", "s", "new", "response", "New")
+        await self.view.refresh(self.client, cached_records=committed)
+        self.assertEqual(channel.messages[0][1]["results"], 100)
+        self.assertEqual(channel.messages[0][1]["waiting"], 0)
+        self.assertTrue(self.view.touch({"action": "list", "version": self.view.version, "id": ""}))
+        await self.view.refresh(self.client, device_page=1, cached_records=committed)
+        listing = [fields for kind, fields in channel.messages if kind == "snapshot_begin"][-1]
+        self.assertEqual(listing["pagination"], [0, 27])
+        self.assertEqual([row["id"] for row in self.view.rows], [f"n-{item['id']}" for item in committed[:4]])
+        self.assertFalse(self.store.list()[0]["shown"])
+        self.assertNotIn(f"n-{newer}", self.view.items)
+        for _ in range(26):
+            self.assertTrue(self.view.touch({"action": "next", "version": self.view.version, "id": ""}))
+            await self.view.refresh(self.client, device_page=1, cached_records=self.store.cache_records())
+        self.assertEqual([row["id"] for row in self.view.rows], ["n-1"])
+
+    async def test_cache_first_list_does_not_project_a_row_updated_before_card_commit(self):
+        self.client.channel.capabilities["agent_cache_first"] = 1
+        identity = self.store.add_agent_event("codex", "s", "question", "response", "Check this")
+        committed = self.store.cache_records()
+        await self.view.refresh(self.client, cached_records=committed)
+        self.assertTrue(self.view.touch({"action": "list", "version": self.view.version, "id": ""}))
+        self.store.resolve_response(identity)
+        self.assertFalse(await self.view.refresh(self.client, device_page=1, cached_records=committed))
+        self.assertEqual(sum(kind == "snapshot_commit" for kind, _ in self.client.channel.messages), 1)
+        self.assertTrue(await self.view.refresh(self.client, device_page=1, cached_records=self.store.cache_records()))
+        self.assertEqual(self.view.rows[0]["kind"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from deskpet_platform.channel import CommandRejected
+from deskpet_platform.mcp_server import BoardSession
 from deskpet_platform.notification_cache import NotificationCache
 from deskpet_platform.notifications import NotificationStore
 
@@ -18,13 +20,17 @@ class CacheBoard:
         self.commands = []
         self.generation = 4
         self.receipts = []
+        self.cache_available = True
+        self.failure = None
 
     async def send(self, command, **fields):
         line = {"epoch": self.epoch, "seq": len(self.commands) + 1, "type": command, **fields}
         assert len(("P1," + json.dumps(line, separators=(",", ":")) + "\n").encode()) <= 1024
         self.commands.append((command, fields))
+        if command == self.failure:
+            raise CommandRejected("card_busy")
         if command == "cache_state":
-            return {"cache_available": True, "cache_generation": self.generation}
+            return {"cache_available": self.cache_available, "cache_generation": self.generation}
         if command == "cache_receipt_next":
             return self.receipts.pop(0) if self.receipts else {"has_receipt": False}
         if command == "cache_detail_begin":
@@ -32,6 +38,8 @@ class CacheBoard:
         if command == "cache_commit":
             self.generation += 1
             return {"cache_generation": self.generation}
+        if command == "snapshot_commit":
+            return {"committed_version": fields["version"]}
         return {}
 
 
@@ -76,3 +84,61 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
         self.channel.capabilities = {"message_cache": 1, "agent_home": 1}
         await self.cache.step(self.client)
         self.assertEqual(self.channel.commands, [])
+
+    async def test_first_reminder_waits_for_committed_card_and_shown_receipt_causes_no_upload(self):
+        session = BoardSession(self.store.path.with_name("device.json"))
+        session.client = self.client
+        self.channel.capabilities["agent_cache_first"] = 1
+        first = self.store.add_agent_event("codex", "s", "first", "completed", "First")
+        self.channel.cache_available = False
+        await session.refresh_agent_notifications({"pet_page": 0})
+        self.assertEqual([cmd for cmd, _ in self.channel.commands], ["cache_state"])
+        self.assertFalse(self.store.list()[0]["shown"])
+
+        self.channel.cache_available = True
+        session.notification_cache.poll_at = 0
+        await session.refresh_agent_notifications({"pet_page": 0})
+        operations = [cmd for cmd, _ in self.channel.commands]
+        self.assertLess(operations.index("cache_detail_commit"), operations.index("cache_commit"))
+        self.assertLess(operations.index("cache_commit"), operations.index("snapshot_begin"))
+        self.assertEqual([(item["id"], item["shown"]) for item in self.store.list()], [(first, True)])
+
+        session.notification_cache.poll_at = 0
+        await session.refresh_agent_notifications({"pet_page": 0})
+        self.assertEqual(sum(cmd == "cache_commit" for cmd, _ in self.channel.commands), 1)
+
+        self.channel.epoch = "f" * 32
+        self.assertIsNone(session.notification_cache.committed_records(self.channel))
+        await session.refresh_agent_notifications({"pet_page": 0})
+        self.assertEqual(sum(cmd == "cache_commit" for cmd, _ in self.channel.commands), 1)
+        self.assertEqual([item["id"] for item in session.notification_cache.committed_records(self.channel)], [first])
+
+    async def test_later_reminder_survives_interrupted_card_write_and_does_not_publish_early(self):
+        session = BoardSession(self.store.path.with_name("device.json"))
+        session.client = self.client
+        self.channel.capabilities["agent_cache_first"] = 1
+        first = self.store.add_agent_event("codex", "s", "first", "completed", "First")
+        await session.refresh_agent_notifications({"pet_page": 0})
+        self.assertEqual([item["id"] for item in session.notification_cache.committed_records(self.channel)], [first])
+        self.channel.failure = "cache_commit"
+        newer = self.store.add_agent_event("workbuddy", "s", "next", "completed", "New")
+        await session.refresh_agent_notifications({"pet_page": 0})
+        self.assertEqual([item["id"] for item in session.notification_cache.committed_records(self.channel)], [first])
+        self.assertFalse(self.store.list()[0]["shown"])
+
+        self.channel.failure = None
+        self.channel.epoch = "f" * 32
+        self.assertIsNone(session.notification_cache.committed_records(self.channel))
+        await session.refresh_agent_notifications({"pet_page": 0})
+        self.assertEqual([item["id"] for item in session.notification_cache.committed_records(self.channel)], [newer, first])
+        self.assertTrue(self.store.list()[0]["shown"])
+
+    async def test_previous_agent_firmware_publishes_home_without_waiting_for_the_card(self):
+        session = BoardSession(self.store.path.with_name("device.json"))
+        session.client = self.client
+        self.channel.cache_available = False
+        self.store.add_agent_event("codex", "s", "first", "completed", "First")
+        await session.refresh_agent_notifications({"pet_page": 0})
+        operations = [cmd for cmd, _ in self.channel.commands]
+        self.assertLess(operations.index("snapshot_commit"), operations.index("cache_state"))
+        self.assertTrue(self.store.list()[0]["shown"])

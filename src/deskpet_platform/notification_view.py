@@ -35,6 +35,27 @@ def _detail_pixels(item):
     return image.tobytes()
 
 
+def _cached_home_summary(records):
+    completed_count = 0
+    completed_sources = {}
+    responses = {}
+    active = []
+    for item in records:
+        source = item["source"]
+        if item["category"] == "completed" and not item["seen"]:
+            completed_count += 1
+            completed_sources[source] = None
+            active.append(item["id"])
+        elif item["category"] == "response" and not item["resolved"]:
+            entry = responses.setdefault(source, {"source": source, "count": 0,
+                                                   "id": item["id"], "title": item["title"]})
+            entry["count"] += 1
+            active.append(item["id"])
+    return {"completed_count": completed_count, "completed_sources": list(completed_sources),
+            "response_source_count": len(responses), "response_count": sum(item["count"] for item in responses.values()),
+            "response_sources": list(responses.values())[:3]}, active
+
+
 class NotificationView:
     def __init__(self, store):
         self.store = store
@@ -101,24 +122,32 @@ class NotificationView:
         self.signature = None
         return True
 
-    async def refresh(self, client, *, device_page=None, role_ready=True):
+    async def refresh(self, client, *, device_page=None, role_ready=True, cached_records=None):
         channel = client.channel
         if channel.capabilities.get("agent_home") != 1:
             return False
         if self.epoch != channel.epoch:
             self._reset(channel.epoch, channel.boot, device_page)
+        cache_first = channel.capabilities.get("agent_cache_first") == 1
+        if cache_first and cached_records is None and (self.mode == "home" or self.anchor is None):
+            return False
         if self.mode == "detail" and self.version:
             return await self._detail(client)
-        if self.mode == "home":
+        attention = 0
+        if cache_first:
+            summary, active = _cached_home_summary(cached_records or ())
+            receipts, attention = self.store.cached_home_receipts(active) if self.mode == "home" else ((), 0)
+        elif self.mode == "home":
             summary, receipts = self.store.home_summary(include_receipts=True)
         else:
             summary, receipts = self.store.home_summary(), ()
         waiting = min(65535, summary["response_count"])
         results = min(65535, summary["completed_count"])
-        attention = 0
         if self.mode == "home":
             signature = json.dumps(["home", summary], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            if waiting and role_ready and device_page in (None, 0) and channel.capabilities.get("response_attention") == 1:
+            if not (waiting and role_ready and device_page in (None, 0) and channel.capabilities.get("response_attention") == 1):
+                attention = 0
+            elif not cache_first:
                 attention = self.store.pending_attention()
             if self.signature == signature and not attention and not receipts:
                 return True
@@ -130,16 +159,26 @@ class NotificationView:
                 extra["response_attention"] = f"{attention:016x}"
             items = {}
         else:
-            page = self.store.list_page(self.page, page_size=4, anchor=self.anchor)
-            self.anchor, self.pages = page["anchor"], page["pages"]
-            if self.pages > 65535:
+            anchor = self.anchor
+            if cache_first and anchor is None:
+                anchor = cached_records[0]["id"] if cached_records else 0
+            page = self.store.list_page(self.page, page_size=4, anchor=anchor)
+            if cache_first and self.anchor is None:
+                # The first live page can replace the TF page only if they
+                # have the same identities and layout. Later live pages can
+                # use the full retained history below this fixed anchor.
+                cached_rows = [(item["id"], notification_row(item)) for item in cached_records[:4]]
+                live_rows = [(item["id"], notification_row(item)) for item in page["items"]]
+                if cached_rows != live_rows:
+                    return False
+            if page["pages"] > 65535:
                 raise ValueError("notification_pages_exceed_device_limit")
             signature = json.dumps(["list", page, waiting, results], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
             if self.signature == signature:
                 return True
             items = {f"n-{item['id']}": item for item in page["items"]}
             rows = [{"id": key, "revision": 1, **notification_row(item)} for key, item in items.items()]
-            extra = {"pagination": [self.page - 1, self.pages]}
+            extra = {"pagination": [self.page - 1, page["pages"]]}
         value = {"count": len(rows), "waiting": waiting, "results": results, "running": 0, **extra}
         self.attempt += 1
         version = self.attempt
@@ -151,6 +190,8 @@ class NotificationView:
             if result.get("committed_version") != version:
                 raise RuntimeError("notification_snapshot_not_committed")
         self.rows, self.items, self.signature, self.version = rows, items, signature, version
+        if self.mode != "home":
+            self.anchor, self.pages = page["anchor"], page["pages"]
         if receipts:
             self.store.mark_home_shown(receipts)
         if attention:
