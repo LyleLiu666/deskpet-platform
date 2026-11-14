@@ -262,6 +262,18 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.unseen_count(), 2)
         self.assertEqual([item["id"] for item in self.store.list() if not item["seen"]], [later, question])
 
+    async def test_local_list_receipt_can_arrive_before_the_first_live_projection(self):
+        channel = self.client.channel
+        channel.capabilities["agent_cache_first"] = 1
+        self.store.add_agent_event("codex", "s", "done", "completed", "Task")
+        committed = self.store.cache_records()
+        event = {"action": "list", "version": 0, "id": committed[0]["cache_id"], "epoch": channel.epoch}
+        self.assertFalse(self.view.touch({**event, "id": ""}, channel=channel))
+        self.assertTrue(self.view.touch(event, channel=channel))
+        self.assertTrue(await self.view.refresh(self.client, device_page=1))
+        self.assertEqual(self.store.unseen_count(), 0)
+        self.assertEqual(self.view.anchor, committed[0]["id"])
+
     async def test_cache_first_list_does_not_project_a_row_updated_before_card_commit(self):
         self.client.channel.capabilities["agent_cache_first"] = 1
         identity = self.store.add_agent_event("codex", "s", "question", "response", "Check this")

@@ -89,12 +89,20 @@ class NotificationView:
         self.detail_sent = self.detail_seen = False
         self.detail_crc = None
 
-    def touch(self, event):
+    def touch(self, event, *, channel=None):
         action = event.get("action")
         version = event.get("version")
-        if (type(version) is not int or not 0 < version <= self.version or
-                event.get("epoch", self.epoch) != self.epoch):
+        cache_id = event.get("id")
+        local_list = action == "list" and isinstance(cache_id, str) and bool(cache_id)
+        epoch, active_version = self.epoch, self.version
+        if local_list and channel is not None and channel.epoch != epoch:
+            epoch, active_version = channel.epoch, 0
+        minimum_version = 0 if local_list else 1
+        if (type(version) is not int or not minimum_version <= version <= active_version or
+                event.get("epoch", epoch) != epoch):
             return False
+        if local_list and epoch != self.epoch:
+            self._reset(epoch, channel.boot, 1)
         if action in ("home", "list"):
             # These destinations are independent of the rows on the screen.
             if event.get("id") != "" and action != "list":
@@ -104,7 +112,6 @@ class NotificationView:
         if action == "home":
             self.mode, self.anchor, self.page, self.selected = "home", None, 1, None
         elif action == "list":
-            cache_id = event.get("id")
             if not isinstance(cache_id, str):
                 return False
             if cache_id:
@@ -143,7 +150,10 @@ class NotificationView:
             return await self._detail(client)
         attention = 0
         if cache_first:
-            summary, active = _cached_home_summary(cached_records or ())
+            records = cached_records or ()
+            if self.mode != "home" and self.anchor is not None:
+                records = [item for item in records if item["id"] > self.anchor or item["category"] != "completed"]
+            summary, active = _cached_home_summary(records)
             receipts, attention = self.store.cached_home_receipts(active) if self.mode == "home" else ((), 0)
         elif self.mode == "home":
             summary, receipts = self.store.home_summary(include_receipts=True)

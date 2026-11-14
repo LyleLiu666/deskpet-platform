@@ -372,7 +372,7 @@ class BoardSession:
             return {"status": "ok", **{key: reply[key] for key in fields if key in reply}}
 
     async def process_touch(self, event):
-        self.notification_view.touch(event)
+        self.notification_view.touch(event, channel=getattr(self.client, "channel", None))
         if event["action"] == "notice_open":
             item = self.notifications.latest_unseen()
             if item:
