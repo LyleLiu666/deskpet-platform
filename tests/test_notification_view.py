@@ -107,6 +107,30 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.store.list()[0]["seen"])
         self.assertFalse(self.store.list()[0]["resolved"])
 
+    async def test_home_and_list_taps_survive_a_new_projection(self):
+        identity = self.store.add_agent_event("codex", "s", "first", "completed", "First")
+        await self.view.refresh(self.client)
+        home_version = self.view.version
+        self.store.add_agent_event("codex", "s", "second", "completed", "Second")
+        await self.view.refresh(self.client)
+
+        tap = {"action": "list", "version": home_version, "id": "", "epoch": self.view.epoch}
+        self.assertFalse(self.view.touch({**tap, "version": self.view.version + 1}))
+        self.assertFalse(self.view.touch({**tap, "epoch": "different connection"}))
+        self.assertTrue(self.view.touch(tap))
+        await self.view.refresh(self.client)
+        list_version = self.view.version
+        self.assertEqual(len(self.view.rows), 2)
+        self.assertFalse(self.view.touch({**tap, "action": "detail", "id": f"n-{identity}"}))
+
+        self.store.add_agent_event("codex", "s", "third", "completed", "Third")
+        await self.view.refresh(self.client)
+        self.assertGreater(self.view.version, list_version)
+        self.assertTrue(self.view.touch({**tap, "action": "home", "version": list_version}))
+        await self.view.refresh(self.client)
+        self.assertEqual(self.view.mode, "home")
+        self.assertEqual(sum(item["seen"] for item in self.store.list()), 0)
+
     async def test_reconnect_republishes_and_starts_new_version(self):
         await self.view.refresh(self.client)
         self.client.channel.epoch = "f" * 32

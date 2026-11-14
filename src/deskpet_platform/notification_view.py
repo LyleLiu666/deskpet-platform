@@ -69,9 +69,17 @@ class NotificationView:
         self.detail_crc = None
 
     def touch(self, event):
-        if not self.version or event.get("version") != self.version:
-            return False
         action = event.get("action")
+        version = event.get("version")
+        if (type(version) is not int or not 0 < version <= self.version or
+                event.get("epoch", self.epoch) != self.epoch):
+            return False
+        if action in ("home", "list"):
+            # These destinations are independent of the rows on the screen.
+            if event.get("id") != "":
+                return False
+        elif version != self.version:
+            return False
         if action == "home":
             self.mode, self.anchor, self.page, self.selected = "home", None, 1, None
         elif action == "list":
