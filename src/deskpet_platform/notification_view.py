@@ -35,7 +35,7 @@ def _detail_pixels(item):
     return image.tobytes()
 
 
-def _cached_home_summary(records):
+def _cached_home_summary(records, *, unread_responses=False):
     completed_count = 0
     completed_sources = {}
     responses = {}
@@ -46,7 +46,7 @@ def _cached_home_summary(records):
             completed_count += 1
             completed_sources[source] = None
             active.append(item["id"])
-        elif item["category"] == "response" and not item["resolved"]:
+        elif item["category"] == "response" and not item["resolved"] and (not unread_responses or not item["seen"]):
             entry = responses.setdefault(source, {"source": source, "count": 0,
                                                    "id": item["id"], "title": item["title"]})
             entry["count"] += 1
@@ -115,7 +115,8 @@ class NotificationView:
             if not isinstance(cache_id, str):
                 return False
             if cache_id:
-                anchor = self.store.mark_completed_through_cache_record(cache_id)
+                include_responses = channel is not None and channel.capabilities.get("agent_inbox_read") == 1
+                anchor = self.store.mark_list_seen_through_cache_record(cache_id, include_responses=include_responses)
                 if anchor is None:
                     return False
                 self.page, self.anchor = 1, anchor
@@ -151,9 +152,11 @@ class NotificationView:
         attention = 0
         if cache_first:
             records = cached_records or ()
-            seen = self.store.seen_completions(
-                [item["id"] for item in records if item["category"] == "completed" and not item["seen"]])
-            summary, active = _cached_home_summary(item for item in records if item["id"] not in seen)
+            inbox_read = channel.capabilities.get("agent_inbox_read") == 1
+            seen = self.store.seen_notifications(
+                [item["id"] for item in records if not item["seen"] and (inbox_read or item["category"] == "completed")])
+            summary, active = _cached_home_summary((item for item in records if item["id"] not in seen),
+                                                   unread_responses=inbox_read)
             receipts, attention = self.store.cached_home_receipts(active) if self.mode == "home" else ((), 0)
         elif self.mode == "home":
             summary, receipts = self.store.home_summary(include_receipts=True)
@@ -179,8 +182,9 @@ class NotificationView:
         else:
             anchor = self.anchor
             if cache_first and anchor is None:
-                anchor = cached_records[0]["id"] if cached_records else 0
-            page = self.store.list_page(self.page, page_size=4, anchor=anchor)
+                anchor = max((item["id"] for item in cached_records), default=0)
+            page = self.store.list_page(self.page, page_size=4, anchor=anchor,
+                                        pending_first=channel.capabilities.get("agent_inbox_read") == 1)
             if cache_first and self.anchor is None:
                 # The first live page can replace the TF page only if they
                 # have the same identities and layout. Later live pages can

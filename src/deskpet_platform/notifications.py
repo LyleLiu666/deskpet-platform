@@ -180,7 +180,7 @@ class NotificationStore:
                               (limit,)).fetchall()
         return self._items(rows)
 
-    def list_page(self, page, *, page_size=4, anchor=None):
+    def list_page(self, page, *, page_size=4, anchor=None, pending_first=False):
         if (type(page) is not int or page < 1 or type(page_size) is not int or not 1 <= page_size <= 100 or
                 (anchor is not None and (type(anchor) is not int or anchor < 0))):
             raise ValueError("invalid_notification_page")
@@ -193,7 +193,8 @@ class NotificationStore:
             if page > pages:
                 raise ValueError("invalid_notification_page")
             rows = db.execute("""SELECT id,title,created,shown,seen,source,category,resolved FROM notifications
-                WHERE id<=? ORDER BY id DESC LIMIT ? OFFSET ?""", (anchor, page_size, (page - 1) * page_size)).fetchall()
+                WHERE id<=? ORDER BY CASE WHEN ? AND category='response' AND resolved IS NULL THEN 0 ELSE 1 END,
+                         id DESC LIMIT ? OFFSET ?""", (anchor, pending_first, page_size, (page - 1) * page_size)).fetchall()
         return {"items": self._items(rows), "page": page, "pages": pages, "total": total, "anchor": anchor}
 
     @staticmethod
@@ -201,10 +202,12 @@ class NotificationStore:
         event = json.dumps([source, session, turn, created], ensure_ascii=False).encode("utf-8")
         return f"p-{identity:x}-{hashlib.blake2s(event, digest_size=8).hexdigest()}"
 
-    def cache_records(self):
+    def cache_records(self, *, pending_first=False):
         with closing(self._connect()) as db:
             rows = db.execute("""SELECT id,title,created,shown,seen,source,category,resolved,session,turn
-                FROM notifications ORDER BY id DESC LIMIT 100""").fetchall()
+                FROM notifications
+                ORDER BY CASE WHEN ? AND category='response' AND resolved IS NULL THEN 0 ELSE 1 END,
+                         id DESC LIMIT 100""", (pending_first,)).fetchall()
         records = self._items(rows)
         for record, row in zip(records, rows):
             # Showing a reminder on the device does not change its TF rendition.
@@ -233,14 +236,15 @@ class NotificationStore:
             if identity is not None:
                 db.execute("UPDATE notifications SET seen=COALESCE(seen,?) WHERE id=?", (time.time(), identity))
 
-    def mark_completed_through_cache_record(self, cache_id):
-        """A list receipt covers completed records through its exact TF snapshot."""
+    def mark_list_seen_through_cache_record(self, cache_id, *, include_responses=False):
+        """Record that the list presented the inbox through its exact TF snapshot."""
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             identity = self._matching_cache_record(db, cache_id)
             if identity is not None:
-                db.execute("""UPDATE notifications SET seen=? WHERE id<=? AND category='completed' AND seen IS NULL""",
-                           (time.time(), identity))
+                db.execute("""UPDATE notifications SET seen=? WHERE id<=? AND seen IS NULL
+                              AND (? OR category='completed')""",
+                           (time.time(), identity, include_responses))
             return identity
 
     def home_summary(self, *, include_receipts=False):
@@ -269,13 +273,13 @@ class NotificationStore:
             db.executemany("UPDATE notifications SET shown=COALESCE(shown,?) WHERE id=?",
                            ((now, identity) for identity in identities))
 
-    def seen_completions(self, identities):
+    def seen_notifications(self, identities):
         if not identities:
             return set()
         placeholders = ",".join("?" for _ in identities)
         with closing(self._connect()) as db:
             return {identity for (identity,) in db.execute(
-                f"SELECT id FROM notifications WHERE id IN ({placeholders}) AND category='completed' AND seen IS NOT NULL",
+                f"SELECT id FROM notifications WHERE id IN ({placeholders}) AND seen IS NOT NULL",
                 identities)}
 
     def cached_home_receipts(self, identities):

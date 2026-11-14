@@ -54,6 +54,9 @@ class NotificationCache:
         if self.confirmed is not None and channel.epoch == self.confirmed_epoch and channel.boot == self.confirmed[0]:
             return self.confirmed[2]
 
+    def _records(self, channel):
+        return self.store.cache_records(pending_first=channel.capabilities.get("agent_inbox_read") == 1)
+
     async def step(self, client):
         channel = client.channel
         if channel.capabilities.get("agent_cache_selective") != 1:
@@ -69,7 +72,7 @@ class NotificationCache:
             if now < self.retry_at:
                 return
             committed = self.committed_records(channel)
-            if now < self.poll_at and (not cache_first or committed is None or committed == self.store.cache_records()):
+            if now < self.poll_at and (not cache_first or committed is None or committed == self._records(channel)):
                 return
             self.transfer = self._sync(channel)
         async with client._operation:
@@ -109,7 +112,7 @@ class NotificationCache:
         yield
         if state.get("cache_busy"):
             return
-        records = self.store.cache_records()
+        records = self._records(channel)
         if (channel.boot, generation, records) == self.confirmed:
             return
         receipt = await channel.send("cache_receipt_begin")
@@ -135,7 +138,7 @@ class NotificationCache:
             yield
         await channel.send("cache_receipt_finish")
         yield
-        records = self.store.cache_records()
+        records = self._records(channel)
         active = {}
         reuse = channel.capabilities.get("agent_cache_reuse") == 1 and not self.reuse_failed
         count = state.get("cache_count")

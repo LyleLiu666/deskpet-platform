@@ -288,6 +288,29 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.unseen_count(), 0)
         self.assertEqual(self.view.anchor, committed[0]["id"])
 
+    async def test_four_older_questions_are_first_and_list_reads_through_the_newest_commit(self):
+        channel = self.client.channel
+        channel.capabilities.update(agent_cache_first=1, agent_inbox_read=1)
+        questions = [self.store.add_agent_event("codex", "s", f"q{i}", "response", f"Question {i}") for i in range(4)]
+        for index in range(105):
+            self.store.add_agent_event("codex", "s", str(index), "completed", "Task")
+        card = self.store.cache_records(pending_first=True)
+        self.assertEqual([item["id"] for item in card[:4]], questions[::-1])
+        anchor = max(card, key=lambda row: row["id"])
+        await self.view.refresh(self.client, cached_records=card)
+        self.assertEqual([fields["waiting"] for command, fields in channel.messages if command=="snapshot_begin"], [4])
+        later = self.store.add_agent_event("codex", "s", "new", "completed", "New")
+        self.assertTrue(self.view.touch({"action": "list", "version": self.view.version,
+                                        "id": anchor["cache_id"]}, channel=channel))
+        await self.view.refresh(self.client, device_page=1, cached_records=card)
+        self.assertEqual([row["id"] for row in self.view.rows], [f"n-{identity}" for identity in questions[::-1]])
+        self.assertTrue(all(item["seen"] and not item["resolved"] for item in self.view.items.values()))
+        self.assertEqual(self.store.unseen_count(), 1)
+        self.assertEqual(self.store.list()[0]["id"], later)
+        self.assertTrue(self.view.touch({"action": "home", "version": self.view.version, "id": ""}, channel=channel))
+        await self.view.refresh(self.client, cached_records=card)
+        self.assertEqual([fields["waiting"] for command, fields in channel.messages if command=="snapshot_begin"][-1], 0)
+
     async def test_cache_first_list_does_not_project_a_row_updated_before_card_commit(self):
         self.client.channel.capabilities["agent_cache_first"] = 1
         identity = self.store.add_agent_event("codex", "s", "question", "response", "Check this")
