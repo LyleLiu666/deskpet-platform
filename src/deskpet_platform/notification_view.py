@@ -151,9 +151,9 @@ class NotificationView:
         attention = 0
         if cache_first:
             records = cached_records or ()
-            if self.mode != "home" and self.anchor is not None:
-                records = [item for item in records if item["id"] > self.anchor or item["category"] != "completed"]
-            summary, active = _cached_home_summary(records)
+            seen = self.store.seen_completions(
+                [item["id"] for item in records if item["category"] == "completed" and not item["seen"]])
+            summary, active = _cached_home_summary(item for item in records if item["id"] not in seen)
             receipts, attention = self.store.cached_home_receipts(active) if self.mode == "home" else ((), 0)
         elif self.mode == "home":
             summary, receipts = self.store.home_summary(include_receipts=True)

@@ -262,6 +262,20 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.unseen_count(), 2)
         self.assertEqual([item["id"] for item in self.store.list() if not item["seen"]], [later, question])
 
+    async def test_read_completions_do_not_reappear_on_home_before_the_card_rewrites(self):
+        self.client.channel.capabilities["agent_cache_first"] = 1
+        self.store.add_agent_event("codex", "s", "done", "completed", "Task")
+        self.store.add_agent_event("codex", "s", "ask", "response", "Question")
+        old_commit = self.store.cache_records()
+        await self.view.refresh(self.client, cached_records=old_commit)
+        self.assertTrue(self.view.touch({"action": "list", "version": self.view.version,
+                                        "id": old_commit[0]["cache_id"]}))
+        await self.view.refresh(self.client, device_page=1, cached_records=old_commit)
+        self.assertTrue(self.view.touch({"action": "home", "version": self.view.version, "id": ""}))
+        await self.view.refresh(self.client, cached_records=old_commit)
+        home = [fields for kind, fields in self.client.channel.messages if kind == "snapshot_begin"][-1]
+        self.assertEqual((home["results"], home["waiting"]), (0, 1))
+
     async def test_local_list_receipt_can_arrive_before_the_first_live_projection(self):
         channel = self.client.channel
         channel.capabilities["agent_cache_first"] = 1

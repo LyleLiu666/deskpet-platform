@@ -269,6 +269,15 @@ class NotificationStore:
             db.executemany("UPDATE notifications SET shown=COALESCE(shown,?) WHERE id=?",
                            ((now, identity) for identity in identities))
 
+    def seen_completions(self, identities):
+        if not identities:
+            return set()
+        placeholders = ",".join("?" for _ in identities)
+        with closing(self._connect()) as db:
+            return {identity for (identity,) in db.execute(
+                f"SELECT id FROM notifications WHERE id IN ({placeholders}) AND category='completed' AND seen IS NOT NULL",
+                identities)}
+
     def cached_home_receipts(self, identities):
         if not identities:
             return (), 0
