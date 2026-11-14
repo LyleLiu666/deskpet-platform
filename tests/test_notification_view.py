@@ -337,6 +337,26 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.messages, [])
         self.assertEqual(self.store.seen_notifications([identity]), {identity})
 
+    async def test_local_inbox_resumes_home_after_exit_without_touch_event(self):
+        channel = self.client.channel
+        channel.capabilities.update(agent_cache_first=1, agent_inbox_read=1, agent_local_inbox=1)
+        question = self.store.add_agent_event("codex", "s", "q", "response", "Question")
+        card = self.store.cache_records(pending_first=True, active_only=True)
+        await self.view.refresh(self.client, device_page=0, cached_records=card)
+        self.assertTrue(self.view.touch({"action": "list", "version": self.view.version,
+                                        "id": card[0]["cache_id"]}, channel=channel))
+        # A route through the app menu can return to the role without a home
+        # touch receipt. An open local inbox must still suppress projections.
+        self.assertFalse(await self.view.refresh(self.client, device_page=1, cached_records=card))
+        self.assertFalse(await self.view.refresh(self.client, device_page=255, cached_records=card))
+        completed = self.store.add_agent_event("codex", "s", "done", "completed", "Done")
+        card = self.store.cache_records(pending_first=True, active_only=True)
+        self.assertTrue(await self.view.refresh(self.client, device_page=0, cached_records=card))
+        latest = next(fields for name, fields in reversed(channel.messages) if name == "snapshot_begin")
+        self.assertTrue(latest["agent_home"])
+        self.assertEqual((latest["waiting"], latest["results"]), (0, 1))
+        self.assertEqual(self.store.seen_notifications([question, completed]), {question})
+
 
 if __name__ == "__main__":
     unittest.main()
