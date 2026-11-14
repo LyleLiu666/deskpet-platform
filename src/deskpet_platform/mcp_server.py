@@ -126,6 +126,30 @@ class BoardSession:
     def usb_client(self, config, port):
         return Client(config, link_factory=lambda *args, **fields: UsbLink(*args, port=port, **fields))
 
+    async def set_usb_fallback(self, port, device_id):
+        async with self.storage_lock, self.lock:
+            if self.client is not None and not self.client.link.wireless:
+                raise ValueError("小板正在通过 USB 控制，请在无线恢复后更新备用串口。")
+            config = DeviceConfig.load(self.path)
+            if config.device_id != device_id:
+                raise DeviceError("device_identity_mismatch")
+            registration = UsbPort.register(port)
+            reading = asyncio.create_task(asyncio.to_thread(read_usb_identity, registration))
+            try:
+                observed = await asyncio.shield(reading)
+            except asyncio.CancelledError:
+                # Keep the session locked until the read-only serial probe closes.
+                with suppress(OSError, ValueError):
+                    await reading
+                raise
+            if (observed.identity, observed.device_id) != (config.identity, config.device_id):
+                raise DeviceError("device_identity_mismatch")
+            registration.verify()
+            if DeviceConfig.load(self.path) != config:
+                raise DeviceError("device_pairing_changed")
+            self.usb_port = registration
+        return {"port": registration.path, "device": config.identity, "device_id": device_id}
+
     async def connect(self, config):
         try:
             return await self.open_wifi(config)
@@ -1286,6 +1310,13 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     async def desk_find_usb_device(ports: list[str], device_id: str | None = None) -> dict[str, Any]:
         """读取指定 USB 小板的持久 UUID 和 MAC，可按 UUID 查当前串口。查询无需配对，不接管控制。"""
         return await asyncio.to_thread(find_usb_devices, ports, device_id)
+
+    @server.tool()
+    async def desk_set_usb_fallback(port: str, device_id: str) -> dict[str, Any]:
+        """为已配对的小板更新本次 MCP 运行中的备用串口。传入持久 UUID 和查到的串口。保留当前 Wi-Fi 控制。"""
+        if not valid_device_uuid(device_id):
+            raise ValueError("请提供已配对小板的持久 UUID。")
+        return await sessions.resolve(device_id).set_usb_fallback(port, device_id)
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
     def desk_read_manual(topic: Manual = "operations") -> str:

@@ -921,7 +921,7 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                         initialized = await session.initialize()
                         self.assertIn("topic=roles", initialized.instructions)
                         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
-                        self.assertEqual(set(tools), {"desk_read_manual", "desk_list_devices", "desk_find_usb_device", "desk_show_text", "desk_status", "desk_render_metrics", "desk_computer_metrics",
+                        self.assertEqual(set(tools), {"desk_read_manual", "desk_list_devices", "desk_find_usb_device", "desk_set_usb_fallback", "desk_show_text", "desk_status", "desk_render_metrics", "desk_computer_metrics",
                                                  "desk_sync_clock", "desk_clock_edit", "desk_set_view", "desk_add_photo", "desk_photo_album", "desk_set_weather_location",
                                                  "desk_token_status", "desk_speed_windows", "desk_set_role_auto",
                                                  "desk_diagnostics", "desk_select_network",

@@ -44,7 +44,8 @@ tool_timeout_sec = 1200
 - `desk_calibrate_touch` 在屏幕启动三点校准。按屏幕提示触摸三个标记，校准后 `desk_wait_touch` 返回点击位置。长按 3 秒或调用 `desk_cancel_touch_calibration` 可取消校准。校准后，点击角色可播放该角色提供的 `touched` 动作。
 - MCP 启动命令可在 `mcp` 后增加 `--role-dir <角色素材目录的绝对路径>`。素材目录由你在电脑上选择。`desk_list_role_sources` 查询这个目录里的可安装角色；也可向该工具传入其他角色素材目录的绝对路径。
 - 在终端运行 `deskpet-platform find-usb --device-id 小板UUID /dev/cu.usbserial-1140`，可以列出指定串口上的小板 MAC 和持久 UUID。可传入多个已确认的候选串口，省略 `--device-id` 可查看所有匹配结果。此命令无需配对或启动 MCP，已有 Wi-Fi 控制连接时也可使用。已启动 MCP 时可用 `desk_find_usb_device` 做同样的查询。老固件可能缺少 USB 身份查询，已配对设备的 UUID 仍可从 `desk_list_devices` 查看。
-- MCP 启动时可用 `--usb-port` 指定已确认的备用串口，未接 USB 时仍可启动并使用 Wi-Fi。Wi-Fi 连不上或握手超时时会尝试 USB，可继续控制小板和传卡。备用串口在启动后才出现或被替换时，电脑先比对配对记录中的 MAC 和 UUID，再接入 USB。旧配对尚无 UUID 时，可先让支持 UUID 的小板经 Wi-Fi 完成一次认证或重新配对。若串口路径改变，先用 `desk_find_usb_device` 找到新路径。无线连通验证通过且当前动作和传输结束后，MCP 会自动切回 Wi-Fi，并保存新地址供下次连接。`desk_status` 可查看当前连接方式。
+- MCP 启动时可用 `--usb-port` 指定已确认的备用串口，未接 USB 时仍可启动并使用 Wi-Fi。Wi-Fi 连不上或握手超时时会尝试 USB，可继续控制小板和传卡。备用串口在启动后才出现或被替换时，电脑先比对配对记录中的 MAC 和 UUID，再接入 USB。旧配对尚无 UUID 时，可先让支持 UUID 的小板经 Wi-Fi 完成一次认证或重新配对。无线连通验证通过且当前动作和传输结束后，MCP 会自动切回 Wi-Fi，并保存新地址供下次连接。`desk_status` 可查看当前连接方式。
+- 串口路径改变或需要为第二台设备启用 USB 备用连接时，用 `desk_find_usb_device` 按持久 UUID 找到串口，再调用 `desk_set_usb_fallback(port, device_id)`。电脑核对串口上的 UUID 和 MAC，当前 Wi-Fi 会继续工作。正在使用 USB 控制时须等无线恢复后再更新。备用串口变更在本次 MCP 运行中生效。
 - 用 `desk_select_network` 按网络名称切换已保存的 Wi-Fi。切换会短暂断开无线控制。重连后用 `desk_diagnostics` 核对 `network_switch` 的操作编号及结果，并查看当前网络和卡空间。切换成功后，目标网络成为重启后的首选。目标连不上时，小屏会尝试恢复原连接。网络名称须为有效 UTF‑8，旧固件不支持该命令时可从小屏的 Wi-Fi 设置切换。
 - 储存卡恢复连接后，重新打开角色图鉴或相册以探测介质并在需要时重新挂载。返回角色页会重新加载上次保存的角色。`desk_diagnostics` 的 `card.mount_count` 是本次开机以来成功挂载的次数。
 - `desk_set_view` 可打开角色、应用菜单、时钟、角色图鉴、相册、天气、消息或设置。可把角色、应用菜单、时钟或相册设为默认首页。相册作为默认首页时，开机自动轮播已有照片。

@@ -9,7 +9,7 @@ from deskpet_platform.device_registry import DeviceRegistry
 from deskpet_platform.device_sessions import DeviceSessions
 from deskpet_platform.mcp_server import BoardSession, create_server
 from deskpet_platform.pairing import DeviceConfig
-from deskpet_platform.usb_link import UsbIdentity
+from deskpet_platform.usb_link import UsbIdentity, UsbPort
 
 KEY = bytes(range(32))
 A = DeviceConfig('02:00:00:00:00:01', KEY, device_id='01020304-0506-4708-890a-0b0c0d0e0f10')
@@ -83,6 +83,104 @@ class DeviceSessionsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result[1], {"devices": [{"port": paths[1], "identity": A.identity,
                                                      "device_id": A.device_id}], "unavailable": []})
             self.assertEqual([call.args[0] for call in read.call_args_list], paths)
+
+    async def test_mcp_binds_verified_fallback_for_only_the_requested_board(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "device.json"
+            A.save(path)
+            registry = DeviceRegistry(path)
+            registry.add(B)
+            first = "/dev/cu.first"
+            second = "/dev/cu.second"
+            config_before = [entry.read_bytes() for entry in registry.paths()]
+            created = {}
+
+            def capture(*args, **kwargs):
+                board = BoardSession(*args, **kwargs)
+                created[board.path] = board
+                return board
+
+            def read_identity(port):
+                return UsbIdentity(*(identities[port.path]))
+
+            identities = {first: (A.identity, A.device_id), second: (B.identity, B.device_id)}
+            with (patch("deskpet_platform.mcp_server.BoardSession", side_effect=capture),
+                  patch.object(UsbPort, "_identity", side_effect=lambda port: (port,)),
+                  patch("deskpet_platform.mcp_server.read_usb_identity", side_effect=read_identity) as read):
+                server = create_server(path, usb_port=first)
+                default = created[path]
+                wifi = AsyncMock()
+                wifi.link.wireless = True
+                default.client = wifi
+                arguments = {"port": second, "device_id": B.device_id}
+                result = await server.call_tool("desk_set_usb_fallback", arguments)
+                other = created[registry.path_for(B.device_id)]
+                self.assertEqual(result[1], {"port": second, "device": B.identity, "device_id": B.device_id})
+                self.assertEqual(other.usb_port, UsbPort(second, (second,)))
+                self.assertEqual(default.usb_port, UsbPort(first, (first,)))
+                self.assertIs(default.client, wifi)
+                wifi.close.assert_not_awaited()
+                self.assertEqual(config_before, [entry.read_bytes() for entry in registry.paths()])
+
+                other_wifi = AsyncMock()
+                other_wifi.link.wireless = True
+                other.client = other_wifi
+                self.assertEqual((await server.call_tool("desk_set_usb_fallback", arguments))[1], result[1])
+                self.assertIs(other.client, other_wifi)
+                other_wifi.close.assert_not_awaited()
+
+                for wrong in ((B.identity, A.device_id), (A.identity, B.device_id)):
+                    identities[first] = wrong
+                    with self.assertRaises(Exception):
+                        await server.call_tool("desk_set_usb_fallback", {"port": first, "device_id": B.device_id})
+                    self.assertEqual(other.usb_port.path, second)
+                read.assert_called_with(UsbPort(first, (first,)))
+
+                replacement_usb = AsyncMock()
+                replacement_usb.__aenter__.return_value = replacement_usb
+                with (patch.object(other, "open_wifi", side_effect=OSError("wifi_absent")),
+                      patch.object(other, "usb_client", return_value=replacement_usb) as connect_usb):
+                    self.assertIs(await other.connect(B), replacement_usb)
+                    connect_usb.assert_called_once_with(B, UsbPort(second, (second,)))
+
+                usb = AsyncMock()
+                usb.link.wireless = False
+                other.client = usb
+                read.reset_mock()
+                with self.assertRaises(Exception):
+                    await server.call_tool("desk_set_usb_fallback", arguments)
+                read.assert_not_called()
+                usb.close.assert_not_awaited()
+
+    async def test_runtime_fallback_waits_for_connect_and_rejects_changed_attachment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "device.json"
+            A.save(path)
+            board = BoardSession(path)
+            port = "/dev/cu.synthetic"
+            node = (1,)
+            prior = UsbPort("/dev/cu.prior", (0,))
+            board.usb_port = prior
+            read_entered = asyncio.Event()
+
+            def changed_during_read(registration):
+                nonlocal node
+                node = (2,)
+                return UsbIdentity(A.identity, A.device_id)
+
+            async def bind():
+                read_entered.set()
+                return await board.set_usb_fallback(port, A.device_id)
+
+            with (patch.object(UsbPort, "_identity", side_effect=lambda _: node),
+                  patch("deskpet_platform.mcp_server.read_usb_identity", side_effect=changed_during_read) as read):
+                async with board.lock:
+                    task = asyncio.create_task(bind())
+                    await read_entered.wait()
+                    read.assert_not_called()
+                with self.assertRaisesRegex(OSError, "usb_port_changed"):
+                    await task
+            self.assertIs(board.usb_port, prior)
 
     async def test_adding_usb_device_authenticates_before_storing_without_replacing_first(self):
         with tempfile.TemporaryDirectory() as directory:
