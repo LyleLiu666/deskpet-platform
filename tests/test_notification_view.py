@@ -241,6 +241,27 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
             await self.view.refresh(self.client, device_page=1, cached_records=self.store.cache_records())
         self.assertEqual([row["id"] for row in self.view.rows], ["n-1"])
 
+    async def test_opening_tf_list_marks_completed_history_through_the_card_anchor(self):
+        self.client.channel.capabilities["agent_cache_first"] = 1
+        for index in range(105):
+            self.store.add_agent_event("codex", "s", str(index), "completed", "Task")
+        question = self.store.add_agent_event("codex", "s", "ask", "response", "Question")
+        committed = self.store.cache_records()
+        await self.view.refresh(self.client, cached_records=committed)
+        later = self.store.add_agent_event("codex", "s", "later", "completed", "Later")
+        tap = {"action": "list", "version": self.view.version, "id": committed[0]["cache_id"]}
+        self.assertFalse(self.view.touch({**tap, "id": f"p-{question:x}-0000000000000000"}))
+        self.assertEqual(self.store.unseen_count(), 107)
+        self.assertTrue(self.view.touch(tap))
+        self.assertTrue(self.view.touch(tap))
+        await self.view.refresh(self.client, device_page=1, cached_records=committed)
+        self.assertEqual(self.view.anchor, question)
+        self.assertEqual(self.view.pages, 27)
+        self.assertEqual(self.store.home_summary()["completed_count"], 1)
+        self.assertEqual(self.store.home_summary()["response_count"], 1)
+        self.assertEqual(self.store.unseen_count(), 2)
+        self.assertEqual([item["id"] for item in self.store.list() if not item["seen"]], [later, question])
+
     async def test_cache_first_list_does_not_project_a_row_updated_before_card_commit(self):
         self.client.channel.capabilities["agent_cache_first"] = 1
         identity = self.store.add_agent_event("codex", "s", "question", "response", "Check this")

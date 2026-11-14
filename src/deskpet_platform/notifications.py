@@ -212,20 +212,36 @@ class NotificationStore:
             record["cache_id"] = self._cache_id(row[0], row[5], row[8], row[9], row[2])
         return records
 
-    def mark_cached_seen(self, cache_id):
+    def _matching_cache_record(self, db, cache_id):
         parts = cache_id.split("-")
         if len(parts) != 3 or parts[0] != "p" or not 1 <= len(parts[1]) <= 16:
-            return
+            return None
         try:
             identity = int(parts[1], 16)
         except ValueError:
-            return
+            return None
         if not 0 < identity <= 0x7fff_ffff_ffff_ffff:
-            return
+            return None
+        event = db.execute("SELECT source,session,turn,created FROM notifications WHERE id=?", (identity,)).fetchone()
+        if event and cache_id == self._cache_id(identity, *event):
+            return identity
+        return None
+
+    def mark_cached_seen(self, cache_id):
         with closing(self._connect()) as db, db:
-            event = db.execute("SELECT source,session,turn,created FROM notifications WHERE id=?", (identity,)).fetchone()
-            if event and cache_id == self._cache_id(identity, *event):
+            identity = self._matching_cache_record(db, cache_id)
+            if identity is not None:
                 db.execute("UPDATE notifications SET seen=COALESCE(seen,?) WHERE id=?", (time.time(), identity))
+
+    def mark_completed_through_cache_record(self, cache_id):
+        """A list receipt covers completed records through its exact TF snapshot."""
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            identity = self._matching_cache_record(db, cache_id)
+            if identity is not None:
+                db.execute("""UPDATE notifications SET seen=? WHERE id<=? AND category='completed' AND seen IS NULL""",
+                           (time.time(), identity))
+            return identity
 
     def home_summary(self, *, include_receipts=False):
         with closing(self._connect()) as db:

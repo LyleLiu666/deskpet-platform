@@ -97,14 +97,22 @@ class NotificationView:
             return False
         if action in ("home", "list"):
             # These destinations are independent of the rows on the screen.
-            if event.get("id") != "":
+            if event.get("id") != "" and action != "list":
                 return False
         elif version != self.version:
             return False
         if action == "home":
             self.mode, self.anchor, self.page, self.selected = "home", None, 1, None
         elif action == "list":
-            if self.mode == "home":
+            cache_id = event.get("id")
+            if not isinstance(cache_id, str):
+                return False
+            if cache_id:
+                anchor = self.store.mark_completed_through_cache_record(cache_id)
+                if anchor is None:
+                    return False
+                self.page, self.anchor = 1, anchor
+            elif self.mode == "home":
                 self.page, self.anchor = 1, None
             self.mode, self.selected = "list", None
         elif action in ("previous", "next") and self.mode == "list":
