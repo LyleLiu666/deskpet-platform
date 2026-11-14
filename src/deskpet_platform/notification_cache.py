@@ -1,12 +1,25 @@
 """Persist recent notifications on devices that support individual offline reads."""
 import base64
 from datetime import datetime
+import struct
 import time
 import zlib
 
 from .channel import CommandRejected
 from .notification_graphics import notification_row
 from .notification_view import _detail_pixels
+
+
+CACHE_RANGE = 8
+
+
+def _fingerprint(item, bitmap):
+    metadata = struct.pack("<BIIQQBB", item["kind"], item["revision"], item["content_revision"],
+                           item["created_ms"], item["updated_ms"], item["unread"], 0)
+    details = item["detail_crc"]
+    canonical = (item["id"].encode("ascii") + b"\0" + metadata + base64.b64decode(item["title"]) + b"\0" +
+                 base64.b64decode(bitmap[1:]) + struct.pack(f"<B{len(details)}I", len(details), *details))
+    return f"{zlib.crc32(canonical):08x}"
 
 
 def _prepare(record):
@@ -35,6 +48,7 @@ class NotificationCache:
         self.confirmed_epoch = None
         self.poll_at = 0
         self.retry_at = 0
+        self.reuse_failed = False
 
     def committed_records(self, channel):
         if self.confirmed is not None and channel.epoch == self.confirmed_epoch and channel.boot == self.confirmed[0]:
@@ -49,6 +63,7 @@ class NotificationCache:
             self.epoch = channel.epoch
             self.transfer = None
             self.poll_at = self.retry_at = 0
+            self.reuse_failed = False
         if self.transfer is None:
             now = time.monotonic()
             if now < self.retry_at:
@@ -101,6 +116,7 @@ class NotificationCache:
         yield
         if receipt.get("cache_busy"):
             return
+        had_receipts = False
         while True:
             receipt = await channel.send("cache_receipt_next", batch=True)
             yield
@@ -112,6 +128,7 @@ class NotificationCache:
                 continue
             if not receipt["has_receipt"]:
                 break
+            had_receipts = True
             self.store.mark_cached_seen(receipt["id"])
             await channel.send("cache_receipt_ack", id=receipt["id"],
                                content_revision=receipt["content_revision"])
@@ -119,9 +136,39 @@ class NotificationCache:
         await channel.send("cache_receipt_finish")
         yield
         records = self.store.cache_records()
+        active = {}
+        reuse = channel.capabilities.get("agent_cache_reuse") == 1 and not self.reuse_failed
+        count = state.get("cache_count")
+        if reuse:
+            if type(count) is not int or not 0 <= count <= 1000:
+                raise RuntimeError("invalid_cache_count")
+            for start in range(0, count, CACHE_RANGE):
+                size = min(CACHE_RANGE, count - start)
+                manifest = await channel.send("cache_manifest", generation=generation, start=start, count=size)
+                yield
+                if manifest.get("cache_changed"):
+                    await channel.send("cache_abort")
+                    self.confirmed_epoch = None
+                    return
+                rows = manifest.get("rows")
+                if not isinstance(rows, list) or len(rows) != size:
+                    await channel.send("cache_abort")
+                    raise RuntimeError("invalid_cache_manifest")
+                for index, fingerprint in enumerate(rows, start):
+                    if fingerprint is None:
+                        continue
+                    if (not isinstance(fingerprint, str) or len(fingerprint) != 8 or
+                            any(char not in "0123456789abcdef" for char in fingerprint)):
+                        await channel.send("cache_abort")
+                        raise RuntimeError("invalid_cache_manifest")
+                    active[fingerprint] = index if fingerprint not in active else None
         prepared = []
         for record in records:
             item, bitmap, detail, pixels = _prepare(record)
+            reusable = active.get(_fingerprint(item, bitmap)) if reuse else None
+            prepared.append((item, bitmap, reusable))
+            if reusable is not None:
+                continue
             reply = await channel.send("cache_detail_begin", **detail)
             yield
             if not reply.get("cached"):
@@ -136,7 +183,12 @@ class NotificationCache:
                     yield
                 await channel.send("cache_detail_commit")
                 yield
-            prepared.append((item, bitmap))
+        same_manifest = (reuse and not had_receipts and generation and len(prepared) == count and
+                         all(source == index for index, (_, _, source) in enumerate(prepared)))
+        if same_manifest:
+            self.confirmed = (channel.boot, generation, records)
+            self.confirmed_epoch = channel.epoch
+            return
         reply = await channel.send("cache_begin", generation=generation + 1, count=len(prepared))
         yield
         if reply.get("cache_busy") or reply.get("cache_changed"):
@@ -145,16 +197,37 @@ class NotificationCache:
                 # Keep the earlier commit only when the next probe recognizes it.
                 self.confirmed_epoch = None
             return
-        for item, bitmap in prepared:
+        index = 0
+        while index < len(prepared):
+            item, bitmap, source = prepared[index]
+            if source is not None:
+                size = 1
+                while (size < CACHE_RANGE and index + size < len(prepared) and
+                       prepared[index + size][2] == source + size):
+                    size += 1
+                reply = await channel.send("cache_copy", generation=generation, start=source, count=size)
+                yield
+                if reply.get("cache_changed"):
+                    await channel.send("cache_abort")
+                    self.confirmed_epoch = None
+                    return
+                if reply.get("cache_reuse_failed"):
+                    await channel.send("cache_abort")
+                    self.reuse_failed = True
+                    return
+                index += size
+                continue
             await channel.send("cache_item", **item)
             yield
             await channel.send("cache_bitmap", bitmap=bitmap)
             yield
             await channel.send("cache_item_commit")
             yield
+            index += 1
         reply = await channel.send("cache_commit")
         if reply.get("cache_generation") != generation + 1:
             raise RuntimeError("notification_cache_not_committed")
         self.confirmed = (channel.boot, generation + 1, records)
         self.confirmed_epoch = channel.epoch
+        self.reuse_failed = False
         yield

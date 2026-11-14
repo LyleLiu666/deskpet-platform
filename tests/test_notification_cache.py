@@ -6,7 +6,7 @@ import unittest
 
 from deskpet_platform.channel import CommandRejected
 from deskpet_platform.mcp_server import BoardSession
-from deskpet_platform.notification_cache import NotificationCache
+from deskpet_platform.notification_cache import NotificationCache, _fingerprint, _prepare
 from deskpet_platform.notifications import NotificationStore
 
 
@@ -22,6 +22,14 @@ class CacheBoard:
         self.receipts = []
         self.cache_available = True
         self.failure = None
+        self.rows = []
+        self.pending = []
+        self.declared_count = 0
+        self.pending_item = None
+        self.pending_bitmap = None
+        self.cached_details = False
+        self.copy_failure = False
+        self.manifest_changed = False
 
     async def send(self, command, **fields):
         line = {"epoch": self.epoch, "seq": len(self.commands) + 1, "type": command, **fields}
@@ -30,12 +38,37 @@ class CacheBoard:
         if command == self.failure:
             raise CommandRejected("card_busy")
         if command == "cache_state":
-            return {"cache_available": self.cache_available, "cache_generation": self.generation}
+            return {"cache_available": self.cache_available, "cache_generation": self.generation,
+                    "cache_count": len(self.rows)}
         if command == "cache_receipt_next":
             return self.receipts.pop(0) if self.receipts else {"has_receipt": False}
         if command == "cache_detail_begin":
-            return {"next_chunk": 15}
+            return {"cached": self.cached_details, "next_chunk": 15}
+        if command in ("cache_manifest", "cache_copy"):
+            start, size = fields["start"], fields["count"]
+            assert fields["generation"] == self.generation and 0 < size <= 8 and start + size <= len(self.rows)
+            selected = self.rows[start:start + size]
+            if command == "cache_manifest":
+                return {"cache_changed": True} if self.manifest_changed else {"rows": selected}
+            if self.copy_failure:
+                self.copy_failure = False
+                self.pending = []
+                return {"cache_reuse_failed": True}
+            self.pending.extend(selected)
+        if command == "cache_begin":
+            self.pending = []
+            self.declared_count = fields["count"]
+        if command == "cache_abort":
+            self.pending = []
+        if command == "cache_item":
+            self.pending_item = fields
+        if command == "cache_bitmap":
+            self.pending_bitmap = fields["bitmap"]
+        if command == "cache_item_commit":
+            self.pending.append(_fingerprint(self.pending_item, self.pending_bitmap))
         if command == "cache_commit":
+            assert len(self.pending) == self.declared_count
+            self.rows = list(self.pending)
             self.generation += 1
             return {"cache_generation": self.generation}
         if command == "snapshot_commit":
@@ -142,3 +175,64 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
         operations = [cmd for cmd, _ in self.channel.commands]
         self.assertLess(operations.index("snapshot_commit"), operations.index("cache_state"))
         self.assertTrue(self.store.list()[0]["shown"])
+
+    async def test_cold_reconnect_reuses_committed_card_only_when_manifest_matches(self):
+        self.channel.capabilities.update(agent_cache_first=1, agent_cache_reuse=1)
+        for index in range(17):
+            self.store.add_agent_event("codex", "s", str(index), "completed", f"First {index}")
+        await self.sync()
+        self.channel.commands.clear()
+        self.channel.epoch = "f" * 32
+        self.cache = NotificationCache(self.store)
+        generation = self.channel.generation
+        self.assertIsNone(self.cache.committed_records(self.channel))
+        await self.sync()
+        self.assertEqual(self.channel.generation, generation)
+        self.assertEqual(len(self.cache.committed_records(self.channel)), 17)
+        self.assertEqual([fields["count"] for cmd, fields in self.channel.commands if cmd == "cache_manifest"], [8, 8, 1])
+        self.assertFalse(any(cmd in ("cache_begin", "cache_commit", "cache_detail_begin") for cmd, _ in self.channel.commands))
+
+    async def test_one_new_row_reuses_68_previously_committed_rows(self):
+        self.channel.capabilities.update(agent_cache_first=1, agent_cache_reuse=1)
+        for index in range(68):
+            self.store.add_agent_event("codex", "s", str(index), "completed", f"Original {index}")
+
+        def fingerprint(record):
+            item, bitmap, _, _ = _prepare(record)
+            return _fingerprint(item, bitmap)
+
+        self.channel.rows = old = [fingerprint(record) for record in self.store.cache_records()]
+        newer = self.store.add_agent_event("codex", "s", "next", "completed", "New")
+        await self.sync()
+        self.assertEqual(self.channel.rows, [fingerprint(self.store.cache_records()[0]), *old])
+        self.assertEqual(self.cache.committed_records(self.channel)[0]["id"], newer)
+        serialized = [item for command, item in self.channel.commands if command == "cache_item"]
+        self.assertEqual(len(serialized), 1)
+        self.assertEqual(sum(cmd == "cache_detail_begin" for cmd, _ in self.channel.commands), 1)
+        self.assertEqual(sum(item["count"] for cmd, item in self.channel.commands if cmd == "cache_copy"), 68)
+        self.assertLess(len(self.channel.commands), 50)
+
+    async def test_generation_change_and_copy_failure_retain_old_commit_until_full_retry(self):
+        self.channel.capabilities.update(agent_cache_first=1, agent_cache_reuse=1)
+        first = self.store.add_agent_event("codex", "s", "first", "completed", "First")
+        await self.sync()
+        self.channel.commands.clear()
+        self.channel.copy_failure = self.channel.manifest_changed = True
+        newer = self.store.add_agent_event("codex", "s", "next", "completed", "New")
+        original = self.channel.rows
+        await self.sync()
+        self.assertEqual(self.channel.rows, original)
+        self.assertFalse(any(cmd in ("cache_begin", "cache_commit") for cmd, _ in self.channel.commands))
+
+        self.channel.manifest_changed = False
+        self.cache.poll_at = 0
+        await self.sync()
+        self.assertEqual(self.channel.rows, original)
+        self.assertEqual([item["id"] for item in self.cache.committed_records(self.channel)], [first])
+        self.assertTrue(self.cache.reuse_failed)
+        self.cache.poll_at = 0
+        self.channel.commands.clear()
+        await self.sync()
+        self.assertEqual([item["id"] for item in self.cache.committed_records(self.channel)], [newer, first])
+        self.assertFalse(any(cmd in ("cache_manifest", "cache_copy") for cmd, _ in self.channel.commands))
+        self.assertFalse(self.cache.reuse_failed)
