@@ -323,6 +323,20 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.view.refresh(self.client, device_page=1, cached_records=self.store.cache_records()))
         self.assertEqual(self.view.rows[0]["kind"], 3)
 
+    async def test_local_inbox_acknowledges_reads_without_live_list_or_detail(self):
+        channel = self.client.channel
+        channel.capabilities.update(agent_cache_first=1, agent_inbox_read=1, agent_local_inbox=1)
+        identity = self.store.add_agent_event("codex", "s", "q", "response", "Question")
+        card = self.store.cache_records(active_only=True)
+        await self.view.refresh(self.client, cached_records=card)
+        channel.messages.clear()
+        self.assertTrue(self.view.touch({"action": "list", "version": self.view.version,
+                                        "id": card[0]["cache_id"]}, channel=channel))
+        self.assertFalse(await self.view.refresh(self.client, device_page=1, cached_records=card))
+        self.assertFalse(await self.view.refresh(self.client, device_page=2, cached_records=card))
+        self.assertEqual(channel.messages, [])
+        self.assertEqual(self.store.seen_notifications([identity]), {identity})
+
 
 if __name__ == "__main__":
     unittest.main()

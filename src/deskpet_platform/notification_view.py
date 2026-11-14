@@ -145,6 +145,9 @@ class NotificationView:
         if self.epoch != channel.epoch:
             self._reset(channel.epoch, channel.boot, device_page)
         cache_first = channel.capabilities.get("agent_cache_first") == 1
+        if (channel.capabilities.get("agent_local_inbox") == 1
+                and (self.mode != "home" or device_page in (1, 2, 3))):
+            return False
         if cache_first and cached_records is None and (self.mode == "home" or self.anchor is None):
             return False
         if self.mode == "detail" and self.version:

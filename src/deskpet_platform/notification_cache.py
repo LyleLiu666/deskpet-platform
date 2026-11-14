@@ -6,6 +6,7 @@ import time
 import zlib
 
 from .channel import CommandRejected
+from .notification_detail import render_cached_detail
 from .notification_graphics import notification_row
 from .notification_view import _detail_pixels
 
@@ -23,18 +24,25 @@ def _fingerprint(item, bitmap):
 
 
 def _prepare(record):
-    pixels = _detail_pixels(record)
+    if "session" in record:
+        rendered = render_cached_detail(record)
+        pixels = rendered.pop("pixels")
+    else:
+        rendered = {}
+        pixels = _detail_pixels(record)
     crc = zlib.crc32(pixels)
     timestamp = int(record["created_at"] * 1000)
     reported = datetime.fromtimestamp(record["created_at"]).strftime("%Y-%m-%d %H:%M")
-    content_revision = zlib.crc32(reported.encode("ascii")) or 1
+    short_id = rendered.get("short_id", f"{record['id'] & 0xffffffff:08x}")
+    content_key = f"{reported}:{short_id}:{crc}" if rendered else reported
+    content_revision = zlib.crc32(content_key.encode("ascii")) or 1
     row = notification_row(record)
     title = record["title"] or "消息"
     list_record = dict(id=record["cache_id"], kind=row["kind"], revision=1, content_revision=content_revision,
                        created_ms=timestamp, updated_ms=timestamp, unread=not record["seen"],
                        title=base64.b64encode(title.encode()).decode("ascii"), detail_crc=[crc])
     detail = dict(id=record["cache_id"], content_revision=content_revision, page=0, pages=1,
-                  short_id=f"{record['id'] & 0xffffffff:08x}",
+                  short_id=short_id,
                   reported=reported, fresh=False, crc=crc, gray=False)
     return list_record, row["title"], detail, pixels
 
@@ -55,7 +63,8 @@ class NotificationCache:
             return self.confirmed[2]
 
     def _records(self, channel):
-        return self.store.cache_records(pending_first=channel.capabilities.get("agent_inbox_read") == 1)
+        return self.store.cache_records(pending_first=channel.capabilities.get("agent_inbox_read") == 1,
+                                        active_only=channel.capabilities.get("agent_local_inbox") == 1)
 
     async def step(self, client):
         channel = client.channel

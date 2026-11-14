@@ -92,6 +92,23 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
                 return
         self.fail("cache transfer did not finish")
 
+    async def test_local_inbox_keeps_one_question_per_session_and_drops_read_completions(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1)
+        old = self.store.add_agent_event("codex", "same-session", "old", "response", "Old", parent_turn="turn-1")
+        question = self.store.add_agent_event("codex", "same-session", "new", "response", "New", parent_turn="turn-2")
+        other = self.store.add_agent_event("codex", "other-session", "other", "response", "Other")
+        complete = self.store.add_agent_event("codex", "same-session", "done", "completed", "Done")
+        self.store.mark_seen(complete)
+        await self.sync()
+        card = self.cache.committed_records(self.channel)
+        self.assertEqual([item["id"] for item in card], [other, question])
+        self.store.mark_seen(question)
+        self.store.resolve_agent_event("codex", "same-session", "new")
+        self.cache.poll_at = 0
+        await self.sync()
+        self.assertEqual([item["id"] for item in self.cache.committed_records(self.channel)], [other])
+        self.assertFalse(next(item for item in self.store.list() if item["id"] == old)["resolved"])
+
     async def test_verified_details_precede_list_and_offline_read_targets_only_matching_event(self):
         first = self.store.add_agent_event("codex", "session-a", "turn", "completed", "First")
         second = self.store.add_agent_event("claude_code", "session-b", "turn", "response", "第二" * 32)

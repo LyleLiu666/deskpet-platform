@@ -202,17 +202,28 @@ class NotificationStore:
         event = json.dumps([source, session, turn, created], ensure_ascii=False).encode("utf-8")
         return f"p-{identity:x}-{hashlib.blake2s(event, digest_size=8).hexdigest()}"
 
-    def cache_records(self, *, pending_first=False):
+    def cache_records(self, *, pending_first=False, active_only=False):
         with closing(self._connect()) as db:
+            # Within one request show its latest unanswered question. A more
+            # recent request supersedes older turns, including after answer.
             rows = db.execute("""SELECT id,title,created,shown,seen,source,category,resolved,session,turn
-                FROM notifications
+                FROM notifications AS n
+                WHERE NOT ? OR (category='completed' AND seen IS NULL)
+                    OR (category='response' AND resolved IS NULL AND NOT EXISTS (
+                        SELECT 1 FROM notifications AS newer
+                        WHERE newer.source=n.source AND newer.session=n.session
+                          AND newer.category='response' AND newer.id>n.id
+                          AND (newer.resolved IS NULL OR n.parent_turn IS NULL
+                               OR newer.parent_turn IS NOT n.parent_turn)))
                 ORDER BY CASE WHEN ? AND category='response' AND resolved IS NULL THEN 0 ELSE 1 END,
-                         id DESC LIMIT 100""", (pending_first,)).fetchall()
+                         id DESC LIMIT 100""", (active_only, pending_first)).fetchall()
         records = self._items(rows)
         for record, row in zip(records, rows):
             # Showing a reminder on the device does not change its TF rendition.
             del record["shown"]
             record["cache_id"] = self._cache_id(row[0], row[5], row[8], row[9], row[2])
+            if active_only:
+                record["session"] = row[8]
         return records
 
     def _matching_cache_record(self, db, cache_id):
