@@ -311,6 +311,12 @@ class NotificationStore:
                 AND category='response' AND resolved IS NULL""",
                                   ((now, source, session, event_id) for source, session, event_id, now in events)).rowcount
 
+    def resolve_session_requests(self, source, session):
+        """Settle current requests without affecting another turn in this session."""
+        with closing(self._connect()) as db, db:
+            return db.execute("""UPDATE notifications SET resolved=? WHERE source=? AND session=?
+                AND category='response' AND resolved IS NULL""", (time.time(), source, session)).rowcount
+
     def mark_seen_many(self, identities):
         with closing(self._connect()) as db, db:
             now = time.time()

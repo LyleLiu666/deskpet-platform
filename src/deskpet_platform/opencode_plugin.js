@@ -38,8 +38,13 @@ export const DeskPetNotifications = async ({ directory }) => {
         if (id) return send({ kind: "completed", session, id, title: basename(directory ?? "") });
       } else if (type === "session.error") {
         finished.delete(session);
+        if (properties.error?.name === "MessageAbortedError" && session) {
+          return send({ kind: "session-ended", session });
+        }
       } else if (type === "session.deleted") {
-        finished.delete(properties.info?.id);
+        const deleted = properties.info?.id;
+        finished.delete(deleted);
+        if (deleted) return send({ kind: "session-ended", session: deleted });
       } else if (type === "question.asked" || type === "permission.asked") {
         const request = type === "question.asked" ? "question" : "permission";
         const title = request === "question" ? properties.questions?.[0]?.header : properties.permission;
