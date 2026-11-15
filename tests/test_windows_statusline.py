@@ -41,6 +41,32 @@ class WindowsStatuslineTests(unittest.TestCase):
         self.assertTrue(configure(self.settings,source,self.store,enabled=False,windows_shell=shell))
         self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")),original)
 
+    def test_existing_settings_acl_survives_install_and_remove(self):
+        from deskpet_platform.quota_statusline import configure
+        from deskpet_platform.windows_private import current_user_sid
+        from test_windows_private import dacl_trustees
+        self.settings.write_text(json.dumps({"statusLine": {"type": "command", "command": "echo old"}}), encoding="utf-8")
+        subprocess.run(["icacls", str(self.settings), "/inheritance:r", "/grant:r",
+                        "*" + current_user_sid() + ":F", "*S-1-5-18:F"], check=True, capture_output=True)
+        before = sorted(dacl_trustees(self.settings))
+        shell = ("cmd", os.environ.get("COMSPEC", "cmd.exe"))
+        configure(self.settings, "antigravity", self.store, enabled=True, windows_shell=shell)
+        self.assertEqual(sorted(dacl_trustees(self.settings)), before)
+        configure(self.settings, "antigravity", self.store, enabled=False, windows_shell=shell)
+        self.assertEqual(sorted(dacl_trustees(self.settings)), before)
+
+    def test_previous_failure_status_and_stderr_are_preserved(self):
+        from deskpet_platform.quota_statusline import configure
+        script = self.root / "previous failure.py"
+        script.write_text("import sys; sys.stdout.buffer.write(b'old'); sys.stderr.buffer.write(b'err'); sys.exit(7)", encoding="utf-8")
+        original = subprocess.list2cmdline([sys.executable, str(script)])
+        self.settings.write_text(json.dumps({"statusLine": {"type": "command", "command": original}}), encoding="utf-8")
+        shell = ("cmd", os.environ.get("COMSPEC", "cmd.exe"))
+        configure(self.settings, "antigravity", self.store, enabled=True, windows_shell=shell)
+        command = json.loads(self.settings.read_text(encoding="utf-8"))["statusLine"]["command"]
+        result = subprocess.run([shell[1], "/d", "/s", "/c", command], input=self.input, capture_output=True, timeout=15)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (7, b"old", b"err"))
+
     def test_claude_with_git_bash_keeps_the_previous_status_line(self):
         bash = shutil.which("bash.exe")
         if not bash:
