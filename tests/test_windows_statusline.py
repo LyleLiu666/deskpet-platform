@@ -31,7 +31,13 @@ class WindowsStatuslineTests(unittest.TestCase):
         self.assertTrue(configure(self.settings,source,self.store,enabled=True,executable=executable,windows_shell=shell))
         self.assertFalse(configure(self.settings,source,self.store,enabled=True,executable=executable,windows_shell=shell))
         command = json.loads(self.settings.read_text(encoding="utf-8"))["statusLine"]["command"]
-        baseline = subprocess.run([*parent, old_command], input=self.input, capture_output=True, timeout=15)
+        if shell[0] == "cmd":
+            # Pass a raw command line: Python's list quoting adds backslashes
+            # that cmd.exe does not treat as quote escapes.
+            baseline_args = f'"{parent[0]}" /d /s /c "{old_command}"'
+        else:
+            baseline_args = [*parent, old_command]
+        baseline = subprocess.run(baseline_args, input=self.input, capture_output=True, timeout=15)
         result = subprocess.run([*parent, command], input=self.input, capture_output=True, timeout=15)
         self.assertEqual((result.returncode,result.stdout,result.stderr),
                          (baseline.returncode,baseline.stdout,baseline.stderr))

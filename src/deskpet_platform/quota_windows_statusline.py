@@ -7,13 +7,15 @@ import subprocess
 
 PREFIX = "powershell.exe -NoProfile -NonInteractive -EncodedCommand "
 MARKER = "# deskpet-quota-windows-v2-"
-BOOT_PREFIX = "$null='deskpet-quota-windows-v2';$z=[Convert]::FromBase64String('"
+BOOT_PREFIX = "$ProgressPreference='SilentlyContinue';$null='deskpet-quota-windows-v2';$z=[Convert]::FromBase64String('"
 BOOT_SUFFIX = "');$s=[IO.Compression.GzipStream]::new([IO.MemoryStream]::new($z),[IO.Compression.CompressionMode]::Decompress);iex (([IO.StreamReader]::new($s)).ReadToEnd())"
 
 # This script is embedded in the Agent's setting. It can still forward input
 # to the original command if the DeskPet Python environment is removed.
 SCRIPT = r'''
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+try { [Console]::InputEncoding = [Text.UTF8Encoding]::new($false) } catch {}
 function Decode([string]$value) {
     [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($value))
 }
@@ -31,6 +33,9 @@ function RunCommand([string]$exe, [string]$arguments, [byte[]]$bytes, [bool]$dis
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
     $info.RedirectStandardInput = $true
+    if ($info.PSObject.Properties["StandardInputEncoding"]) {
+        $info.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
+    }
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     $process = [Diagnostics.Process]::new()

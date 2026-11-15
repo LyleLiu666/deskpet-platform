@@ -1,6 +1,8 @@
 import unittest
 import base64
 import json
+import os
+import shlex
 import gzip
 from pathlib import Path
 import shutil
@@ -70,6 +72,25 @@ class WindowsStatuslineEncodingTests(unittest.TestCase):
             result = run()
             self.assertEqual((result.returncode, result.stdout, result.stderr),
                              (0, b"old:" + payload, b"previous-error"))
+
+    @unittest.skipUnless(os.name != "nt" and shutil.which("pwsh") and shutil.which("bash"),
+                         "a POSIX Bash and PowerShell are required for this proxy rehearsal")
+    def test_bash_parent_keeps_original_input_and_exit_status(self):
+        with tempfile.TemporaryDirectory(prefix="deskpet bash proxy ") as directory:
+            root = Path(directory)
+            old = root / "previous.py"
+            old.write_text("import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()); sys.stderr.write('old-error'); sys.exit(7)", encoding="utf-8")
+            (root / "powershell.exe").symlink_to(shutil.which("pwsh"))
+            value = self.metadata("bash")
+            value.update(store=str(root / "quota.sqlite3"), executable=sys.executable,
+                         original_command=shlex.join([sys.executable, str(old)]),
+                         windows_shell=["bash", shutil.which("bash")])
+            data = b'{"private":"keep binary input"}'
+            env = os.environ.copy()
+            env["PATH"] = str(root) + os.pathsep + env.get("PATH", "")
+            result = subprocess.run([shutil.which("bash"), "-c", _command(value)], input=data,
+                                    capture_output=True, timeout=15, env=env)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (7, data, b"old-error"))
 
     def test_excessively_long_command_is_rejected(self):
         value = self.metadata("cmd")
