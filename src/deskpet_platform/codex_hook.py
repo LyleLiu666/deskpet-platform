@@ -221,6 +221,11 @@ def receive_event(config, event, *, handle=None):
         subprocess.Popen([sys.executable, "-m", "deskpet_platform", "--config", str(config), "notification-worker"],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True, close_fds=True)
+        receivers=config.parent / "receivers"
+        if not receivers.is_symlink() and receivers.is_dir():
+            subprocess.Popen([sys.executable, "-m", "deskpet_platform", "--config", str(config), "receiver-worker"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True, close_fds=True)
 
 
 def receive(config, *, handle=None, response=None):

@@ -536,6 +536,19 @@ def request_worker_yield(config_path):
 
 async def run_worker(config_path, *, client_factory=None, max_seconds=86400, poll_interval=0.5,
                      handoff_delay=7, idle_seconds=15):
+    return await _run_workers(config_path,client_factory=client_factory,max_seconds=max_seconds,
+                              poll_interval=poll_interval,handoff_delay=handoff_delay,idle_seconds=idle_seconds,
+                              receivers_only=False)
+
+
+async def run_receiver_worker(config_path, *, client_factory=None, max_seconds=86400, poll_interval=0.5,
+                              handoff_delay=7, idle_seconds=15):
+    return await _run_workers(config_path,client_factory=client_factory,max_seconds=max_seconds,
+                              poll_interval=poll_interval,handoff_delay=handoff_delay,idle_seconds=idle_seconds,
+                              receivers_only=True)
+
+
+async def _run_workers(config_path, *, client_factory, max_seconds, poll_interval, handoff_delay, idle_seconds, receivers_only):
     from .device_registry import DeviceRegistry
 
     registry = DeviceRegistry(config_path)
@@ -546,7 +559,8 @@ async def run_worker(config_path, *, client_factory=None, max_seconds=86400, pol
     deadline = time.monotonic() + max_seconds
     next_scan = 0.0
     idle_since = None
-    descriptor = os.open(root / "notification-dispatch.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    dispatch_name="receiver-dispatch.lock" if receivers_only else "notification-dispatch.lock"
+    descriptor = os.open(root / dispatch_name, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
             acquire(descriptor, blocking=False)
@@ -555,7 +569,7 @@ async def run_worker(config_path, *, client_factory=None, max_seconds=86400, pol
         while time.monotonic() < deadline:
             now = time.monotonic()
             if now >= next_scan:
-                paths = await asyncio.to_thread(registry.paths)
+                paths = await asyncio.to_thread(registry.receiver_paths if receivers_only else registry.paths)
                 next_scan = now + 5
                 for path in paths:
                     if path not in workers:

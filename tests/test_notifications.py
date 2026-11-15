@@ -11,12 +11,25 @@ import os
 import asyncio
 
 from deskpet_platform import notifications
-from deskpet_platform.codex_hook import install_hook, remove_hook, receive
+from deskpet_platform.codex_hook import install_hook, remove_hook, receive, receive_event
 from deskpet_platform.mcp_server import BoardSession
 from deskpet_platform.pairing import DeviceConfig
 
 
 class NotificationTests(unittest.TestCase):
+    def test_new_event_starts_independent_receiver_worker_when_registered(self):
+        from deskpet_platform.device_registry import DeviceRegistry
+        with tempfile.TemporaryDirectory() as directory:
+            config=Path(directory)/'device.json'
+            DeviceConfig('02:00:00:00:00:01',bytes(range(32))).save(config)
+            registry=DeviceRegistry(config)
+            registry.add_receiver(DeviceConfig('02:00:00:00:00:02',bytes(range(32))))
+            event={'hook_event_name':'Stop','session_id':'s','turn_id':'t'}
+            with patch('deskpet_platform.codex_hook.subprocess.Popen') as spawn:
+                receive_event(config,event)
+            self.assertEqual(spawn.call_count,2)
+            self.assertEqual([call.args[0][-1] for call in spawn.call_args_list],['notification-worker','receiver-worker'])
+
     def test_explicit_dismissal_is_per_board_and_does_not_claim_answered(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -538,6 +551,58 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             await notifications.run_worker(config, client_factory=Board, max_seconds=0.3, poll_interval=0.03)
             self.assertIsNone(store.next_pending())
             self.assertEqual(store.unseen_count(), 1)
+
+    async def test_worker_notifies_independent_receiver_without_replacing_default(self):
+        from deskpet_platform.device_registry import DeviceRegistry
+        delivered=[]
+        class Channel:
+            capabilities={'text_present':1}
+        class Board:
+            channel=Channel()
+            def __init__(self,config):self.identity=config.identity
+            async def __aenter__(self):return self
+            async def status(self):return {'pet_page':0}
+            async def show_text(self,_text):delivered.append(self.identity);return {'status':'shown'}
+            async def close(self):pass
+        with tempfile.TemporaryDirectory() as directory:
+            config=Path(directory)/'device.json'
+            DeviceConfig('02:00:00:00:00:01',bytes(range(32))).save(config)
+            registry=DeviceRegistry(config)
+            receiver=registry.add_receiver(DeviceConfig('02:00:00:00:00:02',bytes(range(32))))
+            store=notifications.NotificationStore(config.parent/'notifications.sqlite3')
+            store.add_codex_event({'hook_event_name':'Stop','session_id':'s','turn_id':'t'})
+            await asyncio.gather(notifications.run_worker(config,client_factory=Board,max_seconds=1.5,poll_interval=.03),
+                                 notifications.run_receiver_worker(config,client_factory=Board,max_seconds=1.5,poll_interval=.03))
+            self.assertEqual(set(delivered),{'02:00:00:00:00:01','02:00:00:00:00:02'})
+            self.assertEqual(len(registry.list()),1)
+            self.assertEqual(notifications.NotificationStore(receiver.parent/'notifications.sqlite3').unseen_count(),1)
+
+    async def test_receiver_worker_runs_while_existing_dispatcher_is_locked(self):
+        from deskpet_platform.device_registry import DeviceRegistry
+        from deskpet_platform.file_lock import acquire, release
+        delivered=[]
+        class Channel:
+            capabilities={'text_present':1}
+        class Board:
+            channel=Channel()
+            def __init__(self,config):self.identity=config.identity
+            async def __aenter__(self):return self
+            async def status(self):return {'pet_page':0}
+            async def show_text(self,_text):delivered.append(self.identity);return {'status':'shown'}
+            async def close(self):pass
+        with tempfile.TemporaryDirectory() as directory:
+            config=Path(directory)/'device.json'
+            DeviceConfig('02:00:00:00:00:01',bytes(range(32))).save(config)
+            DeviceRegistry(config).add_receiver(DeviceConfig('02:00:00:00:00:02',bytes(range(32))))
+            notifications.NotificationStore(config.parent/'notifications.sqlite3').add_codex_event(
+                {'hook_event_name':'Stop','session_id':'s','turn_id':'t'})
+            fd=os.open(config.parent/'notification-dispatch.lock',os.O_CREAT|os.O_RDWR,0o600)
+            try:
+                acquire(fd,blocking=False)
+                await notifications.run_receiver_worker(config,client_factory=Board,max_seconds=1.5,poll_interval=.03)
+            finally:
+                release(fd);os.close(fd)
+            self.assertEqual(delivered,['02:00:00:00:00:02'])
 
     async def test_worker_releases_board_when_foreground_requests_it(self):
         entered, closed = asyncio.Event(), asyncio.Event()

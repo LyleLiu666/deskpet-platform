@@ -82,6 +82,27 @@ class DeviceRegistryTests(unittest.TestCase):
                 registry.upgrade(path, A, C.device_id)
             self.assertEqual(DeviceConfig.load(path), A)
 
+    def test_independent_receiver_preserves_default_selection_and_gets_notifications(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'device.json';A.save(path);registry=DeviceRegistry(path)
+            original=path.read_bytes();receiver=registry.add_receiver(B)
+            self.assertEqual(path.read_bytes(),original)
+            self.assertEqual([item['identity'] for item in registry.list()],[A.identity])
+            self.assertEqual(DeviceConfig.load(receiver),B)
+            self.assertEqual(set(registry.notification_paths()),{path,receiver})
+            self.assertEqual(receiver.parent.stat().st_mode & 0o777,0o700)
+            self.assertEqual(receiver.stat().st_mode & 0o777,0o600)
+            with self.assertRaises(ValueError):registry.add_receiver(B)
+            with self.assertRaises(ValueError):registry.add_receiver(A)
+
+    def test_receiver_rejects_symlink_and_conflicting_registry_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'device.json';A.save(path);registry=DeviceRegistry(path)
+            receiver=registry.add_receiver(B)
+            with self.assertRaises(ValueError):registry.add(B)
+            receiver.unlink();receiver.symlink_to(path)
+            with self.assertRaises(ValueError):registry.notification_paths()
+
 
 if __name__ == '__main__':
     unittest.main()

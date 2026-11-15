@@ -1412,19 +1412,23 @@ def status_view(reply, capabilities):
 
 
 def create_server(config_path, role_dir=None, token_root=None, usb_port=None, token_collector=None, token_probe=None,
-                  *, no_token_probe=False):
+                  *, no_token_probe=False, shared_config_path=None):
     if no_token_probe and (token_probe is not None or token_collector is not None):
         raise ValueError("禁用 Token 采集时不能同时指定采集程序。")
-    installed_probe = Path(config_path).parent / "bin/AgentSpeedProbe"
+    shared_config = Path(shared_config_path).expanduser() if shared_config_path is not None else Path(config_path)
+    if shared_config_path is not None:
+        DeviceConfig.load(shared_config)
+    installed_probe = shared_config.parent / "bin/AgentSpeedProbe"
     if not no_token_probe and token_probe is None and token_collector is None and installed_probe.is_file():
         token_probe = installed_probe
     shared_probe = AgentSpeedProbe(token_probe) if token_probe is not None else None
-    shared_quota_store = QuotaStore(Path(config_path).parent / "agent-quota.sqlite3")
+    shared_quota_store = QuotaStore(shared_config.parent / "agent-quota.sqlite3")
+    notification_inbox = NotificationStore(shared_config.parent / "notifications.sqlite3")
+    default_source = notification_inbox if Path(config_path).resolve()!=shared_config.resolve() else None
     session = BoardSession(config_path, token_root=token_root, usb_port=usb_port,
                            token_collector=token_collector, probe_collector=shared_probe, no_token_probe=no_token_probe,
-                           quota_store=shared_quota_store)
+                           notification_source=default_source,quota_store=shared_quota_store)
     registry = DeviceRegistry(config_path)
-    notification_inbox = NotificationStore(registry.default_path.parent / "notifications.sqlite3")
     session.identity_registry = registry
     tasks = []
     running = False
@@ -1449,9 +1453,9 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         # installed once for this registry, and each board keeps its own inbox.
         if device_id is not None:
             registry.path_for(device_id)
-        command = hook_command(registry.default_path, hook, *arguments)
+        command = hook_command(shared_config, hook, *arguments)
         previous = [hook_command(path, hook, *arguments) for path in registry.paths()
-                    if path != registry.default_path]
+                    if path.resolve() != shared_config.resolve()]
         return command, previous
 
     async def configure_notifications(enabled, device_id, hook, configure, *arguments):

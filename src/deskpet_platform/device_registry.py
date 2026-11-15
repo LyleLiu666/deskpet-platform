@@ -27,6 +27,7 @@ class DeviceRegistry:
     def __init__(self, default_path):
         self.default_path = Path(default_path)
         self.root = self.default_path.parent / 'devices'
+        self.receivers = self.default_path.parent / 'receivers'
 
     @contextmanager
     def _locked(self):
@@ -74,6 +75,62 @@ class DeviceRegistry:
                 uuids.add(config.device_id)
         return entries
 
+    def _receiver_entries(self):
+        if self.receivers.is_symlink():
+            raise ValueError('invalid_notification_receivers')
+        if not self.receivers.exists():
+            return []
+        if not self.receivers.is_dir() or (os.name != 'nt' and self.receivers.stat().st_mode & 0o077):
+            raise ValueError('invalid_notification_receivers')
+        entries=[]
+        for directory in sorted(self.receivers.iterdir()):
+            if directory.is_symlink() or not directory.is_dir() or (os.name != 'nt' and directory.stat().st_mode & 0o077):
+                raise ValueError('invalid_notification_receiver')
+            path=directory/'device.json'
+            if path.is_symlink():raise ValueError('device_configuration_is_symlink')
+            config=DeviceConfig.load(path)
+            valid_names={_directory_name(selection_id(config)),_directory_name('mac:'+config.identity)}
+            if directory.name not in valid_names:raise ValueError('device_registry_identity_mismatch')
+            entries.append((path,config))
+        return entries
+
+    def _notification_entries(self):
+        entries=self._validated_entries()+self._receiver_entries()
+        macs,uuids=set(),set()
+        for _,config in entries:
+            if config.identity in macs or (config.device_id and config.device_id in uuids):
+                raise ValueError('device_registry_identity_conflict')
+            macs.add(config.identity)
+            if config.device_id:uuids.add(config.device_id)
+        return entries
+
+    def notification_paths(self):
+        """Devices for background delivery, including independent receivers."""
+        with self._locked():
+            return [path for path,_ in self._notification_entries()]
+
+    def receiver_paths(self):
+        """Independent receivers only, with the same collision checks as delivery."""
+        with self._locked():
+            entries=self._notification_entries()
+            return [path for path,_ in entries if path.parent.parent==self.receivers]
+
+    def add_receiver(self, config):
+        """Add a notification receiver without changing interactive device selection."""
+        if not isinstance(config,DeviceConfig):raise TypeError('expected_device_configuration')
+        with self._locked():
+            for _,existing in self._notification_entries():
+                if existing.identity==config.identity or (config.device_id and existing.device_id==config.device_id):
+                    raise ValueError('device_already_paired_or_identity_conflict')
+            self.receivers.mkdir(mode=0o700,exist_ok=True)
+            if self.receivers.is_symlink() or (os.name!='nt' and self.receivers.stat().st_mode & 0o077):
+                raise ValueError('invalid_notification_receivers')
+            directory=self.receivers/_directory_name(selection_id(config));directory.mkdir(mode=0o700)
+            try:config.save(directory/'device.json')
+            except BaseException:
+                directory.rmdir();raise
+            return directory/'device.json'
+
     def list(self):
         with self._locked():
             return [{'id': selection_id(config), 'device_id': config.device_id,
@@ -106,7 +163,7 @@ class DeviceRegistry:
             raise TypeError('expected_device_configuration')
         identity = selection_id(config)
         with self._locked():
-            for _, existing in self._validated_entries():
+            for _, existing in self._notification_entries():
                 if existing.identity == config.identity or (config.device_id and existing.device_id == config.device_id):
                     raise ValueError('device_already_paired_or_identity_conflict')
             directory = self.root / _directory_name(identity)
@@ -123,7 +180,7 @@ class DeviceRegistry:
         if not isinstance(config, DeviceConfig):
             raise TypeError('expected_device_configuration')
         with self._locked():
-            entries = self._validated_entries()
+            entries = self._notification_entries()
             existing = next((item for path, item in entries if path == self.default_path), None)
             if existing != expected:
                 raise ValueError('device_configuration_changed')
@@ -142,7 +199,7 @@ class DeviceRegistry:
             raise ValueError('invalid_device_uuid')
         path = Path(path)
         with self._locked():
-            entries = self._validated_entries()
+            entries = self._notification_entries()
             matching = [config for item_path, config in entries if item_path == path]
             if len(matching) != 1 or matching[0] != expected:
                 raise ValueError('device_configuration_changed')

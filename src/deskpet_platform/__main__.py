@@ -64,6 +64,10 @@ def main():
     find_usb = commands.add_parser("find-usb", help="Read UUID and MAC from explicitly selected USB ports")
     find_usb.add_argument("ports", nargs="+", metavar="PORT")
     find_usb.add_argument("--device-id", help="Only report a board with this persistent UUID")
+    receiver = commands.add_parser("receiver-add-usb", help="Pair an independent notification receiver without changing the default board")
+    receiver.add_argument("--port", required=True, help="Confirmed USB serial port")
+    receiver.add_argument("--expected-identity", required=True, help="Expected board MAC address")
+    receiver.add_argument("--credentials-file", type=Path, help="Optional private Wi-Fi credentials file")
     mcp = commands.add_parser("mcp", help="Start the local stdio MCP")
     mcp.add_argument(
         "--role-dir", type=Path, help="Optional absolute path to local role resources")
@@ -73,6 +77,7 @@ def main():
     token.add_argument("--token-probe", type=Path, help="AgentSpeedProbe executable used by the original display")
     token.add_argument("--no-token-probe", action="store_true", help="Disable live Token collection, including an installed AgentSpeedProbe")
     mcp.add_argument("--usb-port", help="Confirmed serial port for USB fallback")
+    mcp.add_argument("--shared-config", type=Path, help="Existing DeskPet configuration to share notification and quota sources")
     commands.add_parser("codex-hook", help="接收 Codex 完成、提问和回答事件（由 Codex 调用）")
     commands.add_parser("claude-hook", help="接收 Claude Code 完成和提问事件（由 Claude Code 调用）")
     antigravity_hook = commands.add_parser("antigravity-hook", help="接收 Antigravity 的提醒事件（由 Antigravity 调用）")
@@ -82,6 +87,7 @@ def main():
     workbuddy = commands.add_parser("workbuddy-hook", help="接收 WorkBuddy 的完成和提问事件（由 WorkBuddy 调用）")
     workbuddy.add_argument("--edition", choices=EDITIONS, default="workbuddy")
     commands.add_parser("notification-worker", help="在后台发送待处理的提醒")
+    commands.add_parser("receiver-worker", help="在后台发送独立设备的提醒")
     args = parser.parse_args()
     args.config = args.config.expanduser().resolve()
     if args.command == "codex-hook":
@@ -112,16 +118,24 @@ def main():
         from .notifications import run_worker
         asyncio.run(run_worker(args.config))
         return
+    if args.command == "receiver-worker":
+        from .notifications import run_receiver_worker
+        asyncio.run(run_receiver_worker(args.config))
+        return
     if args.command == "mcp":
         from .mcp_server import create_server
         create_server(args.config, role_dir=args.role_dir, token_root=args.token_sessions,
                       usb_port=args.usb_port, token_collector=args.token_collector,
-                      token_probe=args.token_probe, no_token_probe=args.no_token_probe).run(transport="stdio")
+                      token_probe=args.token_probe, no_token_probe=args.no_token_probe,
+                      shared_config_path=args.shared_config).run(transport="stdio")
         return
     try:
         if args.command == "find-usb":
             from .usb_link import find_usb_devices
             result = find_usb_devices(args.ports, args.device_id)
+        elif args.command == "receiver-add-usb":
+            from .receiver_setup import add_usb_receiver
+            result = asyncio.run(add_usb_receiver(args.config,args.port,args.expected_identity,args.credentials_file))
         else:
             if args.command == "pair" and not sys.stdin.isatty():
                 parser.exit(2, "请在本机交互式终端输入配对码。\n")
