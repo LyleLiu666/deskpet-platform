@@ -19,7 +19,7 @@ from mcp.client.stdio import stdio_client
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from PIL import Image
 
-from deskpet_platform.channel import AckTimeout, CommandRejected, DeviceError
+from deskpet_platform.channel import AckTimeout, CommandRejected, DeviceError, TextNotVisible
 from deskpet_platform.client import Client
 from deskpet_platform.mcp_server import BoardSession, status_view
 from deskpet_platform.pairing import DeviceConfig
@@ -33,6 +33,20 @@ KEY = bytes(range(32))
 
 
 class PlatformTests(unittest.IsolatedAsyncioTestCase):
+    async def test_text_delivery_reports_view_change_without_losing_link(self):
+        client = Client(DeviceConfig(DEVICE, KEY))
+        client.channel = AsyncMock()
+        client.channel.capabilities = {'text_present': 1}
+        client.channel.send.return_value = {'pet_page': 255, 'view_token': 7}
+        with self.assertRaises(TextNotVisible):
+            await client.show_text('Hello')
+        client.channel.send.side_effect = [
+            {'pet_page': 0, 'view_token': 7, 'text_generation': 0},
+            {'text_status': 'rejected', 'text_reason': 'view_changed'},
+        ]
+        with self.assertRaises(TextNotVisible):
+            await client.show_text('Hello')
+
     async def test_resource_deletion_targets_a_complete_role_photo_or_one_desk_file(self):
         class Channel:
             capabilities = {"card_delete": 1}

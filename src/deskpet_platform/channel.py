@@ -14,6 +14,10 @@ class DeviceError(RuntimeError):
     pass
 
 
+class TextNotVisible(DeviceError):
+    """The screen cannot show a toast now; the notification remains pending."""
+
+
 class AckTimeout(DeviceError):
     pass
 
