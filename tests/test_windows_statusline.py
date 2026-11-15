@@ -23,6 +23,30 @@ class WindowsStatuslineTests(unittest.TestCase):
         self.input = json.dumps({"private":"fixture 私密", "rate_limits":{"five_hour":{
             "used_percentage":20,"resets_at":int(time.time())+600}}},ensure_ascii=False).encode("utf-8")
 
+    def test_claude_without_existing_command_needs_no_shell_guess(self):
+        from deskpet_platform.quota_statusline import configure
+        from deskpet_platform.quota_capture import QuotaStore
+        self.settings.write_text(json.dumps({"other": True}), encoding="utf-8")
+        self.assertTrue(configure(self.settings, "claude_code", self.store, enabled=True))
+        self.assertFalse(configure(self.settings, "claude_code", self.store, enabled=True))
+        command = json.loads(self.settings.read_text(encoding="utf-8"))["statusLine"]["command"]
+        for shell in ([shutil.which("powershell.exe"), "-NoProfile", "-Command", command],
+                      [shutil.which("bash.exe"), "-c", command]):
+            if shell[0]:
+                result = subprocess.run(shell, input=self.input, capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIsNotNone(QuotaStore(self.store).read("claude_code", time.time()))
+        self.assertTrue(configure(self.settings, "claude_code", self.store, enabled=False))
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")), {"other": True})
+
+    def test_existing_command_is_not_wrapped_without_identifying_its_shell(self):
+        from deskpet_platform.quota_statusline import configure
+        original = {"statusLine": {"type": "command", "command": "echo existing"}}
+        self.settings.write_text(json.dumps(original), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "命令环境"):
+            configure(self.settings, "claude_code", self.store, enabled=True)
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")), original)
+
     def do_rehearsal(self, source, shell, old_command, parent, *, executable=None):
         from deskpet_platform.quota_statusline import configure
         from deskpet_platform.quota_capture import QuotaStore
