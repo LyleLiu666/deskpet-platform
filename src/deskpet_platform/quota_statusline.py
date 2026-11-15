@@ -50,7 +50,8 @@ def _metadata(command):
     if not isinstance(command, str):
         return None
     from .quota_windows_statusline import PREFIX, metadata as windows_metadata
-    if command.startswith(PREFIX):
+    is_windows = command.startswith(PREFIX)
+    if is_windows:
         data = windows_metadata(command)
         if data is None:
             return None
@@ -71,12 +72,14 @@ def _metadata(command):
                 not (data["original_command"] is None or isinstance(data["original_command"], str)) or
                 any(type(data[k]) is not bool for k in ("had_status", "added_type", "added_stack"))):
             raise ValueError
-        if "windows_shell" in data:
+        if is_windows != ("windows_shell" in data):
+            raise ValueError
+        if is_windows:
             shell = data["windows_shell"]
             if (not isinstance(shell, list) or len(shell) != 2 or shell[0] not in ("bash", "powershell", "cmd") or
                     not isinstance(shell[1], str) or not shell[1]):
                 raise ValueError
-        if "windows_shell" not in data and _command(data) != command:
+        if not is_windows and _command(data) != command:
             raise ValueError
         return data
     except (ValueError, TypeError, KeyError, UnicodeError):

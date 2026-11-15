@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from deskpet_platform.quota_statusline import _command, _metadata
+from deskpet_platform.quota_statusline import MARKER, _command, _metadata
 from deskpet_platform.quota_windows_statusline import PREFIX, BOOT_PREFIX, BOOT_SUFFIX
 from deskpet_platform.quota_capture import QuotaStore
 
@@ -41,6 +41,12 @@ class WindowsStatuslineEncodingTests(unittest.TestCase):
         alternate = base64.b64encode(gzip.compress(script, compresslevel=1, mtime=0)).decode("ascii")
         encoded = base64.b64encode((BOOT_PREFIX + alternate + BOOT_SUFFIX).encode("utf-16le")).decode("ascii")
         self.assertEqual(_metadata(PREFIX + encoded), value)
+
+    def test_posix_marker_cannot_spoof_windows_metadata(self):
+        raw = json.dumps(self.metadata("cmd"), separators=(",", ":")).encode()
+        token = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        with self.assertRaises(ValueError):
+            _metadata(MARKER + token + "\necho unrelated")
 
     def test_an_unrelated_encoded_powershell_command_is_not_claimed(self):
         encoded = base64.b64encode("Write-Output hello".encode("utf-16le")).decode("ascii")
