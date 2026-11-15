@@ -6,6 +6,14 @@ import os
 from pathlib import Path
 
 
+def state_path(path):
+    """Place app-owned state under a dedicated directory when on Windows."""
+    path = Path(path)
+    if os.name != "nt" or path.parent.name == ".deskpet-private":
+        return path
+    return path.parent / ".deskpet-private" / path.name
+
+
 def _libraries():
     return ctypes.WinDLL("advapi32", use_last_error=True), ctypes.WinDLL("kernel32", use_last_error=True)
 

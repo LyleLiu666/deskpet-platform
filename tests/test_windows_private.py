@@ -26,7 +26,7 @@ $entries = (Get-Acl -LiteralPath $Path).Access | Where-Object { $_.AccessControl
             probe = Path(directory) / "read-acl.ps1"
             probe.write_text(script, encoding="utf-8")
             for item in (root, path):
-                result = subprocess.run(["powershell", "-NoProfile", "-File", str(probe), str(item)],
+                result = subprocess.run(["pwsh", "-NoProfile", "-File", str(probe), str(item)],
                                         check=True, text=True, capture_output=True, timeout=15)
                 self.assertTrue(result.stdout.strip(), result.stderr)
                 sids = json.loads(result.stdout)
