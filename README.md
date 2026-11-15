@@ -20,7 +20,7 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 请帮我在这台电脑上安装和配置 DeskPet，并只操作我选中的小板。
 
 先阅读 https://github.com/LyleLiu666/deskpet-platform 的 README 和操作手册，
-优先使用已发布的稳定 Release 源码包。若没有 Release，请告诉我并使用
+优先使用已发布的稳定 Release 源码包。若没有稳定 Release，请告诉我并使用
 公开仓库源码；不要覆盖我的现有项目、Agent 配置或其他设备的配对。
 
 1. 在独立目录按 README 安装。macOS 使用 install-macos.command；
