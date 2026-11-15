@@ -51,7 +51,7 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.client = FakeClient()
         self.view = NotificationView(self.store)
 
-    async def test_home_summarizes_many_sources_in_four_rows_without_repeated_sends(self):
+    async def test_home_summarizes_many_sources_in_two_rows_without_repeated_sends(self):
         sources = ("codex", "claude_code", "workbuddy", "antigravity", "opencode")
         for index in range(50):
             self.store.add_agent_event(sources[index % 5], "s", str(index), "completed", "task")
@@ -61,11 +61,13 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         messages = self.client.channel.messages
         begin = messages[0][1]
         self.assertTrue(begin["agent_home"])
-        self.assertEqual((begin["count"], begin["results"], begin["waiting"]), (4, 50, 5))
-        self.assertEqual(sum(kind == "row" for kind, _ in messages), 4)
+        self.assertEqual((begin["count"], begin["results"], begin["waiting"]), (2, 5, 5))
+        rows = [fields["id"].rsplit("-", 1) for kind, fields in messages if kind == "row"]
+        self.assertEqual([category for category, _ in rows], ["home-completed", "home-response"])
+        self.assertEqual([set(marks) for _, marks in rows], [set("gcwao"), set("gcwao")])
         self.assertEqual(messages[-1][0], "snapshot_commit")
         await self.view.refresh(self.client)
-        self.assertEqual(len(messages), 6)
+        self.assertEqual(len(messages), 4)
 
     async def test_numeric_list_pages_keep_a_stable_anchor_and_reject_stale_touches(self):
         for index in range(113):
@@ -123,7 +125,7 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.view.rows), 2)
         self.assertFalse(self.view.touch({**tap, "action": "detail", "id": f"n-{identity}"}))
 
-        self.store.add_agent_event("codex", "s", "third", "completed", "Third")
+        self.store.add_agent_event("codex", "other-session", "third", "completed", "Third")
         await self.view.refresh(self.client)
         self.assertGreater(self.view.version, list_version)
         self.assertTrue(self.view.touch({**tap, "action": "home", "version": list_version}))
@@ -227,7 +229,7 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         committed = self.store.cache_records()
         newer = self.store.add_agent_event("workbuddy", "s", "new", "response", "New")
         await self.view.refresh(self.client, cached_records=committed)
-        self.assertEqual(channel.messages[0][1]["results"], 100)
+        self.assertEqual(channel.messages[0][1]["results"], 1)
         self.assertEqual(channel.messages[0][1]["waiting"], 0)
         self.assertTrue(self.view.touch({"action": "list", "version": self.view.version, "id": ""}))
         await self.view.refresh(self.client, device_page=1, cached_records=committed)
@@ -241,6 +243,76 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
             await self.view.refresh(self.client, device_page=1, cached_records=self.store.cache_records())
         self.assertEqual([row["id"] for row in self.view.rows], ["n-1"])
 
+    async def test_opening_tf_list_marks_completed_history_through_the_card_anchor(self):
+        self.client.channel.capabilities["agent_cache_first"] = 1
+        for index in range(105):
+            self.store.add_agent_event("codex", "s", str(index), "completed", "Task")
+        question = self.store.add_agent_event("codex", "s", "ask", "response", "Question")
+        committed = self.store.cache_records()
+        await self.view.refresh(self.client, cached_records=committed)
+        later = self.store.add_agent_event("codex", "s", "later", "completed", "Later")
+        tap = {"action": "list", "version": self.view.version, "id": committed[0]["cache_id"]}
+        self.assertFalse(self.view.touch({**tap, "id": f"p-{question:x}-0000000000000000"}))
+        self.assertEqual(self.store.unseen_count(), 107)
+        self.assertTrue(self.view.touch(tap))
+        self.assertTrue(self.view.touch(tap))
+        await self.view.refresh(self.client, device_page=1, cached_records=committed)
+        self.assertEqual(self.view.anchor, question)
+        self.assertEqual(self.view.pages, 27)
+        self.assertEqual(self.store.home_summary()["completed_count"], 1)
+        self.assertEqual(self.store.home_summary()["response_count"], 1)
+        self.assertEqual(self.store.unseen_count(), 2)
+        self.assertEqual([item["id"] for item in self.store.list() if not item["seen"]], [later, question])
+
+    async def test_read_completions_do_not_reappear_on_home_before_the_card_rewrites(self):
+        self.client.channel.capabilities["agent_cache_first"] = 1
+        self.store.add_agent_event("codex", "s", "done", "completed", "Task")
+        self.store.add_agent_event("codex", "s", "ask", "response", "Question")
+        old_commit = self.store.cache_records()
+        await self.view.refresh(self.client, cached_records=old_commit)
+        self.assertTrue(self.view.touch({"action": "list", "version": self.view.version,
+                                        "id": old_commit[0]["cache_id"]}))
+        await self.view.refresh(self.client, device_page=1, cached_records=old_commit)
+        self.assertTrue(self.view.touch({"action": "home", "version": self.view.version, "id": ""}))
+        await self.view.refresh(self.client, cached_records=old_commit)
+        home = [fields for kind, fields in self.client.channel.messages if kind == "snapshot_begin"][-1]
+        self.assertEqual((home["results"], home["waiting"]), (0, 1))
+
+    async def test_local_list_receipt_can_arrive_before_the_first_live_projection(self):
+        channel = self.client.channel
+        channel.capabilities["agent_cache_first"] = 1
+        self.store.add_agent_event("codex", "s", "done", "completed", "Task")
+        committed = self.store.cache_records()
+        event = {"action": "list", "version": 0, "id": committed[0]["cache_id"], "epoch": channel.epoch}
+        self.assertFalse(self.view.touch({**event, "id": ""}, channel=channel))
+        self.assertTrue(self.view.touch(event, channel=channel))
+        self.assertTrue(await self.view.refresh(self.client, device_page=1))
+        self.assertEqual(self.store.unseen_count(), 0)
+        self.assertEqual(self.view.anchor, committed[0]["id"])
+
+    async def test_four_older_questions_are_first_and_list_reads_through_the_newest_commit(self):
+        channel = self.client.channel
+        channel.capabilities.update(agent_cache_first=1, agent_inbox_read=1)
+        questions = [self.store.add_agent_event("codex", "s", f"q{i}", "response", f"Question {i}") for i in range(4)]
+        for index in range(105):
+            self.store.add_agent_event("codex", "s", str(index), "completed", "Task")
+        card = self.store.cache_records(pending_first=True)
+        self.assertEqual([item["id"] for item in card[:4]], questions[::-1])
+        anchor = max(card, key=lambda row: row["id"])
+        await self.view.refresh(self.client, cached_records=card)
+        self.assertEqual([fields["waiting"] for command, fields in channel.messages if command=="snapshot_begin"], [4])
+        later = self.store.add_agent_event("codex", "s", "new", "completed", "New")
+        self.assertTrue(self.view.touch({"action": "list", "version": self.view.version,
+                                        "id": anchor["cache_id"]}, channel=channel))
+        await self.view.refresh(self.client, device_page=1, cached_records=card)
+        self.assertEqual([row["id"] for row in self.view.rows], [f"n-{identity}" for identity in questions[::-1]])
+        self.assertTrue(all(item["seen"] and not item["resolved"] for item in self.view.items.values()))
+        self.assertEqual(self.store.unseen_count(), 1)
+        self.assertEqual(self.store.list()[0]["id"], later)
+        self.assertTrue(self.view.touch({"action": "home", "version": self.view.version, "id": ""}, channel=channel))
+        await self.view.refresh(self.client, cached_records=card)
+        self.assertEqual([fields["waiting"] for command, fields in channel.messages if command=="snapshot_begin"][-1], 0)
+
     async def test_cache_first_list_does_not_project_a_row_updated_before_card_commit(self):
         self.client.channel.capabilities["agent_cache_first"] = 1
         identity = self.store.add_agent_event("codex", "s", "question", "response", "Check this")
@@ -252,6 +324,80 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(kind == "snapshot_commit" for kind, _ in self.client.channel.messages), 1)
         self.assertTrue(await self.view.refresh(self.client, device_page=1, cached_records=self.store.cache_records()))
         self.assertEqual(self.view.rows[0]["kind"], 3)
+
+    async def test_local_inbox_acknowledges_reads_without_live_list_or_detail(self):
+        channel = self.client.channel
+        channel.capabilities.update(agent_cache_first=1, agent_inbox_read=1, agent_local_inbox=1)
+        identity = self.store.add_agent_event("codex", "s", "q", "response", "Question")
+        card = self.store.cache_records(active_only=True)
+        await self.view.refresh(self.client, cached_records=card)
+        channel.messages.clear()
+        self.assertTrue(self.view.touch({"action": "list", "version": self.view.version,
+                                        "id": card[0]["cache_id"]}, channel=channel))
+        self.assertFalse(await self.view.refresh(self.client, device_page=1, cached_records=card))
+        self.assertFalse(await self.view.refresh(self.client, device_page=2, cached_records=card))
+        self.assertEqual(channel.messages, [])
+        self.assertEqual(self.store.seen_notifications([identity]), {identity})
+
+    async def test_cached_home_counts_sessions_and_next_completion_survives_the_read(self):
+        channel = self.client.channel
+        channel.capabilities.update(agent_cache_first=1, agent_inbox_read=1, agent_local_inbox=1)
+        turns = [self.store.add_agent_event("codex", "same", str(turn), "completed", "Task") for turn in range(5)]
+        question = self.store.add_agent_event("codex", "same", "q", "response", "Question")
+        card = self.store.cache_records(active_only=True, session_ids=True)
+        self.assertEqual([item["id"] for item in card], [question, turns[-1]])
+        await self.view.refresh(self.client, device_page=0, cached_records=card)
+        home = [fields for command, fields in channel.messages if command == "snapshot_begin"][-1]
+        self.assertEqual((home["results"], home["waiting"]), (1, 1))
+        latest = self.store.add_agent_event("codex", "same", "new", "completed", "New")
+        self.assertTrue(self.view.touch({"action": "list", "version": self.view.version,
+                                        "id": card[0]["cache_id"]}, channel=channel))
+        self.assertEqual(self.store.seen_notifications([question, *turns, latest]), {question, *turns})
+        self.assertTrue(await self.view.refresh(self.client, device_page=0,
+                                                cached_records=self.store.cache_records(active_only=True)))
+        home = [fields for command, fields in channel.messages if command == "snapshot_begin"][-1]
+        self.assertEqual((home["results"], home["waiting"]), (1, 0))
+
+    async def test_local_inbox_resumes_home_after_exit_without_touch_event(self):
+        channel = self.client.channel
+        channel.capabilities.update(agent_cache_first=1, agent_inbox_read=1, agent_local_inbox=1)
+        question = self.store.add_agent_event("codex", "s", "q", "response", "Question")
+        card = self.store.cache_records(pending_first=True, active_only=True)
+        await self.view.refresh(self.client, device_page=0, cached_records=card)
+        self.assertTrue(self.view.touch({"action": "list", "version": self.view.version,
+                                        "id": card[0]["cache_id"]}, channel=channel))
+        # A route through the app menu can return to the role without a home
+        # touch receipt. An open local inbox must still suppress projections.
+        self.assertFalse(await self.view.refresh(self.client, device_page=1, cached_records=card))
+        self.assertFalse(await self.view.refresh(self.client, device_page=255, cached_records=card))
+        completed = self.store.add_agent_event("codex", "s", "done", "completed", "Done")
+        card = self.store.cache_records(pending_first=True, active_only=True)
+        self.assertTrue(await self.view.refresh(self.client, device_page=0, cached_records=card))
+        latest = next(fields for name, fields in reversed(channel.messages) if name == "snapshot_begin")
+        self.assertTrue(latest["agent_home"])
+        self.assertEqual((latest["waiting"], latest["results"]), (0, 1))
+        self.assertEqual(self.store.seen_notifications([question, completed]), {question})
+
+    async def test_desktop_answer_clears_home_badge_before_the_card_is_rewritten(self):
+        channel = self.client.channel
+        channel.capabilities.update(agent_cache_first=1, agent_inbox_read=1, agent_local_inbox=1)
+        question = self.store.add_agent_event("codex", "s", "q", "response", "Question")
+        card = self.store.cache_records(active_only=True)
+        await self.view.refresh(self.client, device_page=0, cached_records=card)
+        self.store.resolve_response(question)
+        new = self.store.add_agent_event("codex", "s", "new", "completed", "New")
+
+        await self.view.refresh(self.client, device_page=0, cached_records=card)
+        values = [fields for command, fields in channel.messages if command == "snapshot_begin"]
+        self.assertEqual([(v["waiting"], v["results"]) for v in values], [(1, 0), (0, 0)])
+        self.assertFalse(self.store.list()[0]["shown"])
+        self.assertEqual(self.store.seen_notifications([question]), set())
+
+        await self.view.refresh(self.client, device_page=0, cached_records=self.store.cache_records(active_only=True))
+        latest = next(fields for command, fields in reversed(channel.messages) if command == "snapshot_begin")
+        self.assertEqual((latest["waiting"], latest["results"]), (0, 1))
+        self.assertEqual(self.store.list()[0]["id"], new)
+        self.assertTrue(self.store.list()[0]["shown"])
 
 
 if __name__ == "__main__":

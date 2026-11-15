@@ -36,6 +36,8 @@ from .notification_cache import NotificationCache
 from .notification_view import NotificationView
 from .pair_portal import PairPortal
 from .pairing import DeviceConfig, valid_device_uuid
+from .quota_capture import QuotaStore
+from .quota_projection import ANTIGRAVITY_WINDOWS, SOURCES, project_quota
 from .role_example import create_role_example
 from .reference_collector import ReferenceCollector
 from .role_sources import list_role_sources
@@ -49,6 +51,12 @@ from .wifi_link import probe_board
 Manual = Literal["operations", "development", "roles"]
 LINK_ERRORS = (OSError, RuntimeError, ValueError, TimeoutError)
 WIFI_FALLBACK_TIMEOUT = 5
+MAX_CODEX_ALLOWANCE_AGE = 600
+
+
+def require_notification_hooks(enabled, platform):
+    if enabled and platform == "nt":
+        raise ValueError("Windows 的 Agent 提醒接入尚未验证；未修改 Agent 设置。")
 
 
 class CardFile(BaseModel):
@@ -66,7 +74,7 @@ def read_manual(topic: Manual) -> str:
 class BoardSession:
     def __init__(self, path, *, background=False, client_factory=Client, token_root=None, usb_port=None,
                  token_collector=None, token_probe=None, probe_collector=None, no_token_probe=False,
-                 notification_source=None):
+                 notification_source=None, quota_store=None):
         if (token_collector is not None and (token_probe is not None or probe_collector is not None) or
                 token_probe is not None and probe_collector is not None):
             raise ValueError("请只选择一种 Token 速度采集器。")
@@ -103,6 +111,9 @@ class BoardSession:
         self.token_published_at = 0.0
         self.token_history_path = Path(path).parent / "token-speed.sqlite3"
         self.codex_allowance = {}
+        self.codex_live_allowance = {}
+        self.codex_live_observed_at = 0.0
+        self.quota_store = quota_store if quota_store is not None else QuotaStore(Path(path).parent / "agent-quota.sqlite3")
         self.computer_display = DisplayPreferences(Path(path).parent / "computer-display.json")
         self.computer_metrics = ComputerMetrics()
         self.computer_metrics_lock = asyncio.Lock()
@@ -321,7 +332,15 @@ class BoardSession:
                     await self.record_status_rejection(error)
                 except LINK_ERRORS as error:
                     await self.record_link_error(error)
-            await asyncio.sleep(1 if self.client is not None else 3)
+            delay = 3
+            if self.client is not None:
+                delay = 1
+                # Each batch already yields to status, touch and other commands.
+                # Keep draining an in-flight TF commit without the idle poll delay.
+                if (self.client.channel.capabilities.get("agent_cache_first") == 1
+                        and self.notification_cache.transfer is not None):
+                    delay = .1
+            await asyncio.sleep(delay)
 
     async def refresh_messages(self):
         ids = await self.client.pending_notice_reads()
@@ -372,7 +391,7 @@ class BoardSession:
             return {"status": "ok", **{key: reply[key] for key in fields if key in reply}}
 
     async def process_touch(self, event):
-        self.notification_view.touch(event)
+        self.notification_view.touch(event, channel=getattr(self.client, "channel", None))
         if event["action"] == "notice_open":
             item = self.notifications.latest_unseen()
             if item:
@@ -595,9 +614,12 @@ class BoardSession:
         except (AttributeError, TypeError, *LINK_ERRORS):
             allowance = None
         updated = isinstance(allowance, dict)
+        now = time.time()
+        if updated:
+            self.codex_live_allowance = allowance.copy()
+            self.codex_live_observed_at = now
         if not updated:
             allowance = self.codex_allowance
-        now = time.time()
         if (self.reference_collector is not None or self.probe_collector is not None) and not any(
                 row[2] > now for row in allowance.get("quotas", [])):
             try:
@@ -615,6 +637,36 @@ class BoardSession:
                 continue
             updated = await self.refresh_quota()
             await asyncio.sleep(300 if updated else 10)
+
+    async def poll_quota_display(self):
+        """Send the selected allowance independently of the live speed probe."""
+        last_client = last_reading = None
+        due = 0.0
+        while True:
+            client = self.client
+            source = self.snapshot.get("quota_source")
+            if client is None or client.channel.capabilities.get("quota_sources") != 1 or source not in SOURCES:
+                last_client = last_reading = None
+                await asyncio.sleep(1)
+                continue
+            now = time.time()
+            provider = "claude_code" if source == "claude_code" else "antigravity"
+            captured = None if source == "codex" else await asyncio.to_thread(self.quota_store.read, provider, now)
+            codex_age = now - self.codex_live_observed_at
+            codex = self.codex_live_allowance if 0 <= codex_age <= MAX_CODEX_ALLOWANCE_AGE else None
+            reading = project_quota(source, codex=codex,
+                                    claude=captured if source == "claude_code" else None,
+                                    antigravity=captured if source in ANTIGRAVITY_WINDOWS else None, now=now)
+            if client is not last_client or reading != last_reading or time.monotonic() >= due:
+                async with self.lock:
+                    if client is self.client and source == self.snapshot.get("quota_source"):
+                        try:
+                            await client.update_quota(reading)
+                        except LINK_ERRORS:
+                            last_client = last_reading = None
+                        else:
+                            last_client, last_reading, due = client, reading, time.monotonic() + 5
+            await asyncio.sleep(1)
 
     async def configure_computer_metrics(self, *, cpu=None, memory=None):
         async with self.lock:
@@ -1193,6 +1245,9 @@ def status_view(reply, capabilities):
         status["role"]["base_action"] = reply["role_base_action"]
     if type(reply.get("weekly_reset")) is int and 1700000000 <= reply["weekly_reset"] <= 0xFFFFFFFF:
         status["weekly_reset_at"] = reply["weekly_reset"]
+    quota_source = reply.get("quota_source")
+    if capabilities.get("quota_sources") == 1 and type(quota_source) is int and 0 <= quota_source < len(SOURCES):
+        status["quota_source"] = SOURCES[quota_source]
     if capabilities.get("speed_windows") == 1 and (windows := speed_windows_view(reply)) is not None:
         status["speed_windows"] = windows
     if capabilities.get("weather_device") == 1:
@@ -1214,8 +1269,10 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     if not no_token_probe and token_probe is None and token_collector is None and installed_probe.is_file():
         token_probe = installed_probe
     shared_probe = AgentSpeedProbe(token_probe) if token_probe is not None else None
+    shared_quota_store = QuotaStore(Path(config_path).parent / "agent-quota.sqlite3")
     session = BoardSession(config_path, token_root=token_root, usb_port=usb_port,
-                           token_collector=token_collector, probe_collector=shared_probe, no_token_probe=no_token_probe)
+                           token_collector=token_collector, probe_collector=shared_probe, no_token_probe=no_token_probe,
+                           quota_store=shared_quota_store)
     registry = DeviceRegistry(config_path)
     notification_inbox = NotificationStore(registry.default_path.parent / "notifications.sqlite3")
     session.identity_registry = registry
@@ -1227,11 +1284,13 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         if running:
             board.loop = asyncio.get_running_loop()
             tasks.extend(asyncio.create_task(run()) for run in
-                         (board.poll, board.poll_weather, board.poll_tokens, board.poll_quota, board.poll_computer_metrics))
+                         (board.poll, board.poll_weather, board.poll_tokens, board.poll_quota,
+                          board.poll_quota_display, board.poll_computer_metrics))
 
     def make_session(path):
         board = BoardSession(path, token_root=token_root, token_collector=token_collector, probe_collector=shared_probe,
-                             no_token_probe=no_token_probe, notification_source=notification_inbox)
+                             no_token_probe=no_token_probe, notification_source=notification_inbox,
+                             quota_store=shared_quota_store)
         board.identity_registry = registry
         return board
 
@@ -1246,6 +1305,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         return command, previous
 
     async def configure_notifications(enabled, device_id, hook, configure, *arguments):
+        require_notification_hooks(enabled, os.name)
         command, previous = notification_commands(device_id, hook, *arguments)
 
         def apply():
@@ -1612,6 +1672,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     @server.tool()
     async def desk_enable_codex_notifications(device_id: str | None = None) -> dict[str, Any]:
         """安装一个 Codex 钩子，为所有已配对设备启用完成和待应答提醒。"""
+        require_notification_hooks(True, os.name)
         path = codex_home() / "hooks.json"
         command, previous = notification_commands(device_id, "codex-hook")
         added = await asyncio.to_thread(configure_codex_hooks, path, command, previous, enabled=True)
@@ -1648,6 +1709,19 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         changed = await configure_notifications(enabled, device_id, "antigravity-hook",
             lambda command, *, enabled: configure(path, command, enabled=enabled))
         return {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path)}
+
+    @server.tool()
+    async def desk_set_agent_quota(source: Literal["claude_code", "antigravity"], enabled: bool) -> dict[str, Any]:
+        """在电脑上启用或移除指定 Agent 的额度采集；保留已有状态栏命令。"""
+        from .quota_statusline import configure, settings_path
+
+        path = settings_path(source)
+        async with hook_configuration_lock:
+            changed = await asyncio.to_thread(configure, path, source, shared_quota_store.path, enabled=enabled)
+        return {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path),
+                "next_step": ("在小板的监控设置中选择对应来源，打开该 Agent 会话并检查额度；"
+                              "账号未提供额度或状态栏被覆盖时显示 --。" if enabled else
+                              "已移除本程序的额度采集设置。")}
 
     @server.tool()
     async def desk_set_opencode_notifications(enabled: bool, device_id: str | None = None) -> dict[str, Any]:

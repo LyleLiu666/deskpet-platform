@@ -934,6 +934,7 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                                                  "desk_set_brightness", "desk_calibrate_touch", "desk_cancel_touch_calibration",
                                                  "desk_enable_codex_notifications", "desk_disable_codex_notifications",
                                                  "desk_set_claude_notifications", "desk_set_antigravity_notifications",
+                                                 "desk_set_agent_quota",
                                                  "desk_set_opencode_notifications", "desk_set_workbuddy_notifications",
                                                  "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view"})
                         for name in ("desk_list_devices", "desk_read_manual"):

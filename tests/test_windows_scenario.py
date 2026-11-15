@@ -41,6 +41,12 @@ class WindowsScenarioTests(unittest.IsolatedAsyncioTestCase):
             adapter = SimpleNamespace(device="COM12",vid=1,pid=2,serial_number="fixture",location="1-1",hwid="fixture")
             self.assertEqual(windows_port_identity("com12",[adapter])[2], "fixture")
 
+    async def test_unverified_windows_notification_hooks_are_not_installed(self):
+        from deskpet_platform.mcp_server import require_notification_hooks
+        with self.assertRaisesRegex(ValueError, "Windows"):
+            require_notification_hooks(True, "nt")
+        require_notification_hooks(False, "nt")
+
     async def test_codex_shim_path_rejects_command_interpreters_metacharacters(self):
         from unittest.mock import patch
         from deskpet_platform.codex_quota import fetch_quota

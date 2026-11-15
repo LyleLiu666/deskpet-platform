@@ -123,3 +123,22 @@ class UsbLinkTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError):
                 await upload_usb(wrong, "photos/sample/full.565", path)
             self.assertEqual(wrong.commands[-1], "card_usb_abort")
+
+class WindowsUsbPortTests(unittest.TestCase):
+    def test_com_port_names_are_explicit_and_cannot_target_other_devices(self):
+        from deskpet_platform.usb_link import valid_usb_port
+        for value in ("COM1", "com12", "COM4096"):
+            self.assertTrue(valid_usb_port(value, windows=True), value)
+        for value in ("COM0", "COM01", "COM4097", "COM1/foo", "LPT1", "\\\\.\\pipe\\other", "/dev/tty.fake"):
+            self.assertFalse(valid_usb_port(value, windows=True), value)
+
+    def test_windows_port_identity_changes_when_the_attached_adapter_changes(self):
+        from deskpet_platform.usb_link import windows_port_identity
+        from types import SimpleNamespace
+        first = SimpleNamespace(device="COM5", vid=0x1a86, pid=0x7523, serial_number="fixture1", location="1-1", hwid="fixture")
+        second = SimpleNamespace(device="COM5", vid=0x1a86, pid=0x7523, serial_number="fixture2", location="1-1", hwid="fixture")
+        self.assertNotEqual(windows_port_identity("com5", [first]), windows_port_identity("COM5", [second]))
+        with self.assertRaises(FileNotFoundError):
+            windows_port_identity("COM6", [first])
+        with self.assertRaises(ValueError):
+            windows_port_identity("COM5", [first, second])
