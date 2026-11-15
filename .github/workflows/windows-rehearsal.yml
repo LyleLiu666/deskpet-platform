@@ -1,0 +1,20 @@
+name: Windows isolated rehearsal
+on:
+  push:
+    branches: [codex/windows-rehearsal]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test native Windows locking and pairing protection
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "$pwd/src"
+          python -m unittest discover -s tests -p test_file_lock.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_windows_pairing.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
