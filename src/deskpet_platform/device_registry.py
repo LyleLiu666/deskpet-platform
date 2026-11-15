@@ -4,6 +4,7 @@ from dataclasses import replace
 import os
 from pathlib import Path
 import re
+import shutil
 
 from .file_lock import acquire, release
 from .pairing import DEVICE_ID, DeviceConfig, valid_device_uuid
@@ -126,9 +127,13 @@ class DeviceRegistry:
             if self.receivers.is_symlink() or (os.name!='nt' and self.receivers.stat().st_mode & 0o077):
                 raise ValueError('invalid_notification_receivers')
             directory=self.receivers/_directory_name(selection_id(config));directory.mkdir(mode=0o700)
-            try:config.save(directory/'device.json')
+            try:
+                from .notifications import NotificationStore
+                source = NotificationStore(self.default_path.parent / 'notifications.sqlite3')
+                NotificationStore(directory / 'notifications.sqlite3', source=source).sync(initial_history=True)
+                config.save(directory/'device.json')
             except BaseException:
-                directory.rmdir();raise
+                shutil.rmtree(directory);raise
             return directory/'device.json'
 
     def list(self):

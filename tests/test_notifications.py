@@ -17,6 +17,42 @@ from deskpet_platform.pairing import DeviceConfig
 
 
 class NotificationTests(unittest.TestCase):
+    def test_new_receiver_inherits_history_without_replaying_it(self):
+        from deskpet_platform.device_registry import DeviceRegistry
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'device.json'
+            DeviceConfig('02:00:00:00:00:01', bytes(range(32))).save(config)
+            source = notifications.NotificationStore(config.parent / 'notifications.sqlite3')
+            old = source.add_agent_event('codex', 's', 'old', 'completed', 'old')
+            source.mark_seen(old)
+            source.add_agent_event('codex', 's', 'unread', 'completed', 'unread')
+            source.add_agent_event('codex', 's', 'question', 'response', 'question')
+            receiver = DeviceRegistry(config).add_receiver(DeviceConfig('02:00:00:00:00:02', bytes(range(32))))
+            inbox = notifications.NotificationStore(receiver.parent / 'notifications.sqlite3', source=source)
+            self.assertEqual(inbox.unseen_count(), 2)
+            self.assertIsNone(inbox.next_pending())
+            self.assertEqual(inbox.pending_attention(), 0)
+            self.assertEqual(inbox.home_summary()['response_count'], 1)
+            source.add_agent_event('codex', 's', 'new', 'completed', 'new')
+            inbox.sync()
+            self.assertEqual(inbox.next_pending()['title'], 'new')
+            inbox.mark_seen(inbox.next_pending()['id'])
+            self.assertFalse(source.list()[0]['seen'])
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX permission test')
+    def test_receiver_registration_rolls_back_if_history_cannot_be_read(self):
+        from deskpet_platform.device_registry import DeviceRegistry
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'device.json'
+            DeviceConfig('02:00:00:00:00:01', bytes(range(32))).save(config)
+            source = notifications.NotificationStore(config.parent / 'notifications.sqlite3')
+            source.add_agent_event('codex', 's', 'old', 'completed', 'old')
+            source.path.chmod(0o644)
+            registry = DeviceRegistry(config)
+            with self.assertRaises(ValueError):
+                registry.add_receiver(DeviceConfig('02:00:00:00:00:02', bytes(range(32))))
+            self.assertEqual(registry.receiver_paths(), [])
+
     def test_new_event_starts_independent_receiver_worker_when_registered(self):
         from deskpet_platform.device_registry import DeviceRegistry
         with tempfile.TemporaryDirectory() as directory:

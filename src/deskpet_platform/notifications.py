@@ -127,7 +127,7 @@ class NotificationStore:
             raise
         return db
 
-    def sync(self):
+    def sync(self, *, initial_history=False):
         """Copy new events into this board's inbox while preserving its receipts."""
         if self.source is None:
             return
@@ -140,10 +140,17 @@ class NotificationStore:
             after = db.execute("SELECT COALESCE(MAX(through_id),0) FROM notification_sync").fetchone()[0]
             through = db.execute("SELECT COALESCE(MAX(id),0) FROM inbox.notifications").fetchone()[0]
             if through > after:
-                db.execute("""INSERT OR IGNORE INTO main.notifications
-                    (source,session,turn,title,created,category,parent_turn,resolved,response_group)
-                    SELECT source,session,turn,title,created,category,parent_turn,resolved,response_group
-                    FROM inbox.notifications WHERE id>? ORDER BY id""", (after,))
+                if initial_history and after == 0:
+                    db.execute("""INSERT OR IGNORE INTO main.notifications
+                        (source,session,turn,title,created,category,parent_turn,resolved,response_group,shown,seen,dismissed,action_pending)
+                        SELECT source,session,turn,title,created,category,parent_turn,resolved,response_group,?,seen,dismissed,0
+                        FROM inbox.notifications WHERE id>? AND id<=? ORDER BY id""", (time.time(), after, through))
+                    db.execute("INSERT OR REPLACE INTO notification_attention VALUES (1,(SELECT COALESCE(MAX(id),0) FROM notifications))")
+                else:
+                    db.execute("""INSERT OR IGNORE INTO main.notifications
+                        (source,session,turn,title,created,category,parent_turn,resolved,response_group)
+                        SELECT source,session,turn,title,created,category,parent_turn,resolved,response_group
+                        FROM inbox.notifications WHERE id>? AND id<=? ORDER BY id""", (after, through))
                 db.execute("INSERT OR REPLACE INTO notification_sync VALUES (1,?)", (through,))
             # Keep old inboxes compatible with acknowledgements that arrive
             # after the event was already copied or before it was recorded.
