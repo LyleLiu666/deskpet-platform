@@ -1,6 +1,7 @@
 """Prepare an image for the board's 320 × 240 RGB565 screen."""
 from array import array
 from pathlib import Path
+from io import BytesIO
 import sys
 
 from PIL import Image, ImageOps
@@ -49,6 +50,18 @@ def prepare_image(source):
 
 def prepare_photo(source):
     return _photo_package(_legacy_screen(_load_image(source)))
+
+def prepare_jpeg_photo(source):
+    """Prepare a baseline JPEG for a 480 × 320 device without cropping."""
+    image=_load_image(source)
+    image.thumbnail((960,640),Image.Resampling.LANCZOS)
+    background=Image.new('RGBA',image.size,'white')
+    background.alpha_composite(image)
+    output=BytesIO()
+    background.convert('RGB').save(output,format='JPEG',quality=90,subsampling=2,progressive=False,optimize=True)
+    payload=output.getvalue()
+    if len(payload)>2*1024*1024:raise ValueError('图片转换后超过设备限制。')
+    return payload
 
 
 def _photo_package(image):

@@ -7,6 +7,7 @@ import hashlib
 from importlib.resources import files
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 import tempfile
@@ -31,7 +32,7 @@ from .codex_quota import fetch_quota
 from .computer_metrics import ComputerMetrics, DisplayPreferences
 from .device_registry import DeviceRegistry
 from .device_sessions import DeviceSessions
-from .image_display import prepare_photo, prepare_photo_with_fullscreen
+from .image_display import prepare_photo, prepare_photo_with_fullscreen, prepare_jpeg_photo
 from .notifications import NotificationStore, codex_home, deliver_next, notification_text, request_worker_yield
 from .notification_cache import NotificationCache
 from .notification_view import NotificationView
@@ -953,7 +954,7 @@ class BoardSession:
             future.cancel()
             raise TimeoutError("pairing_timeout") from None
 
-    async def upload_files(self, items):
+    async def upload_files(self, items, *, expected_client=None):
         if not 1 <= len(items) <= 100:
             raise ValueError("请选择 1 至 100 个文件。")
         checked, destinations = [], set()
@@ -972,6 +973,11 @@ class BoardSession:
             client = self.client
             if client is None:
                 return {"status": "not_connected", "completed": [], "connection": self.snapshot}
+            if expected_client is not None and client is not expected_client:
+                return {"status": "connection_changed", "completed": [], "connection": self.snapshot}
+            if client.channel.capabilities.get('card_restricted_paths')==1:
+                if any(not re.fullmatch(r'photos/p-[0-9a-f]{16}\.jpg',path) for _,path in checked):
+                    raise ValueError('此设备的普通素材请用 desk_add_photo 导入图片；角色请用 desk_install_role。')
             completed = []
             for source, path in checked:
                 try:
@@ -1240,6 +1246,14 @@ class BoardSession:
         path = Path(source).expanduser()
         if not path.is_absolute() or not path.is_file():
             raise ValueError("请提供本机图片的绝对路径。")
+        client=self.client
+        if client is not None and client.channel.capabilities.get('photo_jpeg_upload')==1:
+            payload=await asyncio.to_thread(prepare_jpeg_photo,path)
+            identity='p-'+hashlib.sha256(payload).hexdigest()[:16]
+            with tempfile.TemporaryDirectory(prefix='deskpet-photo-') as directory:
+                staged=Path(directory)/'photo.jpg';staged.write_bytes(payload)
+                item=CardFile(source=str(staged),path=f'photos/{identity}.jpg')
+                return {'photo':identity,**await self.upload_files([item],expected_client=client)}
         fullscreen = (self.client is not None
                       and self.client.channel.capabilities.get("photo_fullscreen") == 1)
         if fullscreen:

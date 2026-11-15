@@ -6,10 +6,21 @@ import unittest
 
 from PIL import Image
 
-from deskpet_platform.image_display import prepare_image, prepare_photo, prepare_photo_with_fullscreen
+from deskpet_platform.image_display import prepare_image, prepare_photo, prepare_photo_with_fullscreen, prepare_jpeg_photo
+from io import BytesIO
 
 
 class ImageDisplayTests(unittest.TestCase):
+    def test_jpeg_photo_keeps_aspect_and_flattens_transparency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source=Path(directory)/'image.png'
+            Image.new('RGBA',(2000,1000),(255,0,0,0)).save(source)
+            payload=prepare_jpeg_photo(source)
+            with Image.open(BytesIO(payload)) as image:
+                self.assertEqual(image.size,(960,480));self.assertEqual(image.format,'JPEG')
+                self.assertGreater(min(image.convert('RGB').getpixel((100,100))),245)
+                self.assertFalse(image.info.get('progressive'))
+            self.assertLess(len(payload),2*1024*1024)
     def test_image_is_fitted_without_distortion_and_converted_to_rgb565(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "red.png"

@@ -360,6 +360,43 @@ class CardUploadTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await session.add_photo(str(photo)), legacy)
             self.assertEqual(written, {**legacy_bytes, screen: fullscreen_bytes})
 
+    async def test_native_jpeg_photo_upload_uses_single_content_addressed_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);photo=root/'photo.png';Image.new('RGB',(900,450),'red').save(photo)
+            written={}
+            async def upload(path,source):
+                written[path]=Path(source).read_bytes();return {'path':path,'bytes':len(written[path])}
+            client=SimpleNamespace(channel=SimpleNamespace(capabilities={'photo_jpeg_upload':1,'card_restricted_paths':1}),upload_file=upload)
+            session=BoardSession(root/'device.json',token_root=root/'sessions',no_token_probe=True);session.client=client
+            result=await session.add_photo(str(photo))
+            self.assertEqual(result['status'],'completed')
+            path=f"photos/{result['photo']}.jpg"
+            self.assertEqual([r['path'] for r in result['completed']],[path])
+            self.assertEqual(result['photo'],'p-'+hashlib.sha256(written[path]).hexdigest()[:16])
+            self.assertTrue(written[path].startswith(b'\xff\xd8'))
+
+    async def test_restricted_board_rejects_unsupported_batch_before_any_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'item';source.write_bytes(b'anything')
+            client=SimpleNamespace(channel=SimpleNamespace(capabilities={'card_restricted_paths':1}),upload_file=AsyncMock())
+            session=BoardSession(root/'device.json',no_token_probe=True);session.client=client
+            items=[CardFile(source=str(source),path='photos/p-0123456789abcdef.jpg'),
+                   CardFile(source=str(source),path='desk/arbitrary.bin')]
+            with self.assertRaisesRegex(ValueError,'desk_add_photo'):await session.upload_files(items)
+            client.upload_file.assert_not_awaited()
+
+    async def test_native_photo_is_not_sent_to_a_replaced_connection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);photo=root/'photo.png';Image.new('RGB',(20,20),'red').save(photo)
+            old=SimpleNamespace(channel=SimpleNamespace(capabilities={'photo_jpeg_upload':1}),upload_file=AsyncMock())
+            other=SimpleNamespace(channel=SimpleNamespace(capabilities={'photo_jpeg_upload':1}),upload_file=AsyncMock())
+            session=BoardSession(root/'device.json',no_token_probe=True);session.client=old
+            def prepare(_path):session.client=other;return b'jpeg'
+            with patch('deskpet_platform.mcp_server.prepare_jpeg_photo',side_effect=prepare):
+                result=await session.add_photo(str(photo))
+            self.assertEqual(result['status'],'connection_changed')
+            old.upload_file.assert_not_awaited();other.upload_file.assert_not_awaited()
+
     async def test_photo_upload_reconnects_and_waits_for_the_previous_writer(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
