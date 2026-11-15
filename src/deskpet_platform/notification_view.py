@@ -36,14 +36,14 @@ def _detail_pixels(item):
 
 
 def _cached_home_summary(records, *, unread_responses=False):
-    completed_count = 0
+    completed_sessions = set()
     completed_sources = {}
     responses = {}
     active = []
     for item in records:
         source = item["source"]
         if item["category"] == "completed" and not item["seen"]:
-            completed_count += 1
+            completed_sessions.add((source, item["completion_session"]))
             completed_sources[source] = None
             active.append(item["id"])
         elif item["category"] == "response" and not item["resolved"] and (not unread_responses or not item["seen"]):
@@ -51,9 +51,9 @@ def _cached_home_summary(records, *, unread_responses=False):
                                                    "id": item["id"], "title": item["title"]})
             entry["count"] += 1
             active.append(item["id"])
-    return {"completed_count": completed_count, "completed_sources": list(completed_sources),
+    return {"completed_count": len(completed_sessions), "completed_sources": list(completed_sources),
             "response_source_count": len(responses), "response_count": sum(item["count"] for item in responses.values()),
-            "response_sources": list(responses.values())[:3]}, active
+            "response_sources": list(responses.values())}, active
 
 
 class NotificationView:
@@ -161,9 +161,10 @@ class NotificationView:
         if cache_first:
             records = cached_records or ()
             inbox_read = channel.capabilities.get("agent_inbox_read") == 1
-            seen = self.store.seen_notifications(
-                [item["id"] for item in records if not item["seen"] and (inbox_read or item["category"] == "completed")])
-            summary, active = _cached_home_summary((item for item in records if item["id"] not in seen),
+            cleared = self.store.seen_notifications(
+                [item["id"] for item in records if not item["seen"] and (inbox_read or item["category"] == "completed")],
+                include_resolved=inbox_read)
+            summary, active = _cached_home_summary((item for item in records if item["id"] not in cleared),
                                                    unread_responses=inbox_read)
             receipts, attention = self.store.cached_home_receipts(active) if self.mode == "home" else ((), 0)
         elif self.mode == "home":
@@ -181,8 +182,15 @@ class NotificationView:
             if self.signature == signature and not attention and not receipts:
                 return True
             entries = home_lines(summary)
-            rows = [{"id": "home-" + str(index), "kind": 3 if entry["category"] == "completed" else 0,
-                     "title": entry["bitmap"].hex()} for index, entry in enumerate(entries)]
+            rows = []
+            for entry in entries:
+                # The suffix describes the bitmap's icon slots. Older firmware
+                # treats this ID as opaque and still draws the same bitmap.
+                identity = "home-" + entry["category"]
+                if entry["marks"]:
+                    identity += "-" + entry["marks"]
+                rows.append({"id": identity, "kind": 3 if entry["category"] == "completed" else 0,
+                             "title": entry["bitmap"].hex()})
             extra = {"agent_home": True}
             if attention:
                 extra["response_attention"] = f"{attention:016x}"

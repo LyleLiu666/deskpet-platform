@@ -61,6 +61,33 @@ class CodexFeedbackTests(unittest.TestCase):
         codex_feedback.deliver(self.store, self.event)
         self.assertEqual(self.store.home_summary()["response_sources"][0]["count"], 1)
 
+    def test_answered_retry_does_not_restore_the_earlier_call(self):
+        initial = {**self.event, "tool_use_id": "failed-call"}
+        codex_feedback.deliver(self.store, initial)
+        codex_feedback.deliver(self.store, self.event)
+        codex_feedback.deliver(self.store, self.answer([1]))
+        mirror = NotificationStore(self.store.path.with_name("mirror.sqlite3"), source=self.store)
+        mirror.sync()
+        records = self.store.cache_records(active_only=True)
+        self.assertEqual([row["id"] for row in records], [3])
+        self.assertEqual(mirror.cache_records(active_only=True), records)
+        self.assertEqual(self.store.seen_notifications([1, 2, 3, 4], include_resolved=True), {1, 2, 4})
+        self.assertEqual(self.store.home_summary()["response_count"], 1)
+        codex_feedback.deliver(self.store, self.answer([0]))
+        self.assertEqual(self.store.cache_records(active_only=True), [])
+        mirror.sync()
+        self.assertEqual(mirror.cache_records(active_only=True), [])
+        self.assertEqual(self.store.home_summary()["response_count"], 0)
+        stop = {"hook_event_name": "Stop", "session_id": "session-1", "turn_id": "turn-1"}
+        self.assertIsNotNone(self.store.add_codex_event(stop))
+
+    def test_question_batch_rolls_back_when_one_identity_conflicts(self):
+        conflicting = codex_feedback.question_id(self.event["tool_use_id"], 1)
+        self.store.add_agent_event("codex", "session-1", conflicting, "completed", "Existing")
+        with self.assertRaisesRegex(ValueError, "conflicting_agent_event"):
+            codex_feedback.deliver(self.store, self.event)
+        self.assertEqual(self.store.home_summary()["response_count"], 0)
+
     def test_cli_reply_closes_exact_questions_and_keeps_payload_private(self):
         questions = [{"id": "first", "title": "private opening"}, {"id": "second"}]
         event = {**self.event, "tool_name": codex_feedback.CLI_TOOL, "tool_input": {"questions": questions}}

@@ -28,9 +28,9 @@ class NotificationTests(unittest.TestCase):
             # A duplicate from the same source and event does not count twice.
             store.add_agent_event("codex", "session", "ask", "response", "request 0")
             summary = store.home_summary()
-            self.assertEqual(summary["completed_count"], 50)
+            self.assertEqual(summary["completed_count"], 5)
             self.assertEqual(set(summary["completed_sources"]), set(sources))
-            self.assertEqual(len(summary["response_sources"]), 3)
+            self.assertEqual(len(summary["response_sources"]), 5)
             self.assertEqual(summary["response_source_count"], 5)
             self.assertTrue(all(row["count"] == 1 for row in summary["response_sources"]))
             items = store.list()
@@ -43,6 +43,17 @@ class NotificationTests(unittest.TestCase):
             completed = next(item for item in store.list() if item["category"] == "completed")
             self.assertFalse(store.resolve_response(completed["id"]))
             self.assertTrue(store.list()[0]["seen"])
+
+    def test_active_cache_keeps_newest_completion_per_source_and_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
+            turns = [store.add_agent_event("codex", "session", str(turn), "completed", str(turn))
+                     for turn in range(5)]
+            other = store.add_agent_event("claude_code", "session", "done", "completed", "Other agent")
+            question = store.add_agent_event("codex", "session", "q", "response", "Question")
+            card = store.cache_records(active_only=True, pending_first=True)
+            self.assertEqual([item["id"] for item in card], [question, other, turns[-1]])
+            self.assertEqual(len(store.list()), 7)
 
     def test_notification_pages_are_unbounded_and_snapshot_stable(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -133,7 +133,7 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
             self.assertCountEqual([record["category"] for record in self.second.list() if not record["shown"]],
                                   ["completed", "response"])
             second.available = True
-            await self.wait_for(lambda: len(second.attention) == 2 and second.snapshots[-1]["results"] == 2)
+            await self.wait_for(lambda: len(second.attention) == 2 and second.snapshots[-1]["results"] == 1)
             await self.wait_for(lambda: all(record["shown"] for record in self.second.list()))
             async with Client(SECOND, link_factory=second.link) as manual:
                 await manual.set_brightness(80)
@@ -151,7 +151,7 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
             self.submit(answer).assert_not_called()
             await self.wait_for(lambda: all(board.snapshots[-1]["waiting"] == 1 for board in boards.values()))
             self.assertEqual([len(board.attention) for board in boards.values()], [2, 2])
-            self.assertEqual([board.snapshots[-1]["results"] for board in boards.values()], [1, 2])
+            self.assertEqual([board.snapshots[-1]["results"] for board in boards.values()], [1, 1])
 
             post_tool = {**question, "hook_event_name": "PostToolUse"}
             self.submit({**post_tool, "tool_response": '{"accepted": true}'}).assert_not_called()
@@ -163,8 +163,8 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(responses), 2)
                 self.assertTrue(all(record["shown"] and record["resolved"] for record in responses))
 
-            self.submit({**stop, "turn_id": "after-manual-control"})
-            await self.wait_for(lambda: first.snapshots[-1]["results"] == 2 and second.snapshots[-1]["results"] == 3)
+            self.submit({**stop, "session_id": "other-session", "turn_id": "after-manual-control"})
+            await self.wait_for(lambda: all(board.snapshots[-1]["results"] == 2 for board in boards.values()))
         finally:
             task.cancel()
             await asyncio.gather(task,return_exceptions=True)

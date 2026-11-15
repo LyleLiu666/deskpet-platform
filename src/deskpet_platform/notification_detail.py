@@ -105,7 +105,7 @@ def render_finished_detail(note,gray=False):
     if gray:value['gray']=True
     return value
 
-def render_cached_detail(record):
+def render_cached_detail(record, *, finished_gray=False):
     session = record["session"]
     suffix = session[-8:]
     handle = session if len(suffix) == 8 and all(c in "0123456789abcdef" for c in suffix) else (
@@ -115,4 +115,6 @@ def render_cached_detail(record):
         "title": record["title"], "summary": "", "repository": None,
         "reported_at": record["created_at"], "created": record["created_at"], "fresh": False,
     }
-    return render_finished_detail(note) if record["category"] == "completed" else render_detail(note, 0)
+    if record["category"] == "completed":
+        return render_finished_detail(note, gray=finished_gray)
+    return render_detail(note, 0)

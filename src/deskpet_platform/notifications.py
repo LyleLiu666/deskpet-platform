@@ -1,5 +1,6 @@
 """Local notification records; never update Codex's own read state."""
 from contextlib import closing
+import base64
 import hashlib
 import json
 import os
@@ -12,6 +13,15 @@ import asyncio
 
 SOURCE_NAMES = {"codex": "Codex", "claude_code": "Claude Code", "workbuddy": "WorkBuddy",
                 "antigravity": "Antigravity", "opencode": "OpenCode"}
+
+# Several questions in one Codex tool call can be answered independently. A
+# newer call in the same turn replaces its previous batch, even after answering.
+SUPERSEDED_QUESTION = """n.response_group IS NOT NULL AND EXISTS (
+    SELECT 1 FROM notifications AS replacement
+    WHERE replacement.source=n.source AND replacement.session=n.session
+      AND replacement.parent_turn=n.parent_turn AND replacement.category='response'
+      AND replacement.id>n.id AND replacement.response_group IS NOT NULL
+      AND replacement.response_group!=n.response_group)"""
 
 
 def notification_text(item, *, detail=True):
@@ -85,6 +95,12 @@ class NotificationStore:
                     db.execute("BEGIN IMMEDIATE")
                     if db.execute(turn_schema).fetchone() is None:
                         db.execute("ALTER TABLE notifications ADD COLUMN parent_turn TEXT")
+            group_schema = "SELECT 1 FROM pragma_table_info('notifications') WHERE name='response_group'"
+            if db.execute(group_schema).fetchone() is None:
+                with db:
+                    db.execute("BEGIN IMMEDIATE")
+                    if db.execute(group_schema).fetchone() is None:
+                        db.execute("ALTER TABLE notifications ADD COLUMN response_group TEXT")
             db.execute("""CREATE TABLE IF NOT EXISTS notification_resolutions (
                 source TEXT NOT NULL, session TEXT NOT NULL, event_id TEXT NOT NULL, resolved REAL NOT NULL,
                 PRIMARY KEY(source,session,event_id))""")
@@ -109,8 +125,8 @@ class NotificationStore:
             through = db.execute("SELECT COALESCE(MAX(id),0) FROM inbox.notifications").fetchone()[0]
             if through > after:
                 db.execute("""INSERT OR IGNORE INTO main.notifications
-                    (source,session,turn,title,created,category,parent_turn,resolved)
-                    SELECT source,session,turn,title,created,category,parent_turn,resolved
+                    (source,session,turn,title,created,category,parent_turn,resolved,response_group)
+                    SELECT source,session,turn,title,created,category,parent_turn,resolved,response_group
                     FROM inbox.notifications WHERE id>? ORDER BY id""", (after,))
                 db.execute("INSERT OR REPLACE INTO notification_sync VALUES (1,?)", (through,))
             # Keep old inboxes compatible with acknowledgements that arrive
@@ -131,38 +147,49 @@ class NotificationStore:
         title = session_title(session, event.get("cwd"))
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            pending = db.execute("""SELECT 1 FROM notifications WHERE source='codex' AND session=?
-                AND parent_turn=? AND category='response' AND resolved IS NULL LIMIT 1""", (session, turn)).fetchone()
+            pending = db.execute(f"""SELECT 1 FROM notifications n WHERE source='codex' AND session=?
+                AND parent_turn=? AND category='response' AND resolved IS NULL
+                AND NOT ({SUPERSEDED_QUESTION}) LIMIT 1""", (session, turn)).fetchone()
             if pending:
                 return None
             return self._insert(db, "codex", session, turn, "completed", title, None)
 
-    def add_agent_event(self, source, session, event_id, category, title, *, parent_turn=None):
+    def add_agent_event(self, source, session, event_id, category, title, *, parent_turn=None, response_group=None):
         """Record an explicit adapter event, idempotently within one agent session."""
+        return self.add_agent_events(source, session, (event_id,), category, title,
+                                     parent_turn=parent_turn, response_group=response_group)[0]
+
+    def add_agent_events(self, source, session, event_ids, category, title, *, parent_turn=None, response_group=None):
+        """Record a batch in one transaction so a failure cannot expose a partial group."""
         valid_source = (isinstance(source, str) and 0 < len(source) <= 32 and
                         all(c in "abcdefghijklmnopqrstuvwxyz0123456789_" for c in source))
         valid_id = lambda value: isinstance(value, str) and 0 < len(value) <= 128 and value.isprintable()
-        if (not valid_source or not valid_id(session) or not valid_id(event_id) or
+        event_ids = tuple(event_ids)
+        if (not valid_source or not valid_id(session) or not all(map(valid_id, event_ids)) or
                 category not in ("completed", "response") or
                 (parent_turn is not None and not valid_id(parent_turn)) or
+                (response_group is not None and (category != "response" or not parent_turn or not valid_id(response_group))) or
                 not isinstance(title, str) or not title.strip() or not title.isprintable()):
             raise ValueError("invalid_agent_event")
         title = " ".join(title.split())[:64]
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            return self._insert(db, source, session, event_id, category, title, parent_turn)
+            return [self._insert(db, source, session, event_id, category, title, parent_turn, response_group)
+                    for event_id in event_ids]
 
     @staticmethod
-    def _insert(db, source, session, event_id, category, title, parent_turn):
+    def _insert(db, source, session, event_id, category, title, parent_turn, response_group=None):
         resolution = db.execute("SELECT resolved FROM notification_resolutions WHERE source=? AND session=? AND event_id=?",
                                 (source, session, event_id)).fetchone() if category == "response" else None
         db.execute("""INSERT OR IGNORE INTO notifications
-            (source,session,turn,title,created,category,parent_turn,resolved) VALUES (?,?,?,?,?,?,?,?)""",
-                   (source, session, event_id, title, time.time(), category, parent_turn, resolution[0] if resolution else None))
-        identity, stored_category, stored_turn = db.execute(
-            "SELECT id,category,parent_turn FROM notifications WHERE source=? AND session=? AND turn=?",
+            (source,session,turn,title,created,category,parent_turn,resolved,response_group) VALUES (?,?,?,?,?,?,?,?,?)""",
+                   (source, session, event_id, title, time.time(), category, parent_turn,
+                    resolution[0] if resolution else None, response_group))
+        identity, stored_category, stored_turn, stored_group = db.execute(
+            "SELECT id,category,parent_turn,response_group FROM notifications WHERE source=? AND session=? AND turn=?",
             (source, session, event_id)).fetchone()
-        if stored_category != category or stored_turn != parent_turn:
+        if (stored_category != category or stored_turn != parent_turn or
+                (stored_group is not None and response_group is not None and stored_group != response_group)):
             raise ValueError("conflicting_agent_event")
         return identity
 
@@ -198,18 +225,32 @@ class NotificationStore:
         return {"items": self._items(rows), "page": page, "pages": pages, "total": total, "anchor": anchor}
 
     @staticmethod
-    def _cache_id(identity, source, session, turn, created):
-        event = json.dumps([source, session, turn, created], ensure_ascii=False).encode("utf-8")
-        return f"p-{identity:x}-{hashlib.blake2s(event, digest_size=8).hexdigest()}"
+    def _session_key(source, session):
+        scope = json.dumps([source, session], ensure_ascii=False).encode("utf-8")
+        return hashlib.blake2s(scope, digest_size=7).digest()
 
-    def cache_records(self, *, pending_first=False, active_only=False):
+    @staticmethod
+    def _cache_id(identity, source, session, turn, created, *, session_id=False):
+        event = json.dumps([source, session, turn, created], ensure_ascii=False).encode("utf-8")
+        digest = hashlib.blake2s(event, digest_size=8).digest()
+        if session_id:
+            # Keep the numeric prefix readable by older firmware. The tagged
+            # suffix carries the session key and an event-specific checksum.
+            parts = (NotificationStore._session_key(source, session), digest[:4])
+            suffix = "".join(base64.urlsafe_b64encode(part).decode("ascii").rstrip("=") for part in parts)
+            return f"p-{identity:x}-S{suffix}"
+        return f"p-{identity:x}-{digest.hex()}"
+
+    def cache_records(self, *, pending_first=False, active_only=False, session_ids=False):
         with closing(self._connect()) as db:
             # Within one request show its latest unanswered question. A more
             # recent request supersedes older turns, including after answer.
-            rows = db.execute("""SELECT id,title,created,shown,seen,source,category,resolved,session,turn
+            rows = db.execute(f"""SELECT id,title,created,shown,seen,source,category,resolved,session,turn
                 FROM notifications AS n
-                WHERE NOT ? OR (category='completed' AND seen IS NULL)
-                    OR (category='response' AND resolved IS NULL AND NOT EXISTS (
+                WHERE NOT ? OR (category='completed' AND id IN (
+                    SELECT MAX(id) FROM notifications WHERE category='completed' AND seen IS NULL
+                    GROUP BY source,session))
+                    OR (category='response' AND resolved IS NULL AND NOT ({SUPERSEDED_QUESTION}) AND NOT EXISTS (
                         SELECT 1 FROM notifications AS newer
                         WHERE newer.source=n.source AND newer.session=n.session
                           AND newer.category='response' AND newer.id>n.id
@@ -221,30 +262,42 @@ class NotificationStore:
         for record, row in zip(records, rows):
             # Showing a reminder on the device does not change its TF rendition.
             del record["shown"]
-            record["cache_id"] = self._cache_id(row[0], row[5], row[8], row[9], row[2])
+            completed = record["category"] == "completed"
+            record["cache_id"] = self._cache_id(row[0], row[5], row[8], row[9], row[2],
+                                                session_id=session_ids and completed)
+            if completed:
+                record["completion_session"] = row[8]
             if active_only:
                 record["session"] = row[8]
         return records
 
     def _matching_cache_record(self, db, cache_id):
-        parts = cache_id.split("-")
+        parts = cache_id.split("-", 2)
         if len(parts) != 3 or parts[0] != "p" or not 1 <= len(parts[1]) <= 16:
             return None
+        session_id = parts[2].startswith("S")
         try:
             identity = int(parts[1], 16)
         except ValueError:
             return None
         if not 0 < identity <= 0x7fff_ffff_ffff_ffff:
             return None
-        event = db.execute("SELECT source,session,turn,created FROM notifications WHERE id=?", (identity,)).fetchone()
-        if event and cache_id == self._cache_id(identity, *event):
+        event = db.execute("SELECT source,session,turn,created,category FROM notifications WHERE id=?",
+                           (identity,)).fetchone()
+        if (event and (not session_id or event[4] == "completed") and
+                cache_id == self._cache_id(identity, *event[:4], session_id=session_id)):
             return identity
         return None
 
-    def mark_cached_seen(self, cache_id):
+    def mark_cached_seen(self, cache_id, *, grouped_completions=False):
         with closing(self._connect()) as db, db:
             identity = self._matching_cache_record(db, cache_id)
             if identity is not None:
+                if grouped_completions or cache_id.split("-", 2)[2].startswith("S"):
+                    db.execute("""UPDATE notifications SET seen=COALESCE(seen,?) WHERE category='completed'
+                        AND id<=? AND (source,session)=(SELECT source,session FROM notifications
+                                                       WHERE id=? AND category='completed')""",
+                               (time.time(), identity, identity))
                 db.execute("UPDATE notifications SET seen=COALESCE(seen,?) WHERE id=?", (time.time(), identity))
 
     def mark_list_seen_through_cache_record(self, cache_id, *, include_responses=False):
@@ -261,21 +314,22 @@ class NotificationStore:
     def home_summary(self, *, include_receipts=False):
         with closing(self._connect()) as db:
             db.execute("BEGIN")
-            completed = db.execute("""SELECT source,COUNT(*),MAX(id) FROM notifications
+            completed = db.execute("""SELECT source,COUNT(DISTINCT session),MAX(id) FROM notifications
                 WHERE seen IS NULL AND category='completed' GROUP BY source ORDER BY MAX(id) DESC""").fetchall()
-            response = db.execute("""SELECT n.source,groups.amount,n.id,n.title FROM notifications n JOIN
+            response = db.execute(f"""SELECT n.source,groups.amount,n.id,n.title FROM notifications n JOIN
                 (SELECT source,COUNT(*) amount,MAX(id) latest FROM notifications
-                 WHERE resolved IS NULL AND category='response' GROUP BY source) groups
+                 AS n WHERE resolved IS NULL AND category='response' AND NOT ({SUPERSEDED_QUESTION}) GROUP BY source) groups
                 ON n.id=groups.latest ORDER BY n.id DESC""").fetchall()
             if include_receipts:
-                receipts = [row[0] for row in db.execute("""SELECT id FROM notifications WHERE shown IS NULL AND
-                    ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL))""")]
+                receipts = [row[0] for row in db.execute(f"""SELECT id FROM notifications n WHERE shown IS NULL AND
+                    ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL
+                    AND NOT ({SUPERSEDED_QUESTION})))""")]
         summary = {"completed_count": sum(row[1] for row in completed),
                 "completed_sources": [row[0] for row in completed],
                 "response_source_count": len(response),
                 "response_count": sum(row[1] for row in response),
                 "response_sources": [{"source": row[0], "count": row[1], "id": row[2], "title": row[3]}
-                                     for row in response[:3]]}
+                                     for row in response]}
         return (summary, receipts) if include_receipts else summary
 
     def mark_home_shown(self, identities):
@@ -284,14 +338,16 @@ class NotificationStore:
             db.executemany("UPDATE notifications SET shown=COALESCE(shown,?) WHERE id=?",
                            ((now, identity) for identity in identities))
 
-    def seen_notifications(self, identities):
+    def seen_notifications(self, identities, *, include_resolved=False):
         if not identities:
             return set()
         placeholders = ",".join("?" for _ in identities)
         with closing(self._connect()) as db:
             return {identity for (identity,) in db.execute(
-                f"SELECT id FROM notifications WHERE id IN ({placeholders}) AND seen IS NOT NULL",
-                identities)}
+                f"""SELECT id FROM notifications n WHERE id IN ({placeholders}) AND
+                    (seen IS NOT NULL OR (? AND category='response' AND
+                    (resolved IS NOT NULL OR ({SUPERSEDED_QUESTION}))))""",
+                (*identities, include_resolved))}
 
     def cached_home_receipts(self, identities):
         if not identities:
@@ -318,8 +374,8 @@ class NotificationStore:
 
     def pending_attention(self):
         with closing(self._connect()) as db:
-            return db.execute("""SELECT COALESCE(MAX(id),0) FROM notifications
-                WHERE category='response' AND resolved IS NULL
+            return db.execute(f"""SELECT COALESCE(MAX(id),0) FROM notifications n
+                WHERE category='response' AND resolved IS NULL AND NOT ({SUPERSEDED_QUESTION})
                 AND id>COALESCE((SELECT through_id FROM notification_attention WHERE id=1),0)""").fetchone()[0]
 
     def acknowledge_attention(self, identity):
@@ -384,8 +440,8 @@ class NotificationStore:
 
     def has_active_notifications(self):
         with closing(self._connect()) as db:
-            return db.execute("""SELECT 1 FROM notifications WHERE
-                (category='response' AND resolved IS NULL) OR
+            return db.execute(f"""SELECT 1 FROM notifications n WHERE
+                (category='response' AND resolved IS NULL AND NOT ({SUPERSEDED_QUESTION})) OR
                 (category='completed' AND seen IS NULL) LIMIT 1""").fetchone() is not None
 
 

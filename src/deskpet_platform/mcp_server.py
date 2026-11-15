@@ -321,7 +321,15 @@ class BoardSession:
                     await self.record_status_rejection(error)
                 except LINK_ERRORS as error:
                     await self.record_link_error(error)
-            await asyncio.sleep(1 if self.client is not None else 3)
+            delay = 3
+            if self.client is not None:
+                delay = 1
+                # Each batch already yields to status, touch and other commands.
+                # Keep draining an in-flight TF commit without the idle poll delay.
+                if (self.client.channel.capabilities.get("agent_cache_first") == 1
+                        and self.notification_cache.transfer is not None):
+                    delay = .1
+            await asyncio.sleep(delay)
 
     async def refresh_messages(self):
         ids = await self.client.pending_notice_reads()

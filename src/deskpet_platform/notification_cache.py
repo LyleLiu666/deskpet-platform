@@ -12,6 +12,7 @@ from .notification_view import _detail_pixels
 
 
 CACHE_RANGE = 8
+DETAIL_CHUNK_BYTES = 252
 
 
 def _fingerprint(item, bitmap):
@@ -23,9 +24,9 @@ def _fingerprint(item, bitmap):
     return f"{zlib.crc32(canonical):08x}"
 
 
-def _prepare(record):
+def _prepare(record, *, finished_gray=False):
     if "session" in record:
-        rendered = render_cached_detail(record)
+        rendered = render_cached_detail(record, finished_gray=finished_gray)
         pixels = rendered.pop("pixels")
     else:
         rendered = {}
@@ -43,7 +44,7 @@ def _prepare(record):
                        title=base64.b64encode(title.encode()).decode("ascii"), detail_crc=[crc])
     detail = dict(id=record["cache_id"], content_revision=content_revision, page=0, pages=1,
                   short_id=short_id,
-                  reported=reported, fresh=False, crc=crc, gray=False)
+                  reported=reported, fresh=False, crc=crc, gray=rendered.get("gray", False))
     return list_record, row["title"], detail, pixels
 
 
@@ -57,6 +58,7 @@ class NotificationCache:
         self.poll_at = 0
         self.retry_at = 0
         self.reuse_failed = False
+        self.session_ids = False
 
     def committed_records(self, channel):
         if self.confirmed is not None and channel.epoch == self.confirmed_epoch and channel.boot == self.confirmed[0]:
@@ -64,7 +66,8 @@ class NotificationCache:
 
     def _records(self, channel):
         return self.store.cache_records(pending_first=channel.capabilities.get("agent_inbox_read") == 1,
-                                        active_only=channel.capabilities.get("agent_local_inbox") == 1)
+                                        active_only=channel.capabilities.get("agent_local_inbox") == 1,
+                                        session_ids=self.session_ids)
 
     async def step(self, client):
         channel = client.channel
@@ -76,6 +79,7 @@ class NotificationCache:
             self.transfer = None
             self.poll_at = self.retry_at = 0
             self.reuse_failed = False
+            self.session_ids = False
         if self.transfer is None:
             now = time.monotonic()
             if now < self.retry_at:
@@ -109,6 +113,7 @@ class NotificationCache:
 
     async def _sync(self, channel):
         state = await channel.send("cache_state")
+        self.session_ids = state.get("cache_sessions") == 1
         if not state.get("cache_available"):
             self.confirmed_epoch = None
             self.confirmed = None
@@ -141,7 +146,8 @@ class NotificationCache:
             if not receipt["has_receipt"]:
                 break
             had_receipts = True
-            self.store.mark_cached_seen(receipt["id"])
+            self.store.mark_cached_seen(receipt["id"],
+                                        grouped_completions=channel.capabilities.get("agent_local_inbox") == 1)
             await channel.send("cache_receipt_ack", id=receipt["id"],
                                content_revision=receipt["content_revision"])
             yield
@@ -175,8 +181,9 @@ class NotificationCache:
                         raise RuntimeError("invalid_cache_manifest")
                     active[fingerprint] = index if fingerprint not in active else None
         prepared = []
+        finished_gray = channel.capabilities.get("agent_local_inbox") == 1
         for record in records:
-            item, bitmap, detail, pixels = _prepare(record)
+            item, bitmap, detail, pixels = _prepare(record, finished_gray=finished_gray)
             reusable = active.get(_fingerprint(item, bitmap)) if reuse else None
             prepared.append((item, bitmap, reusable))
             if reusable is not None:
@@ -185,12 +192,13 @@ class NotificationCache:
             yield
             if not reply.get("cached"):
                 start = reply.get("next_chunk", 0)
-                if type(start) is not int or not 0 <= start <= 16:
+                chunks = len(pixels) // DETAIL_CHUNK_BYTES
+                if type(start) is not int or not 0 <= start <= chunks:
                     raise RuntimeError("invalid_cache_resume")
                 # A resume may start on an odd chunk, so its final chunk may be unpaired.
-                for chunk in range(start, 16, 2):
-                    block = pixels[chunk * 252:(chunk + 2) * 252]
-                    data = "~" + base64.b64encode(block).decode("ascii") if len(block) == 504 else block.hex()
+                for chunk in range(start, chunks, 2):
+                    block = pixels[chunk * DETAIL_CHUNK_BYTES:(chunk + 2) * DETAIL_CHUNK_BYTES]
+                    data = "~" + base64.b64encode(block).decode("ascii") if len(block) == 2 * DETAIL_CHUNK_BYTES else block.hex()
                     await channel.send("cache_detail_chunk", index=chunk, data=data)
                     yield
                 await channel.send("cache_detail_commit")
