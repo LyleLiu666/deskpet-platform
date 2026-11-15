@@ -40,7 +40,7 @@ jobs:
         run: |
           Set-Location (Join-Path $env:RUNNER_TEMP 'DeskPet fresh install')
           $env:PYTHONPATH = "$pwd/src;$pwd/tests"
-          foreach ($test in @('test_file_lock.py', 'test_windows_pairing.py', 'test_windows_private.py', 'test_windows_scenario.py', 'test_pair_portal.py', 'test_multi_device_flow.py', 'test_pairing_rehearsal.py', 'test_claude_quota.py', 'test_antigravity_quota.py', 'test_quota_capture.py', 'test_quota_projection.py', 'test_quota_display.py', 'test_notification_cache.py', 'test_windows_statusline.py', 'test_quota_windows_statusline.py', 'test_windows_hook_command.py')) {
+          foreach ($test in @('test_file_lock.py', 'test_windows_pairing.py', 'test_windows_private.py', 'test_windows_scenario.py', 'test_pair_portal.py', 'test_multi_device_flow.py', 'test_pairing_rehearsal.py', 'test_claude_quota.py', 'test_antigravity_quota.py', 'test_antigravity_feedback.py', 'test_quota_capture.py', 'test_quota_projection.py', 'test_quota_display.py', 'test_notification_cache.py', 'test_windows_statusline.py', 'test_quota_windows_statusline.py', 'test_windows_hook_command.py')) {
             & ./.venv/Scripts/python.exe -m unittest discover -s tests -p $test -v
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
