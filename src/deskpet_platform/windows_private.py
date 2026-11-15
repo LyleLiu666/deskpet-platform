@@ -61,10 +61,16 @@ def ensure_private_directory(path):
     if os.name != "nt":
         raise OSError("Windows private directory is unavailable")
     path = Path(path)
-    if path.is_symlink():
+    def redirected():
+        try:
+            return bool(path.lstat().st_file_attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+        except FileNotFoundError:
+            return False
+
+    if redirected():
         raise ValueError("private_directory_is_symlink")
     path.mkdir(mode=0o700, exist_ok=True)
-    if path.is_symlink() or not path.is_dir():
+    if redirected() or not path.is_dir():
         raise ValueError("invalid_private_directory")
     advapi, kernel = _libraries()
     descriptor = ctypes.c_void_p()

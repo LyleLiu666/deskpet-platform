@@ -49,8 +49,11 @@ class WindowsPrivateStorageTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), "synthetic content")
             for item in (root, path):
                 sids = dacl_trustees(item)
-                self.assertIn(current_user_sid(), sids)
-                self.assertTrue(set(sids) <= {current_user_sid(), "SY", "S-1-5-18"}, sids)
+                user_sid = current_user_sid()
+                # SDDL abbreviates a built-in administrator's RID 500 as LA.
+                expected_user = "LA" if user_sid.endswith("-500") and "LA" in sids else user_sid
+                self.assertIn(expected_user, sids)
+                self.assertTrue(set(sids) <= {expected_user, "SY", "S-1-5-18"}, sids)
 
     def test_dedicated_directory_must_not_be_a_junction(self):
         from deskpet_platform.windows_private import ensure_private_directory
