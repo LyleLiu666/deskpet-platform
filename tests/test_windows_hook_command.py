@@ -48,3 +48,23 @@ class WindowsHookCommandTests(unittest.TestCase):
         _, result = self.run_hook(sys.executable, str(self.script))
         self.assertEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout), {})
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL rehearsal")
+    def test_hook_install_and_removal_preserve_existing_settings_acl(self):
+        from deskpet_platform.claude_feedback import MATCHERS
+        from deskpet_platform.codex_hook import install_hook, remove_hook
+        from deskpet_platform.windows_private import current_user_sid
+        from test_windows_private import dacl_trustees
+        settings = self.root / "settings.json"
+        original = {"other": {"keep": True}}
+        settings.write_text(json.dumps(original), encoding="utf-8")
+        subprocess.run(["icacls", str(settings), "/inheritance:r", "/grant:r",
+                        "*" + current_user_sid() + ":F", "*S-1-5-18:F"], check=True, capture_output=True)
+        before = sorted(dacl_trustees(settings))
+        self.assertTrue(install_hook(settings, "synthetic-hook", matchers=MATCHERS, private=False))
+        self.assertEqual(sorted(dacl_trustees(settings)), before)
+        self.assertTrue(remove_hook(settings, "synthetic-hook", matchers=MATCHERS, private=False))
+        self.assertEqual(sorted(dacl_trustees(settings)), before)
+        restored = json.loads(settings.read_text(encoding="utf-8"))
+        self.assertEqual(restored["other"], original["other"])
+        self.assertEqual(restored.get("hooks", {}), {})
