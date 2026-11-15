@@ -12,6 +12,28 @@ CONFIG = DeviceConfig('02:00:00:00:00:01', bytes(range(32)))
 
 
 class CompactPollTests(unittest.IsolatedAsyncioTestCase):
+    async def test_notification_delivery_waits_for_visible_text_page(self):
+        for capabilities, page, expected in (({'text_present': 1}, 255, False),
+                                              ({}, 0, False),
+                                              ({'text_present': 1}, 0, True)):
+            with self.subTest(capabilities=capabilities, page=page), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'device.json'
+                CONFIG.save(path)
+                session = BoardSession(path)
+                board = AsyncMock()
+                board.device_id = None
+                board.link.wireless = True
+                board.channel.capabilities = capabilities
+                board.status.return_value = {'boot': 1, 'pet_page': page}
+                session.connect = AsyncMock(return_value=board)
+                session.recover_wifi = AsyncMock()
+                deliver = AsyncMock()
+                with patch('deskpet_platform.mcp_server.deliver_next', deliver), \
+                     patch('deskpet_platform.mcp_server.asyncio.sleep', AsyncMock(side_effect=asyncio.CancelledError)):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await session.poll()
+                self.assertEqual(deliver.await_count, int(expected))
+
     async def test_client_requests_compact_only_when_advertised(self):
         client = Client(CONFIG)
         client.channel = AsyncMock()

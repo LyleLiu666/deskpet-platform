@@ -228,6 +228,21 @@ class NotificationTests(unittest.TestCase):
 
 
 class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hidden_screen_defers_delivery_without_marking_shown(self):
+        from deskpet_platform.channel import TextNotVisible
+        class Board:
+            class Channel:
+                capabilities = {}
+            channel = Channel()
+            async def show_text(self, _text):
+                raise TextNotVisible('hidden')
+        with tempfile.TemporaryDirectory() as directory:
+            store = notifications.NotificationStore(Path(directory) / 'notifications.sqlite3')
+            store.add_agent_event('claude_code', 's', 'ask', 'response', 'Review')
+            self.assertFalse(await notifications.deliver_next(Board(), store))
+            self.assertFalse(store.list()[0]['shown'])
+            self.assertIsNotNone(store.next_pending())
+
     async def test_response_names_its_source_and_does_not_play_finished_action(self):
         class Board:
             class Channel:
@@ -498,7 +513,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_worker_delivers_with_a_synthetic_paired_board(self):
         class Channel:
-            capabilities = {}
+            capabilities = {"text_present": 1}
         class Board:
             channel = Channel()
             def __init__(self, _config):
@@ -510,7 +525,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             async def set_notice_count(self, count):
                 self.count = count
             async def status(self):
-                return {}
+                return {"pet_page": 0}
             async def show_text(self, _text):
                 return {"status": "shown"}
             async def close(self):
