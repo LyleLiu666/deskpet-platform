@@ -1,9 +1,20 @@
-"""Create a Windows-only private directory for local SQLite files."""
+"""Protect Windows state directories and retain file access controls."""
 
 import ctypes
 from ctypes import wintypes
 import os
 from pathlib import Path
+
+
+def replace_file(path, replacement):
+    """Replace an existing file while preserving its Windows access controls."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    function = kernel.ReplaceFileW
+    function.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                         wintypes.DWORD, wintypes.LPVOID, wintypes.LPVOID]
+    function.restype = wintypes.BOOL
+    if not function(str(path), str(replacement), None, 0, None, None):
+        raise ctypes.WinError(ctypes.get_last_error())
 
 
 def state_path(path):

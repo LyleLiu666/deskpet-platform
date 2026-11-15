@@ -123,7 +123,7 @@ def _write(path, settings, original):
         if current != original:
             raise ValueError("Agent 设置文件刚被其他程序修改，请重试。")
         if os.name == "nt" and original is not None:
-            from .quota_windows_statusline import replace_file
+            from .windows_private import replace_file
             replace_file(path, temporary)
         elif os.name == "nt":
             # On Windows rename fails rather than replacing a newly created file.

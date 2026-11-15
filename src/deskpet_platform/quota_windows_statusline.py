@@ -139,17 +139,3 @@ def metadata(command_text):
         return data
     except (ValueError, TypeError, KeyError, UnicodeError, IndexError, OSError, EOFError):
         raise ValueError("DeskPet 额度状态栏配置已被修改，请先检查原有设置。") from None
-
-
-def replace_file(path, replacement):
-    """Replace an existing settings file while preserving its Windows ACL."""
-    import ctypes
-    from ctypes import wintypes
-
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    function = kernel.ReplaceFileW
-    function.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
-                         wintypes.DWORD, wintypes.LPVOID, wintypes.LPVOID]
-    function.restype = wintypes.BOOL
-    if not function(str(path), str(replacement), None, 0, None, None):
-        raise ctypes.WinError(ctypes.get_last_error())
