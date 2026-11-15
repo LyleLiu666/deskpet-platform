@@ -1,0 +1,115 @@
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+SHELL = shutil.which("powershell.exe" if os.name == "nt" else "pwsh")
+
+
+@unittest.skipUnless(SHELL, "PowerShell is required for hook proxy rehearsal")
+class WindowsHookCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="DeskPet hook & spaces ")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.script = self.root / "fake hook.py"
+        self.record = self.root / "input.json"
+        self.script.write_text("import pathlib,sys\n"
+                               "pathlib.Path(sys.argv[1]).write_bytes(sys.stdin.buffer.read())\n"
+                               "sys.stdout.write('{\\\"decision\\\":\\\"allow\\\"}\\n')\n", encoding="utf-8")
+
+    def run_hook(self, executable, *args, data=None):
+        from deskpet_platform.windows_hook_command import build
+        command = build(executable, list(args))
+        encoded = command.rsplit(" ", 1)[1]
+        payload = data if data is not None else json.dumps(
+            {"session_id": "fixture", "title": "中文 & spaces"}, ensure_ascii=False).encode()
+        result = subprocess.run([SHELL, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                                input=payload, capture_output=True, timeout=4)
+        return payload, result
+
+    def test_forwards_raw_input_and_response_without_shell_interpretation(self):
+        payload, result = self.run_hook(sys.executable, str(self.script), str(self.record))
+        self.assertEqual(self.record.read_bytes(), payload)
+        self.assertEqual(json.loads(result.stdout), {"decision": "allow"})
+        self.assertEqual(result.returncode, 0)
+
+    def test_missing_executable_returns_a_nonblocking_response(self):
+        _, result = self.run_hook(str(self.root / "missing executable"))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout), {})
+
+    def test_large_event_is_forwarded_without_pipe_deadlock(self):
+        payload = b"x" * (1024 * 1024)
+        _, result = self.run_hook(sys.executable, str(self.script), str(self.record), data=payload)
+        self.assertEqual(self.record.read_bytes(), payload)
+        self.assertEqual(result.returncode, 0)
+
+    @unittest.skipUnless(os.name == "nt", "Windows isolated notification rehearsal")
+    def test_synthetic_claude_question_and_answer_reach_the_real_hook(self):
+        from deskpet_platform.notifications import NotificationStore
+        config = self.root / "isolated state" / "device.json"
+        store = NotificationStore(config.parent / "notifications.sqlite3")
+        event = {"session_id": "fixture-session", "cwd": str(self.root),
+                 "tool_name": "AskUserQuestion", "tool_use_id": "fixture-question",
+                 "tool_input": {"questions": [{"question": "private fixture"}]}}
+        args = ("-m", "deskpet_platform", "--config", str(config), "claude-hook")
+        for phase in ("PreToolUse", "PostToolUse"):
+            payload = json.dumps({**event, "hook_event_name": phase}).encode()
+            _, result = self.run_hook(sys.executable, *args, data=payload)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(json.loads(result.stdout), {})
+            self.assertEqual(store.home_summary()["response_count"], 1 if phase == "PreToolUse" else 0)
+        self.assertTrue(store.list()[0]["resolved"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows isolated notification rehearsal")
+    def test_synthetic_codex_question_and_answer_reach_the_real_hook(self):
+        from deskpet_platform.notifications import NotificationStore
+        config = self.root / "isolated codex state" / "device.json"
+        store = NotificationStore(config.parent / "notifications.sqlite3")
+        question = {"session_id": "fixture-session", "turn_id": "fixture-turn", "cwd": str(self.root),
+                    "hook_event_name": "PreToolUse", "tool_name": "request_user_input_async",
+                    "tool_use_id": "fixture-call", "tool_input": {"questions": [{"title": "private question"}]}}
+        replies = [{"questionItemId": json.dumps(["request_user_input_async", "fixture-call", 0]),
+                    "answer": "private answer"}]
+        answer = {"session_id": "fixture-session", "hook_event_name": "UserPromptSubmit",
+                  "prompt": "<send_user_message_question_reply>\n" + json.dumps(replies) + "\n</send_user_message_question_reply>"}
+        args = ("-m", "deskpet_platform", "--config", str(config), "codex-hook")
+        for event, expected in ((question, 1), (answer, 0)):
+            _, result = self.run_hook(sys.executable, *args, data=json.dumps(event).encode())
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(json.loads(result.stdout), {})
+            self.assertEqual(store.home_summary()["response_count"], expected)
+        self.assertTrue(store.list()[0]["resolved"])
+        self.assertNotIn("private", store.list()[0]["title"])
+
+    def test_stalled_hook_does_not_block_agent(self):
+        self.script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+        _, result = self.run_hook(sys.executable, str(self.script))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout), {})
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL rehearsal")
+    def test_hook_install_and_removal_preserve_existing_settings_acl(self):
+        from deskpet_platform.claude_feedback import MATCHERS
+        from deskpet_platform.codex_hook import install_hook, remove_hook
+        from deskpet_platform.windows_private import current_user_sid
+        from test_windows_private import dacl_trustees
+        settings = self.root / "settings.json"
+        original = {"other": {"keep": True}}
+        settings.write_text(json.dumps(original), encoding="utf-8")
+        subprocess.run(["icacls", str(settings), "/inheritance:r", "/grant:r",
+                        "*" + current_user_sid() + ":F", "*S-1-5-18:F"], check=True, capture_output=True)
+        before = sorted(dacl_trustees(settings))
+        self.assertTrue(install_hook(settings, "synthetic-hook", matchers=MATCHERS, private=False))
+        self.assertEqual(sorted(dacl_trustees(settings)), before)
+        self.assertTrue(remove_hook(settings, "synthetic-hook", matchers=MATCHERS, private=False))
+        self.assertEqual(sorted(dacl_trustees(settings)), before)
+        restored = json.loads(settings.read_text(encoding="utf-8"))
+        self.assertEqual(restored["other"], original["other"])
+        self.assertEqual(restored.get("hooks", {}), {})

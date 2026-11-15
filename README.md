@@ -14,13 +14,17 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 
 ## 交给你的 Agent 安装
 
-把下面这段复制给你平时使用的 Agent，在本仓库目录里开始。
+打开 [DeskPet Platform 的 GitHub 页面](https://github.com/LyleLiu666/deskpet-platform)，把下面这段复制给你平时使用的 Agent。首次使用不需要预先下载仓库。
 
 ```text
 请帮我在这台电脑上安装和配置 DeskPet，并只操作我选中的小板。
 
-1. 按本仓库 README 和操作手册安装 DeskPet Platform。macOS 优先用
-   install-macos.command。把安装后的 deskpet-platform 绝对路径注册为
+先阅读 https://github.com/LyleLiu666/deskpet-platform 的 README 和操作手册，
+优先使用已发布的稳定 Release 源码包。若没有稳定 Release，请告诉我并使用
+公开仓库源码；不要覆盖我的现有项目、Agent 配置或其他设备的配对。
+
+1. 在独立目录按 README 安装。macOS 使用 install-macos.command；
+   Windows 使用 install-windows.ps1。把安装后的 deskpet-platform 绝对路径注册为
    本机 stdio MCP，参数为 mcp，保留我已有的 MCP 配置。使用 Codex 时，
    按操作手册设置 DeskPet 的写卡等待时间。
 2. 先用 desk_list_devices 查看已配对设备。已有这台小板时复用配对；
@@ -35,12 +39,15 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
    用 --token-probe 指定其绝对路径。如果我希望跳过测速，给 MCP 加
    --no-token-probe，继续完成 DeskPet 安装和配对。找不到采集程序时先告诉我，
    由我决定是否安装。请勿在聊天中显示 Wi-Fi 密码、配对码或密钥。
+   需要重开 Agent 会话时明确告诉我，并在新会话继续验证。
 4. 用 desk_list_devices 确认目标设备 ID，再用 desk_status 验证连接。
    配置了 Agent Speed 时，用 desk_token_status 检查是否收到有效读数。
    告诉我已验证的结果，以及还需要我在小板或手机上完成的步骤。
 5. 如果我希望接收提醒，按操作手册为这台小板启用我指定的 Agent。
    需要在 Agent 界面里审核钩子时，请告诉我到哪里操作。用一个新会话
    验证小板收到提醒。
+6. 如果我想在小屏看额度，请按操作手册配置对应的 Agent，并告诉我在
+   小屏「监控设置」中切换来源。没有可靠读数时显示未知，不要猜测额度。
 ```
 
 ## 给小板加一个角色
@@ -51,7 +58,9 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 
 ## 手动安装
 
-在仓库目录或解压后的 Python 源码包目录中，macOS 可运行 `./install-macos.command`。安装使用已有的 uv 或 Python 3.11 以上版本。需要时可从官网下载。[macOS 下载](https://www.python.org/downloads/macos/)
+在仓库目录或解压后的源码包目录中，macOS 可运行 `./install-macos.command`，Windows 可在 PowerShell 中运行 `powershell -ExecutionPolicy Bypass -File .\install-windows.ps1`。安装使用已有的 uv 或 Python 3.11 至 3.14。[macOS 下载](https://www.python.org/downloads/macos/) · [Windows 下载](https://www.python.org/downloads/windows/)
+
+Windows 安装完成后，程序位于 `.venv\Scripts\deskpet-platform.exe`；MCP 使用该程序的绝对路径和 `mcp` 参数。下列命令展示 macOS 路径。
 
 ```sh
 python3 -m venv .venv
@@ -60,7 +69,7 @@ python3 -m venv .venv
 .venv/bin/deskpet-platform status
 ```
 
-已有本地 wheel 文件时，可将上面的 `pip install .` 改为 `pip install /绝对路径/deskpet_platform-0.1.0-py3-none-any.whl`。
+已有本地 wheel 文件时，可将上面的 `pip install .` 改为 `pip install /绝对路径/deskpet_platform-0.1.0rc1-py3-none-any.whl`。
 
 用 MCP 的 `desk_pair_usb` 配对已登记的小板。提供本机私有 Wi-Fi 凭据文件时，同一步也可完成配网。需要手动设置时，可扫描小板上的配网二维码，再用 `desk_pair_begin` 打开本机配对页。一块小板同一时间由一套服务连接。
 

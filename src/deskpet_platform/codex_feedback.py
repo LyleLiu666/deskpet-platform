@@ -1,6 +1,7 @@
 """Record explicit Codex question-tool events without storing conversation text."""
 import hashlib
 import json
+from pathlib import Path
 
 from .notifications import session_title
 
@@ -118,6 +119,10 @@ def deliver(store, event):
     if not isinstance(turn, str) or not 0 < len(turn) <= 128 or not turn.isprintable():
         raise ValueError("invalid_feedback_turn")
     title = session_title(session, event.get("cwd"))
-    for identity in identities:
-        store.add_agent_event("codex", session, identity, "response", title, parent_turn=turn)
+    cwd = event.get("cwd")
+    project = Path(cwd).name if isinstance(cwd, str) else ""
+    if project.strip() and project.isprintable() and project != title:
+        title = f"{project} · {title}"
+    store.add_agent_events("codex", session, identities, "response", title,
+                           parent_turn=turn, response_group=identities[0])
     return len(identities)

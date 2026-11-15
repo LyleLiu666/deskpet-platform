@@ -35,25 +35,25 @@ def _detail_pixels(item):
     return image.tobytes()
 
 
-def _cached_home_summary(records):
-    completed_count = 0
+def _cached_home_summary(records, *, unread_responses=False):
+    completed_sessions = set()
     completed_sources = {}
     responses = {}
     active = []
     for item in records:
         source = item["source"]
         if item["category"] == "completed" and not item["seen"]:
-            completed_count += 1
+            completed_sessions.add((source, item["completion_session"]))
             completed_sources[source] = None
             active.append(item["id"])
-        elif item["category"] == "response" and not item["resolved"]:
+        elif item["category"] == "response" and not item["resolved"] and (not unread_responses or not item["seen"]):
             entry = responses.setdefault(source, {"source": source, "count": 0,
                                                    "id": item["id"], "title": item["title"]})
             entry["count"] += 1
             active.append(item["id"])
-    return {"completed_count": completed_count, "completed_sources": list(completed_sources),
+    return {"completed_count": len(completed_sessions), "completed_sources": list(completed_sources),
             "response_source_count": len(responses), "response_count": sum(item["count"] for item in responses.values()),
-            "response_sources": list(responses.values())[:3]}, active
+            "response_sources": list(responses.values())}, active
 
 
 class NotificationView:
@@ -89,22 +89,38 @@ class NotificationView:
         self.detail_sent = self.detail_seen = False
         self.detail_crc = None
 
-    def touch(self, event):
+    def touch(self, event, *, channel=None):
         action = event.get("action")
         version = event.get("version")
-        if (type(version) is not int or not 0 < version <= self.version or
-                event.get("epoch", self.epoch) != self.epoch):
+        cache_id = event.get("id")
+        local_list = action == "list" and isinstance(cache_id, str) and bool(cache_id)
+        epoch, active_version = self.epoch, self.version
+        if local_list and channel is not None and channel.epoch != epoch:
+            epoch, active_version = channel.epoch, 0
+        minimum_version = 0 if local_list else 1
+        if (type(version) is not int or not minimum_version <= version <= active_version or
+                event.get("epoch", epoch) != epoch):
             return False
+        if local_list and epoch != self.epoch:
+            self._reset(epoch, channel.boot, 1)
         if action in ("home", "list"):
             # These destinations are independent of the rows on the screen.
-            if event.get("id") != "":
+            if event.get("id") != "" and action != "list":
                 return False
         elif version != self.version:
             return False
         if action == "home":
             self.mode, self.anchor, self.page, self.selected = "home", None, 1, None
         elif action == "list":
-            if self.mode == "home":
+            if not isinstance(cache_id, str):
+                return False
+            if cache_id:
+                include_responses = channel is not None and channel.capabilities.get("agent_inbox_read") == 1
+                anchor = self.store.mark_list_seen_through_cache_record(cache_id, include_responses=include_responses)
+                if anchor is None:
+                    return False
+                self.page, self.anchor = 1, anchor
+            elif self.mode == "home":
                 self.page, self.anchor = 1, None
             self.mode, self.selected = "list", None
         elif action in ("previous", "next") and self.mode == "list":
@@ -129,13 +145,27 @@ class NotificationView:
         if self.epoch != channel.epoch:
             self._reset(channel.epoch, channel.boot, device_page)
         cache_first = channel.capabilities.get("agent_cache_first") == 1
+        if channel.capabilities.get("agent_local_inbox") == 1:
+            if device_page in (1, 2, 3):
+                return False
+            if self.mode != "home":
+                if device_page != 0:
+                    return False
+                # Menu navigation and lost touch receipts can skip the home event.
+                self.mode, self.anchor, self.page, self.selected = "home", None, 1, None
         if cache_first and cached_records is None and (self.mode == "home" or self.anchor is None):
             return False
         if self.mode == "detail" and self.version:
             return await self._detail(client)
         attention = 0
         if cache_first:
-            summary, active = _cached_home_summary(cached_records or ())
+            records = cached_records or ()
+            inbox_read = channel.capabilities.get("agent_inbox_read") == 1
+            cleared = self.store.seen_notifications(
+                [item["id"] for item in records if not item["seen"] and (inbox_read or item["category"] == "completed")],
+                include_resolved=inbox_read)
+            summary, active = _cached_home_summary((item for item in records if item["id"] not in cleared),
+                                                   unread_responses=inbox_read)
             receipts, attention = self.store.cached_home_receipts(active) if self.mode == "home" else ((), 0)
         elif self.mode == "home":
             summary, receipts = self.store.home_summary(include_receipts=True)
@@ -152,8 +182,15 @@ class NotificationView:
             if self.signature == signature and not attention and not receipts:
                 return True
             entries = home_lines(summary)
-            rows = [{"id": "home-" + str(index), "kind": 3 if entry["category"] == "completed" else 0,
-                     "title": entry["bitmap"].hex()} for index, entry in enumerate(entries)]
+            rows = []
+            for entry in entries:
+                # The suffix describes the bitmap's icon slots. Older firmware
+                # treats this ID as opaque and still draws the same bitmap.
+                identity = "home-" + entry["category"]
+                if entry["marks"]:
+                    identity += "-" + entry["marks"]
+                rows.append({"id": identity, "kind": 3 if entry["category"] == "completed" else 0,
+                             "title": entry["bitmap"].hex()})
             extra = {"agent_home": True}
             if attention:
                 extra["response_attention"] = f"{attention:016x}"
@@ -161,8 +198,9 @@ class NotificationView:
         else:
             anchor = self.anchor
             if cache_first and anchor is None:
-                anchor = cached_records[0]["id"] if cached_records else 0
-            page = self.store.list_page(self.page, page_size=4, anchor=anchor)
+                anchor = max((item["id"] for item in cached_records), default=0)
+            page = self.store.list_page(self.page, page_size=4, anchor=anchor,
+                                        pending_first=channel.capabilities.get("agent_inbox_read") == 1)
             if cache_first and self.anchor is None:
                 # The first live page can replace the TF page only if they
                 # have the same identities and layout. Later live pages can

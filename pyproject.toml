@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deskpet-platform"
-version = "0.1.0"
+version = "0.1.0rc1"
 description = "Local Wi-Fi SDK and MCP for DeskPet-compatible displays"
 readme = "README.md"
 requires-python = ">=3.11"

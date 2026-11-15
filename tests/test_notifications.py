@@ -17,6 +17,26 @@ from deskpet_platform.pairing import DeviceConfig
 
 
 class NotificationTests(unittest.TestCase):
+    def test_explicit_dismissal_is_per_board_and_does_not_claim_answered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = notifications.NotificationStore(root / "source.sqlite3")
+            first = notifications.NotificationStore(root / "first.sqlite3", source=source)
+            second = notifications.NotificationStore(root / "second.sqlite3", source=source)
+            source.add_agent_event("codex", "session", "question", "response", "Project")
+            first.sync(); second.sync()
+            record = first.cache_records(active_only=True)[0]
+            self.assertFalse(first.dismiss_cached_response(record["cache_id"] + "bad"))
+            self.assertTrue(first.dismiss_cached_response(record["cache_id"]))
+            first.sync(); second.sync()
+            self.assertEqual(first.cache_records(active_only=True), [])
+            self.assertFalse(first.has_active_notifications())
+            self.assertEqual(first.home_summary()["response_count"], 0)
+            self.assertEqual(first.pending_attention(), 0)
+            self.assertFalse(first.list()[0]["resolved"])
+            self.assertEqual(len(second.cache_records(active_only=True)), 1)
+            self.assertFalse(source.list()[0]["resolved"])
+
     def test_multiple_sources_have_explicit_categories_and_bounded_home_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
@@ -28,9 +48,9 @@ class NotificationTests(unittest.TestCase):
             # A duplicate from the same source and event does not count twice.
             store.add_agent_event("codex", "session", "ask", "response", "request 0")
             summary = store.home_summary()
-            self.assertEqual(summary["completed_count"], 50)
+            self.assertEqual(summary["completed_count"], 5)
             self.assertEqual(set(summary["completed_sources"]), set(sources))
-            self.assertEqual(len(summary["response_sources"]), 3)
+            self.assertEqual(len(summary["response_sources"]), 5)
             self.assertEqual(summary["response_source_count"], 5)
             self.assertTrue(all(row["count"] == 1 for row in summary["response_sources"]))
             items = store.list()
@@ -43,6 +63,17 @@ class NotificationTests(unittest.TestCase):
             completed = next(item for item in store.list() if item["category"] == "completed")
             self.assertFalse(store.resolve_response(completed["id"]))
             self.assertTrue(store.list()[0]["seen"])
+
+    def test_active_cache_keeps_newest_completion_per_source_and_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
+            turns = [store.add_agent_event("codex", "session", str(turn), "completed", str(turn))
+                     for turn in range(5)]
+            other = store.add_agent_event("claude_code", "session", "done", "completed", "Other agent")
+            question = store.add_agent_event("codex", "session", "q", "response", "Question")
+            card = store.cache_records(active_only=True, pending_first=True)
+            self.assertEqual([item["id"] for item in card], [question, other, turns[-1]])
+            self.assertEqual(len(store.list()), 7)
 
     def test_notification_pages_are_unbounded_and_snapshot_stable(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -197,6 +228,21 @@ class NotificationTests(unittest.TestCase):
 
 
 class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hidden_screen_defers_delivery_without_marking_shown(self):
+        from deskpet_platform.channel import TextNotVisible
+        class Board:
+            class Channel:
+                capabilities = {}
+            channel = Channel()
+            async def show_text(self, _text):
+                raise TextNotVisible('hidden')
+        with tempfile.TemporaryDirectory() as directory:
+            store = notifications.NotificationStore(Path(directory) / 'notifications.sqlite3')
+            store.add_agent_event('claude_code', 's', 'ask', 'response', 'Review')
+            self.assertFalse(await notifications.deliver_next(Board(), store))
+            self.assertFalse(store.list()[0]['shown'])
+            self.assertIsNotNone(store.next_pending())
+
     async def test_response_names_its_source_and_does_not_play_finished_action(self):
         class Board:
             class Channel:
@@ -467,7 +513,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_worker_delivers_with_a_synthetic_paired_board(self):
         class Channel:
-            capabilities = {}
+            capabilities = {"text_present": 1}
         class Board:
             channel = Channel()
             def __init__(self, _config):
@@ -479,7 +525,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             async def set_notice_count(self, count):
                 self.count = count
             async def status(self):
-                return {}
+                return {"pet_page": 0}
             async def show_text(self, _text):
                 return {"status": "shown"}
             async def close(self):

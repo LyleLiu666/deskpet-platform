@@ -9,7 +9,10 @@ import re
 import uuid
 from tempfile import NamedTemporaryFile
 
-DEFAULT_CONFIG = Path.home() / "Library/Application Support/DeskPetPlatform/device.json"
+if os.name == "nt":
+    DEFAULT_CONFIG = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local") / "DeskPetPlatform/device.json"
+else:
+    DEFAULT_CONFIG = Path.home() / "Library/Application Support/DeskPetPlatform/device.json"
 DEVICE_ID = re.compile(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}")
 
 
@@ -56,23 +59,40 @@ class DeviceConfig:
     def load(cls, path: Path):
         try:
             with path.open(encoding="utf-8") as stream:
-                if os.fstat(stream.fileno()).st_mode & 0o077:
+                if os.name != "nt" and os.fstat(stream.fileno()).st_mode & 0o077:
                     raise ValueError("configuration_requires_mode_0600")
                 value = json.load(stream)
+            if os.name == "nt":
+                from .windows_secrets import unprotect
+                if not isinstance(value, dict) or set(value) != {"protected"}:
+                    raise ValueError("configuration_requires_windows_protection")
+                protected = base64.b64decode(value["protected"], validate=True)
+                try:
+                    value = json.loads(unprotect(protected))
+                except OSError as error:
+                    raise ValueError("configuration_cannot_be_unprotected") from error
             return cls(value["identity"], bytes.fromhex(value["key"]), value.get("address"), value.get("device_id"))
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("设备配置无效，请检查权限或在本机重新配对。") from error
 
     def save(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
-            temporary = Path(stream.name)
-            try:
-                value = {"identity": self.identity, "key": self.key.hex(), "address": self.address}
-                if self.device_id is not None:
-                    value["device_id"] = self.device_id
+        value = {"identity": self.identity, "key": self.key.hex(), "address": self.address}
+        if self.device_id is not None:
+            value["device_id"] = self.device_id
+        if os.name == "nt":
+            from .windows_secrets import protect
+            data = json.dumps(value, separators=(",", ":")).encode("utf-8")
+            value = {"protected": base64.b64encode(protect(data)).decode("ascii")}
+        temporary = None
+        try:
+            with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+                temporary = Path(stream.name)
                 json.dump(value, stream)
                 stream.flush()
-                os.replace(temporary, path)
-            finally:
+                os.fsync(stream.fileno())
+            # Windows cannot replace a still-open temporary file.
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
                 temporary.unlink(missing_ok=True)

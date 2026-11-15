@@ -2,16 +2,21 @@
 import asyncio
 from contextlib import suppress
 from dataclasses import asdict, dataclass
-import fcntl
 import os
 from pathlib import Path
+import re
 import stat
 import struct
 import sys
-import termios
 import time
 
 import serial
+
+try:
+    import fcntl
+    import termios
+except ImportError:  # Windows uses pyserial without POSIX ioctl.
+    fcntl = termios = None
 
 from .device_lock import DeviceLock
 from .pairing import DEVICE_ID, valid_device_uuid
@@ -35,6 +40,27 @@ class MacSerial(serial.Serial):
 default_serial_factory = MacSerial if sys.platform == "darwin" else serial.Serial
 
 
+def valid_usb_port(path, *, windows=None):
+    if not isinstance(path, str):
+        return False
+    if windows is None:
+        windows = sys.platform == "win32"
+    if windows:
+        match = re.fullmatch(r"COM([1-9][0-9]{0,3})", path, flags=re.IGNORECASE)
+        return bool(match and int(match[1]) <= 4096)
+    return path.startswith("/dev/")
+
+
+def windows_port_identity(path, ports):
+    matches = [port for port in ports if port.device.upper() == path.upper()]
+    if not matches:
+        raise FileNotFoundError(path)
+    if len(matches) != 1:
+        raise ValueError("USB 串口标识不唯一，请重新确认设备。")
+    port = matches[0]
+    return tuple(getattr(port, field, None) for field in ("vid", "pid", "serial_number", "location", "hwid"))
+
+
 @dataclass(frozen=True)
 class UsbPort:
     path: str
@@ -42,6 +68,9 @@ class UsbPort:
 
     @staticmethod
     def _identity(path):
+        if sys.platform == "win32":
+            from serial.tools import list_ports
+            return windows_port_identity(path, list_ports.comports())
         info = os.stat(path)
         if not stat.S_ISCHR(info.st_mode):
             raise ValueError("请选择 USB 串口设备。")
@@ -49,7 +78,7 @@ class UsbPort:
 
     @classmethod
     def register(cls, path, *, allow_missing=False):
-        if not isinstance(path, str) or not path.startswith("/dev/"):
+        if not valid_usb_port(path):
             raise ValueError("请提供已确认属于该板的 USB 串口绝对路径。")
         try:
             node = cls._identity(path)
@@ -126,7 +155,7 @@ class UsbLink:
 
     def __init__(self, identity, _key, *, port, peer_hint=None, serial_factory=default_serial_factory, lock_root=None):
         path = port.path if isinstance(port, UsbPort) else port
-        if not Path(path).is_absolute() or not path.startswith("/dev/"):
+        if not valid_usb_port(path):
             raise ValueError("请提供已确认属于该板的 USB 串口绝对路径。")
         self.identity, self.port, self.registration = identity, path, port if isinstance(port, UsbPort) else None
         self.serial_factory, self.lock_root = serial_factory, lock_root

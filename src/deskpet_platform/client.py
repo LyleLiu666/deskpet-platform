@@ -12,9 +12,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .adaptive_speed.config import Config as SpeedConfig
 from .card_upload import upload_file, upload_usb, validate_path
-from .channel import Channel, CommandRejected, DeviceError
+from .channel import Channel, CommandRejected, DeviceError, TextNotVisible
 from .image_display import prepare_image
 from .pairing import DeviceConfig, valid_device_uuid
+from .quota_projection import SOURCES
 from .role_install import MAX_ROLE_ACTIONS, MAX_ROLE_ID_LENGTH, valid_identity
 from .wifi_link import WifiLink
 
@@ -162,6 +163,24 @@ class Client:
             if windows is not None:
                 return await self.channel.send("token_update", **snapshot, speed_windows=windows)
             return await self.channel.send("token_update", **snapshot)
+
+    async def update_quota(self, reading):
+        if self.channel.capabilities.get("quota_sources") != 1:
+            raise DeviceError("quota_sources_not_supported")
+        source = reading.get("source")
+        if source not in SOURCES:
+            raise ValueError("额度来源无效。")
+        fields = {key: value for key, value in reading.items() if key != "source"}
+        async with self._operation:
+            return await self.channel.send("quota_snapshot", source=SOURCES.index(source), **fields)
+
+    async def select_quota_source(self, source):
+        if self.channel.capabilities.get("quota_sources") != 1:
+            raise DeviceError("quota_sources_not_supported")
+        if source not in SOURCES:
+            raise ValueError("额度来源无效。")
+        async with self._operation:
+            return await self.channel.send("quota_source", source=SOURCES.index(source))
 
     async def set_role_auto(self, enabled):
         if self.channel.capabilities.get("token_stats") != 1:
@@ -483,8 +502,10 @@ class Client:
             raise DeviceError("text_not_supported")
         async with self._operation:
             state = await self.channel.send("heartbeat")
-            if state.get("pet_page") != 0 or type(state.get("view_token")) is not int:
-                raise DeviceError("请在设备上打开桌宠首页。")
+            if type(state.get("pet_page")) is not int or type(state.get("view_token")) is not int:
+                raise DeviceError("设备未提供有效的文字显示状态。")
+            if state["pet_page"] != 0:
+                raise TextNotVisible("请在设备上打开桌宠首页。")
             generation = state.get("text_generation", 0) + 1
             answer = await self.channel.send(
                 "text_begin", generation=generation, view_token=state["view_token"],
@@ -492,6 +513,8 @@ class Client:
                 display_ms=4000, ttl_ms=3000,
             )
             if answer.get("text_status") != "receiving":
+                if answer.get("text_reason") == "view_changed":
+                    raise TextNotVisible("设备画面已切换，提醒将在画面可用时重试。")
                 raise DeviceError("设备当前无法接收测试文字。")
             for index, offset in enumerate(range(0, len(bitmap), 192)):
                 answer = await self.channel.send("text_chunk", generation=generation, index=index,

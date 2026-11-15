@@ -13,9 +13,22 @@ from mcp.server.fastmcp.exceptions import ToolError
 from deskpet_platform.client import Client
 from deskpet_platform.codex_hook import hook_command, install_hook, receive
 from deskpet_platform.device_registry import DeviceRegistry
-from deskpet_platform.mcp_server import create_server
+from deskpet_platform.mcp_server import create_server, require_notification_hooks
 from deskpet_platform.notifications import NotificationStore, run_worker
 from test_multi_device_flow import FIRST, SECOND, SyntheticBoard
+
+
+class NotificationPlatformTests(unittest.TestCase):
+    def test_windows_allows_only_verified_agent_hooks(self):
+        require_notification_hooks(True, "nt", "claude-hook")
+        require_notification_hooks(True, "nt", "codex-hook")
+        with self.assertRaisesRegex(ValueError, "Windows"):
+            require_notification_hooks(True, "nt", "antigravity-hook")
+    def test_windows_install_is_refused_before_unverified_hooks_are_written(self):
+        with self.assertRaisesRegex(ValueError, "Windows"):
+            require_notification_hooks(True, "nt")
+        require_notification_hooks(False, "nt")
+        require_notification_hooks(True, "posix")
 
 
 class NotificationBoard(SyntheticBoard):
@@ -77,6 +90,12 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.second_path = registry.path_for(SECOND.device_id)
         self.inbox = NotificationStore(self.root / "notifications.sqlite3")
         self.second = NotificationStore(self.second_path.parent / "notifications.sqlite3", source=self.inbox)
+        self.addAsyncCleanup(self._drain_background_operations)
+
+    async def _drain_background_operations(self):
+        # Cancelled asyncio.to_thread calls may still have SQLite files open.
+        # Finish those threads before removing the isolated Windows fixture.
+        await asyncio.get_running_loop().shutdown_default_executor()
 
     async def wait_for(self, condition, timeout=8):
         async with asyncio.timeout(timeout):
@@ -88,6 +107,15 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
              patch("deskpet_platform.codex_hook.subprocess.Popen") as spawn:
             receive(config or self.config)
         return spawn
+
+    async def test_windows_notification_setup_does_not_touch_user_settings(self):
+        server = create_server(self.config, no_token_probe=True)
+        with patch("deskpet_platform.mcp_server.require_notification_hooks",
+                   side_effect=lambda enabled, platform, hook=None: require_notification_hooks(enabled, "nt", hook)):
+            for name, arguments in (("desk_set_antigravity_notifications", {"enabled": True}),):
+                with self.subTest(name=name), self.assertRaisesRegex(ToolError, "Windows"):
+                    await server.call_tool(name, arguments)
+        self.assertFalse((self.root / "codex-profile" / "hooks.json").exists())
 
     async def test_codex_hook_routes_to_both_boards_and_retries_offline_inbox(self):
         boards = {item.identity: NotificationBoard(item) for item in (FIRST, SECOND)}
@@ -133,7 +161,7 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
             self.assertCountEqual([record["category"] for record in self.second.list() if not record["shown"]],
                                   ["completed", "response"])
             second.available = True
-            await self.wait_for(lambda: len(second.attention) == 2 and second.snapshots[-1]["results"] == 2)
+            await self.wait_for(lambda: len(second.attention) == 2 and second.snapshots[-1]["results"] == 1)
             await self.wait_for(lambda: all(record["shown"] for record in self.second.list()))
             async with Client(SECOND, link_factory=second.link) as manual:
                 await manual.set_brightness(80)
@@ -151,7 +179,7 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
             self.submit(answer).assert_not_called()
             await self.wait_for(lambda: all(board.snapshots[-1]["waiting"] == 1 for board in boards.values()))
             self.assertEqual([len(board.attention) for board in boards.values()], [2, 2])
-            self.assertEqual([board.snapshots[-1]["results"] for board in boards.values()], [1, 2])
+            self.assertEqual([board.snapshots[-1]["results"] for board in boards.values()], [1, 1])
 
             post_tool = {**question, "hook_event_name": "PostToolUse"}
             self.submit({**post_tool, "tool_response": '{"accepted": true}'}).assert_not_called()
@@ -163,8 +191,8 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(responses), 2)
                 self.assertTrue(all(record["shown"] and record["resolved"] for record in responses))
 
-            self.submit({**stop, "turn_id": "after-manual-control"})
-            await self.wait_for(lambda: first.snapshots[-1]["results"] == 2 and second.snapshots[-1]["results"] == 3)
+            self.submit({**stop, "session_id": "other-session", "turn_id": "after-manual-control"})
+            await self.wait_for(lambda: all(board.snapshots[-1]["results"] == 2 for board in boards.values()))
         finally:
             task.cancel()
             await asyncio.gather(task,return_exceptions=True)

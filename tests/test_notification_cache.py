@@ -1,8 +1,10 @@
 import asyncio
+import base64
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from deskpet_platform.channel import CommandRejected
 from deskpet_platform.mcp_server import BoardSession
@@ -92,6 +94,56 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
                 return
         self.fail("cache transfer did not finish")
 
+    async def test_explicit_dismissal_receipt_removes_only_that_reminder(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
+        question = self.store.add_agent_event("codex", "session", "q", "response", "Question")
+        record = self.store.cache_records(active_only=True)[0]
+        self.channel.receipts = [{"has_receipt": True, "id": record["cache_id"],
+                                  "content_revision": 1, "feedback_dismissal": True}]
+        await self.sync()
+        self.assertEqual(self.store.cache_records(active_only=True), [])
+        self.assertFalse(self.store.list()[0]["resolved"])
+        self.assertEqual(self.store.list()[0]["id"], question)
+        self.assertIn(("cache_receipt_begin", {"feedback_dismissal": True}), self.channel.commands)
+
+    async def test_feedback_card_uses_local_confirmation_without_detail_transfer(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
+        self.store.add_agent_event("claude_code", "1234567890", "question", "response", "repository")
+        await self.sync()
+        item = next(fields for command, fields in self.channel.commands if command == "cache_item")
+        self.assertEqual(item["kind"], 5)
+        self.assertEqual(item["detail_crc"], [])
+        self.assertEqual(base64.b64decode(item["title"]).decode(), "12345678 · repository")
+        self.assertNotIn("cache_detail_begin", [command for command, _ in self.channel.commands])
+
+    async def test_invalid_dismissal_is_never_acknowledged(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
+        self.store.add_agent_event("codex", "session", "q", "response", "Project")
+        self.channel.receipts = [{"has_receipt": True, "id": "p-1-forged", "content_revision": 1,
+                                  "feedback_dismissal": True}]
+        await self.sync()
+        self.assertEqual(len(self.store.cache_records(active_only=True)), 1)
+        operations = [command for command, _ in self.channel.commands]
+        self.assertIn("cache_abort", operations)
+        self.assertNotIn("cache_receipt_ack", operations)
+
+    async def test_local_inbox_keeps_one_question_per_session_and_drops_read_completions(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1)
+        old = self.store.add_agent_event("codex", "same-session", "old", "response", "Old", parent_turn="turn-1")
+        question = self.store.add_agent_event("codex", "same-session", "new", "response", "New", parent_turn="turn-2")
+        other = self.store.add_agent_event("codex", "other-session", "other", "response", "Other")
+        complete = self.store.add_agent_event("codex", "same-session", "done", "completed", "Done")
+        self.store.mark_seen(complete)
+        await self.sync()
+        card = self.cache.committed_records(self.channel)
+        self.assertEqual([item["id"] for item in card], [other, question])
+        self.store.mark_seen(question)
+        self.store.resolve_agent_event("codex", "same-session", "new")
+        self.cache.poll_at = 0
+        await self.sync()
+        self.assertEqual([item["id"] for item in self.cache.committed_records(self.channel)], [other])
+        self.assertFalse(next(item for item in self.store.list() if item["id"] == old)["resolved"])
+
     async def test_verified_details_precede_list_and_offline_read_targets_only_matching_event(self):
         first = self.store.add_agent_event("codex", "session-a", "turn", "completed", "First")
         second = self.store.add_agent_event("claude_code", "session-b", "turn", "response", "第二" * 32)
@@ -117,6 +169,49 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
         self.channel.capabilities = {"message_cache": 1, "agent_home": 1}
         await self.cache.step(self.client)
         self.assertEqual(self.channel.commands, [])
+
+    async def test_local_completed_detail_retains_formal_grayscale_across_resume(self):
+        self.channel.capabilities["agent_local_inbox"] = 1
+        self.store.add_agent_event("codex", "session", "done", "completed", "修复任务状态显示")
+        record, = self.store.cache_records(active_only=True)
+        _, _, _, pixels = _prepare(record, finished_gray=True)
+        await self.sync()
+        detail, = [fields for command, fields in self.channel.commands if command == "cache_detail_begin"]
+        blocks = [fields for command, fields in self.channel.commands if command == "cache_detail_chunk"]
+        self.assertTrue(detail["gray"])
+        self.assertEqual(len(pixels), 8064)
+        self.assertEqual([block["index"] for block in blocks], list(range(15, 32, 2)))
+        self.assertEqual(len(blocks[-1]["data"]), 504)
+
+    async def test_poll_shortens_the_wait_between_card_batches_only_while_transferring(self):
+        session = BoardSession(self.store.path.with_name("device.json"))
+        session.client = self.client
+        self.channel.capabilities["agent_cache_first"] = 1
+        self.channel.dropped_events = 0
+
+        async def status():
+            return {"pet_page": 0}
+
+        self.client.status = status
+        for index in range(8):
+            self.store.add_agent_event("codex", "s", str(index), "completed", f"Message {index}")
+        delays = []
+
+        async def sleep(delay):
+            delays.append(delay)
+            if len(delays) == 1:
+                self.assertFalse(any(row["shown"] for row in self.store.list()))
+            if len(delays) == 4:
+                raise asyncio.CancelledError
+
+        with patch("deskpet_platform.mcp_server.asyncio.sleep", side_effect=sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                await session.poll()
+        self.assertLess(delays[0], 1)
+        self.assertEqual(delays[-1], 1)
+        operations = [cmd for cmd, _ in self.channel.commands]
+        self.assertLess(operations.index("cache_commit"), operations.index("snapshot_begin"))
+        self.assertTrue(all(row["shown"] for row in self.store.list()))
 
     async def test_first_reminder_waits_for_committed_card_and_shown_receipt_causes_no_upload(self):
         session = BoardSession(self.store.path.with_name("device.json"))

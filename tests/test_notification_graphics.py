@@ -19,15 +19,21 @@ class NotificationGraphicsTests(unittest.TestCase):
             icon = Image.frombytes("1", (216, 18), bitmap).crop((0, 0, 18, 18))
             self.assertIsNotNone(icon.getbbox())
 
-    def test_home_summary_combines_completed_and_limits_response_rows(self):
+    def test_home_summary_combines_each_category_into_one_row(self):
         summary = {"completed_count": 50,
                    "completed_sources": ["codex", "claude_code", "workbuddy", "antigravity", "opencode"],
+                   "response_count": 4,
                    "response_sources": [{"source": source, "count": 1, "id": index, "title": "测试项目"}
                                         for index, source in enumerate(("codex", "claude_code", "workbuddy", "opencode"), 1)]}
         lines = graphics.home_lines(summary)
-        self.assertEqual([line["category"] for line in lines], ["completed", "response", "response", "response"])
+        self.assertEqual([line["category"] for line in lines], ["completed", "response"])
         self.assertEqual(lines[0]["sources"], tuple(summary["completed_sources"]))
-        self.assertEqual([line["source"] for line in lines[1:]], ["codex", "claude_code", "workbuddy"])
+        self.assertEqual(lines[1]["sources"], ("codex", "claude_code", "workbuddy", "opencode"))
+        self.assertEqual(lines[1]["marks"], "gcwo")
+        pending = Image.frombytes("1", (128, 16), lines[1]["bitmap"])
+        for index in range(4):
+            self.assertIsNotNone(pending.crop((index * 14, 2, index * 14 + 12, 14)).getbbox())
+            self.assertIsNone(pending.crop((index * 14 + 12, 0, index * 14 + 14, 16)).getbbox())
         for line in lines:
             self.assertEqual(len(line["bitmap"]), 128 * 16 // 8)
             self.assertIsNotNone(Image.frombytes("1", (128, 16), line["bitmap"]).getbbox())

@@ -20,7 +20,7 @@ def settings_path():
 def configure(path, command, *, enabled):
     if not enabled and not path.exists() and not path.is_symlink():
         return False
-    settings = _load(path, private=False)
+    settings, original = _load(path, private=False)
     name = "deskpet-" + hashlib.sha256(command.encode()).hexdigest()[:16]
     stop_only = {"Stop": [{"type": "command", "command": command, "timeout": 2}]}
     entry = {**stop_only}
@@ -37,7 +37,7 @@ def configure(path, command, *, enabled):
         del settings[name]
     else:
         return False
-    _write(path, settings, private=False)
+    _write(path, settings, original=original, private=False)
     return True
 
 
