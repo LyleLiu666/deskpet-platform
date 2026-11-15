@@ -50,6 +50,7 @@ class FakeClaudeAPI(BaseHTTPRequestHandler):
 class WindowsClaudeClientRehearsal(unittest.TestCase):
     def test_real_client_invokes_wrapped_statusline_against_fake_api(self):
         import sys
+        import ctypes
         from winpty import PtyProcess
         from deskpet_platform.quota_capture import QuotaStore
         from deskpet_platform.quota_statusline import configure
@@ -73,10 +74,15 @@ class WindowsClaudeClientRehearsal(unittest.TestCase):
             settings = profile / "settings.json"
             original = {"statusLine": {"type": "command", "command": previous, "padding": 2}}
             settings.write_text(json.dumps(original), encoding="utf-8")
+            full_path = ctypes.create_unicode_buffer(32768)
+            ctypes.windll.kernel32.GetLongPathNameW(str(project), full_path, len(full_path))
+            paths = {str(project), str(project.resolve()), full_path.value}
+            paths |= {value.replace("\\", "/") for value in paths}
+            paths |= {value.lower() for value in paths}
             state = {"hasCompletedOnboarding": True, "theme": "dark", "autoUpdates": False,
                      "customApiKeyResponses": {"approved": ["synthetic-local-key"], "rejected": []},
-                     "projects": {str(project.resolve()): {"hasTrustDialogAccepted": True,
-                                                         "hasCompletedProjectOnboarding": True}}}
+                     "projects": {value: {"hasTrustDialogAccepted": True,
+                                          "hasCompletedProjectOnboarding": True} for value in paths if value}}
             (profile / ".claude.json").write_text(json.dumps(state), encoding="utf-8")
             store = root / "quota.sqlite3"
             configure(settings, "claude_code", store, enabled=True, windows_shell=("bash", bash))

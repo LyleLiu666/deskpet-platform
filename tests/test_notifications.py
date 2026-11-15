@@ -17,6 +17,26 @@ from deskpet_platform.pairing import DeviceConfig
 
 
 class NotificationTests(unittest.TestCase):
+    def test_explicit_dismissal_is_per_board_and_does_not_claim_answered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = notifications.NotificationStore(root / "source.sqlite3")
+            first = notifications.NotificationStore(root / "first.sqlite3", source=source)
+            second = notifications.NotificationStore(root / "second.sqlite3", source=source)
+            source.add_agent_event("codex", "session", "question", "response", "Project")
+            first.sync(); second.sync()
+            record = first.cache_records(active_only=True)[0]
+            self.assertFalse(first.dismiss_cached_response(record["cache_id"] + "bad"))
+            self.assertTrue(first.dismiss_cached_response(record["cache_id"]))
+            first.sync(); second.sync()
+            self.assertEqual(first.cache_records(active_only=True), [])
+            self.assertFalse(first.has_active_notifications())
+            self.assertEqual(first.home_summary()["response_count"], 0)
+            self.assertEqual(first.pending_attention(), 0)
+            self.assertFalse(first.list()[0]["resolved"])
+            self.assertEqual(len(second.cache_records(active_only=True)), 1)
+            self.assertFalse(source.list()[0]["resolved"])
+
     def test_multiple_sources_have_explicit_categories_and_bounded_home_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")

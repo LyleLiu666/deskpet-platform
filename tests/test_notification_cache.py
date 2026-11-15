@@ -93,6 +93,27 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
                 return
         self.fail("cache transfer did not finish")
 
+    async def test_explicit_dismissal_receipt_removes_only_that_reminder(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
+        question = self.store.add_agent_event("codex", "session", "q", "response", "Question")
+        record = self.store.cache_records(active_only=True)[0]
+        self.channel.receipts = [{"has_receipt": True, "id": record["cache_id"],
+                                  "content_revision": 1, "feedback_dismissal": True}]
+        await self.sync()
+        self.assertEqual(self.store.cache_records(active_only=True), [])
+        self.assertFalse(self.store.list()[0]["resolved"])
+        self.assertEqual(self.store.list()[0]["id"], question)
+        self.assertIn(("cache_receipt_begin", {"feedback_dismissal": True}), self.channel.commands)
+
+    async def test_feedback_card_uses_local_confirmation_without_detail_transfer(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
+        self.store.add_agent_event("claude_code", "1234567890", "question", "response", "repository")
+        await self.sync()
+        item = next(fields for command, fields in self.channel.commands if command == "cache_item")
+        self.assertEqual(item["kind"], 5)
+        self.assertEqual(item["detail_crc"], [])
+        self.assertNotIn("cache_detail_begin", [command for command, _ in self.channel.commands])
+
     async def test_local_inbox_keeps_one_question_per_session_and_drops_read_completions(self):
         self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1)
         old = self.store.add_agent_event("codex", "same-session", "old", "response", "Old", parent_turn="turn-1")

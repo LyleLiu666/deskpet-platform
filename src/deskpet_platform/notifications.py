@@ -98,6 +98,12 @@ class NotificationStore:
                     db.execute("BEGIN IMMEDIATE")
                     if db.execute(resolved_schema).fetchone() is None:
                         db.execute("ALTER TABLE notifications ADD COLUMN resolved REAL")
+            dismissed_schema = "SELECT 1 FROM pragma_table_info('notifications') WHERE name='dismissed'"
+            if db.execute(dismissed_schema).fetchone() is None:
+                with db:
+                    db.execute("BEGIN IMMEDIATE")
+                    if db.execute(dismissed_schema).fetchone() is None:
+                        db.execute("ALTER TABLE notifications ADD COLUMN dismissed REAL")
             turn_schema = "SELECT 1 FROM pragma_table_info('notifications') WHERE name='parent_turn'"
             if db.execute(turn_schema).fetchone() is None:
                 with db:
@@ -259,7 +265,7 @@ class NotificationStore:
                 WHERE NOT ? OR (category='completed' AND id IN (
                     SELECT MAX(id) FROM notifications WHERE category='completed' AND seen IS NULL
                     GROUP BY source,session))
-                    OR (category='response' AND resolved IS NULL AND NOT ({SUPERSEDED_QUESTION}) AND NOT EXISTS (
+                    OR (category='response' AND resolved IS NULL AND dismissed IS NULL AND NOT ({SUPERSEDED_QUESTION}) AND NOT EXISTS (
                         SELECT 1 FROM notifications AS newer
                         WHERE newer.source=n.source AND newer.session=n.session
                           AND newer.category='response' AND newer.id>n.id
@@ -309,6 +315,17 @@ class NotificationStore:
                                (time.time(), identity, identity))
                 db.execute("UPDATE notifications SET seen=COALESCE(seen,?) WHERE id=?", (time.time(), identity))
 
+    def dismiss_cached_response(self, cache_id):
+        """Dismiss one board's reminder without asserting that it was answered."""
+        with closing(self._connect()) as db, db:
+            identity = self._matching_cache_record(db, cache_id)
+            if identity is None:
+                return False
+            now = time.time()
+            return db.execute("""UPDATE notifications SET dismissed=COALESCE(dismissed,?),
+                seen=COALESCE(seen,?) WHERE id=? AND category='response'""",
+                (now, now, identity)).rowcount > 0
+
     def mark_list_seen_through_cache_record(self, cache_id, *, include_responses=False):
         """Record that the list presented the inbox through its exact TF snapshot."""
         with closing(self._connect()) as db, db:
@@ -327,11 +344,11 @@ class NotificationStore:
                 WHERE seen IS NULL AND category='completed' GROUP BY source ORDER BY MAX(id) DESC""").fetchall()
             response = db.execute(f"""SELECT n.source,groups.amount,n.id,n.title FROM notifications n JOIN
                 (SELECT source,COUNT(*) amount,MAX(id) latest FROM notifications
-                 AS n WHERE resolved IS NULL AND category='response' AND NOT ({SUPERSEDED_QUESTION}) GROUP BY source) groups
+                 AS n WHERE resolved IS NULL AND dismissed IS NULL AND category='response' AND NOT ({SUPERSEDED_QUESTION}) GROUP BY source) groups
                 ON n.id=groups.latest ORDER BY n.id DESC""").fetchall()
             if include_receipts:
                 receipts = [row[0] for row in db.execute(f"""SELECT id FROM notifications n WHERE shown IS NULL AND
-                    ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL
+                    ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL AND dismissed IS NULL
                     AND NOT ({SUPERSEDED_QUESTION})))""")]
         summary = {"completed_count": sum(row[1] for row in completed),
                 "completed_sources": [row[0] for row in completed],
@@ -366,7 +383,7 @@ class NotificationStore:
             rows = db.execute(f"""SELECT id,shown IS NULL,category='response' AND
                          id>COALESCE((SELECT through_id FROM notification_attention WHERE id=1),0)
                 FROM notifications WHERE id IN ({placeholders}) AND
-                  ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL))""",
+                  ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL AND dismissed IS NULL))""",
                 identities).fetchall()
         return tuple(identity for identity, shown_pending, _ in rows if shown_pending), max(
             (identity for identity, _, attention_pending in rows if attention_pending), default=0)
@@ -384,7 +401,7 @@ class NotificationStore:
     def pending_attention(self):
         with closing(self._connect()) as db:
             return db.execute(f"""SELECT COALESCE(MAX(id),0) FROM notifications n
-                WHERE category='response' AND resolved IS NULL AND NOT ({SUPERSEDED_QUESTION})
+                WHERE category='response' AND resolved IS NULL AND dismissed IS NULL AND NOT ({SUPERSEDED_QUESTION})
                 AND id>COALESCE((SELECT through_id FROM notification_attention WHERE id=1),0)""").fetchone()[0]
 
     def acknowledge_attention(self, identity):
@@ -450,7 +467,7 @@ class NotificationStore:
     def has_active_notifications(self):
         with closing(self._connect()) as db:
             return db.execute(f"""SELECT 1 FROM notifications n WHERE
-                (category='response' AND resolved IS NULL AND NOT ({SUPERSEDED_QUESTION})) OR
+                (category='response' AND resolved IS NULL AND dismissed IS NULL AND NOT ({SUPERSEDED_QUESTION})) OR
                 (category='completed' AND seen IS NULL) LIMIT 1""").fetchone() is not None
 
 

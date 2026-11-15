@@ -40,11 +40,25 @@ jobs:
         run: |
           Set-Location (Join-Path $env:RUNNER_TEMP 'DeskPet fresh install')
           $env:PYTHONPATH = "$pwd/src;$pwd/tests"
-          foreach ($test in @('test_file_lock.py', 'test_windows_pairing.py', 'test_windows_private.py', 'test_windows_scenario.py', 'test_pair_portal.py', 'test_multi_device_flow.py', 'test_pairing_rehearsal.py', 'test_claude_quota.py', 'test_antigravity_quota.py', 'test_quota_capture.py', 'test_quota_projection.py', 'test_quota_display.py', 'test_windows_statusline.py', 'test_quota_windows_statusline.py')) {
+          foreach ($test in @('test_file_lock.py', 'test_windows_pairing.py', 'test_windows_private.py', 'test_windows_scenario.py', 'test_pair_portal.py', 'test_multi_device_flow.py', 'test_pairing_rehearsal.py', 'test_claude_quota.py', 'test_antigravity_quota.py', 'test_quota_capture.py', 'test_quota_projection.py', 'test_quota_display.py', 'test_notification_cache.py', 'test_windows_statusline.py', 'test_quota_windows_statusline.py')) {
             & ./.venv/Scripts/python.exe -m unittest discover -s tests -p $test -v
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           & ./.venv/Scripts/python.exe -m unittest test_platform.PlatformTests.test_wifi_probe_accepts_only_the_paired_board_proof test_platform.PlatformTests.test_handshake_display_and_disconnect_on_local_wire test_platform.PlatformTests.test_real_mcp_lists_and_reads_manuals_without_pairing test_multi_device_notifications.NotificationPlatformTests.test_windows_install_is_refused_before_unverified_hooks_are_written test_multi_device_notifications.MultiDeviceNotificationTests.test_windows_notification_setup_does_not_touch_user_settings -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install from a built source release candidate
+        shell: pwsh
+        run: |
+          python -m pip install build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m build --sdist --outdir "$env:RUNNER_TEMP/deskpet-dist"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $destination = Join-Path $env:RUNNER_TEMP 'DeskPet release archive'
+          New-Item -ItemType Directory -Path $destination | Out-Null
+          tar -xzf "$env:RUNNER_TEMP/deskpet-dist/deskpet_platform-0.1.0.tar.gz" -C $destination
+          Set-Location (Join-Path $destination 'deskpet_platform-0.1.0')
+          ./install-windows.ps1
+          & ./.venv/Scripts/deskpet-platform.exe --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Rehearse actual Claude Code against a synthetic local API
         shell: pwsh
