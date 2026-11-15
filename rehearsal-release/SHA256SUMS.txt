@@ -1,2 +1,2 @@
-a598a809e3bba8c0b9759f60c30f3de5e6270f2c2069580f73446fb5fe5c40e6  deskpet_platform-0.1.0rc1-py3-none-any.whl
-e1cc60ac12b9b9f764792c440e8dc9e196766f42c05bf59cb7499442679a8ed2  deskpet_platform-0.1.0rc1.tar.gz
+09cfb074f4c168a70520e37ebf201f1db45e43bdf367d226d4306ad2b1092f14  deskpet_platform-0.1.0rc1-py3-none-any.whl
+d5e068d9ec9655c29dd1b86f952096545594b34f7ef2369af27117ec1f320c82  deskpet_platform-0.1.0rc1.tar.gz
