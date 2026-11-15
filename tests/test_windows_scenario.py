@@ -41,6 +41,14 @@ class WindowsScenarioTests(unittest.IsolatedAsyncioTestCase):
             adapter = SimpleNamespace(device="COM12",vid=1,pid=2,serial_number="fixture",location="1-1",hwid="fixture")
             self.assertEqual(windows_port_identity("com12",[adapter])[2], "fixture")
 
+    async def test_codex_shim_path_rejects_command_interpreters_metacharacters(self):
+        from unittest.mock import patch
+        from deskpet_platform.codex_quota import fetch_quota
+        for character in ("&", "|", "<", ">", "^", "(", ")", "%"):
+            with self.subTest(character=character), patch("deskpet_platform.codex_quota.shutil.which", return_value=f"C:\\test{character}bad\\codex.cmd"):
+                with self.assertRaises(ValueError):
+                    await fetch_quota()
+
     async def test_codex_quota_can_start_a_windows_command_shim(self):
         import json
         import sys

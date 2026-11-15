@@ -55,7 +55,7 @@ async def fetch_quota():
             raise FileNotFoundError('codex executable not found')
         command[0] = executable
         if executable.lower().endswith(('.cmd', '.bat')):
-            if any(character in executable for character in ('%', '"', '\r', '\n')):
+            if any(character in executable for character in ('%', '"', '\r', '\n', '&', '|', '<', '>', '^', '(', ')')):
                 raise ValueError('codex command path cannot be safely invoked')
             command = [os.environ.get('COMSPEC', 'cmd.exe'), '/d', '/v:off', '/c',
                        executable, 'app-server', '--listen', 'stdio://']
