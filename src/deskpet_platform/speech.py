@@ -6,6 +6,20 @@ import wave
 
 VOICE = 'zh-CN-XiaoyiNeural'
 
+class SpeechTooLong(ValueError):
+    pass
+
+def split_speech(text,limit=12):
+    """Keep each phrase short while preserving all text and punctuation."""
+    parts=[];start=0
+    for index,char in enumerate(text):
+        if index-start+1>=limit or char in '，。！？；,.!?;':
+            if index==start and char in '，。！？；,.!?;' and parts and len(parts[-1])>1:
+                start-=1;parts[-1]=parts[-1][:-1]
+            parts.append(text[start:index+1]);start=index+1
+    if start<len(text):parts.append(text[start:])
+    return parts
+
 def validate_text(text):
     if not isinstance(text,str):raise ValueError('请输入 1 至 80 字的单行文字。')
     if any(ord(char)<32 or ord(char)==127 for char in text):raise ValueError('请输入 1 至 80 字的单行文字。')
@@ -29,9 +43,9 @@ async def synthesize_speech(text):
             raise
         if process.returncode:raise RuntimeError('speech_conversion_failed')
         with wave.open(str(target),'rb') as audio:
-            if (audio.getnchannels()!=1 or audio.getsampwidth()!=2 or audio.getframerate()!=16000 or
-                not 0<audio.getnframes()<=80000):
-                raise ValueError('语音须不超过五秒，请缩短文字。')
+            if audio.getnchannels()!=1 or audio.getsampwidth()!=2 or audio.getframerate()!=16000 or not audio.getnframes():
+                raise ValueError('语音音频无效。')
+            if audio.getnframes()>80000:raise SpeechTooLong('语音超过五秒。')
             frames=audio.getnframes();pcm=audio.readframes(frames)
         if len(pcm)!=frames*2:raise ValueError('语音音频无效。')
         return pcm

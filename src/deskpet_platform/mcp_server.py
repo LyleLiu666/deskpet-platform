@@ -47,7 +47,7 @@ from .token_metrics import TokenMetrics
 from .usb_setup import probe_usb
 from .usb_link import UsbLink, UsbPort, find_usb_devices, read_usb_identity
 from .weather import fetch_relay_weather, fetch_weather
-from .speech import synthesize_speech, validate_text
+from .speech import SpeechTooLong, split_speech, synthesize_speech, validate_text
 from .wifi_link import probe_board
 
 Manual = Literal["operations", "development", "roles"]
@@ -92,6 +92,7 @@ class BoardSession:
         self.next_wifi_probe = 0.0
         self.snapshot = {"connection": "starting"}
         self.lock = asyncio.Lock()
+        self.speech_lock = asyncio.Lock()
         self.storage_lock = asyncio.Lock()
         self.loop = None
         self.touches = asyncio.Queue(maxsize=32)
@@ -398,14 +399,24 @@ class BoardSession:
 
     async def speak(self,text):
         text=validate_text(text)
-        async with self.lock:
-            client=self.client
-            if client is None:return {"status":"not_connected","connection":self.snapshot}
-            if client.channel.capabilities.get("speech_pcm")!=1:return {"status":"unsupported"}
-        pcm=await synthesize_speech(text)
-        async with self.lock:
-            if self.client is not client:return {"status":"not_connected","connection":self.snapshot}
-            return await client.play_speech_pcm(pcm)
+        async with self.speech_lock:
+            async with self.lock:
+                client=self.client
+                if client is None:return {"status":"not_connected","connection":self.snapshot}
+                if client.channel.capabilities.get("speech_pcm")!=1:return {"status":"unsupported"}
+            parts=split_speech(text);duration=0
+            while parts:
+                part=parts.pop(0)
+                if not part.strip():continue
+                try:pcm=await synthesize_speech(part)
+                except SpeechTooLong:
+                    if len(part)<2:raise
+                    middle=len(part)//2;parts[0:0]=[part[:middle],part[middle:]];continue
+                async with self.lock:
+                    if self.client is not client:return {"status":"not_connected","connection":self.snapshot}
+                    result=await client.play_speech_pcm(pcm)
+                duration+=result['duration_ms']
+            return {"status":"finished","duration_ms":duration}
 
     async def read_notification(self,identity):
         item=await asyncio.to_thread(self.notifications.get,identity)
