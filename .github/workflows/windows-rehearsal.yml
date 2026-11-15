@@ -57,7 +57,7 @@ jobs:
           $fixture = Join-Path $env:RUNNER_TEMP 'deskpet-claude-fixture'
           npm install --prefix $fixture --no-audit --no-fund @anthropic-ai/claude-code@2.1.281
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:DESKPET_SYNTHETIC_CLAUDE_CLI = Join-Path $fixture 'node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs'
+          $env:DESKPET_SYNTHETIC_CLAUDE_CLI = Join-Path $fixture 'node_modules/@anthropic-ai/claude-code/bin/claude.exe'
           $env:DESKPET_REHEARSE_CLAUDE = '1'
           $env:PYTHONPATH = "$pwd/src;$pwd/tests"
           & ./.venv/Scripts/python.exe -m unittest test_windows_claude_client -v

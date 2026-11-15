@@ -54,11 +54,10 @@ class WindowsClaudeClientRehearsal(unittest.TestCase):
         from deskpet_platform.quota_capture import QuotaStore
         from deskpet_platform.quota_statusline import configure
 
-        node = shutil.which("node.exe")
         cli = Path(os.environ["DESKPET_SYNTHETIC_CLAUDE_CLI"])
         bash = shutil.which("bash.exe")
-        self.assertTrue(node and cli.is_file() and bash,
-                        f"fixture prerequisites: node={bool(node)} cli={cli.is_file()} bash={bool(bash)}; "
+        self.assertTrue(cli.is_file() and bash,
+                        f"fixture prerequisites: cli={cli.is_file()} bash={bool(bash)}; "
                         f"package entries={[p.name for p in cli.parent.iterdir()] if cli.parent.is_dir() else []}")
         with tempfile.TemporaryDirectory(prefix="DeskPet Claude fixture ") as temporary:
             root = Path(temporary)
@@ -94,7 +93,7 @@ class WindowsClaudeClientRehearsal(unittest.TestCase):
                             "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}",
                             "DISABLE_TELEMETRY": "1", "DISABLE_AUTOUPDATER": "1",
                             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "NO_PROXY": "127.0.0.1,localhost"})
-                args = [node, str(cli), "--setting-sources", "", "--settings", str(settings), "--strict-mcp-config",
+                args = [str(cli), "--setting-sources", "", "--settings", str(settings), "--strict-mcp-config",
                         "--tools", "", "--model", "claude-sonnet-4-5-20250929", "Local fixture"]
                 process = PtyProcess.spawn(args, cwd=str(project), env=env, dimensions=(36, 105))
                 output = []
@@ -116,7 +115,7 @@ class WindowsClaudeClientRehearsal(unittest.TestCase):
                             process.write("\x1b[B")
                             trust_selected_at = time.monotonic()
                         elif trust_selected_at is not None and not trusted and time.monotonic() - trust_selected_at > .5:
-                            process.write("\n")
+                            process.write("\r")
                             trusted = True
                         if observed.is_file() and quota.read("claude_code", time.time()) is not None and server.paths:
                             break
