@@ -51,6 +51,7 @@ tool_timeout_sec = 1200
 - `desk_status` 在连接时向小板读取最新状态。储存卡操作期间返回最近一次读数。
 - `desk_show_text` 显示两行以内的短文字，支持电脑字体能够绘制的中文；返回显示回执。
 - 设备支持语音时，`desk_speak` 主动朗读不超过 80 字的单行文字，`desk_read_notification` 按编号朗读提醒标题，朗读不会标记提醒为已读。文字仅在主动调用时发送到微软 Edge 在线语音服务；电脑分段临时合成音频，设备仅在内存中接收，每段最长五秒。电脑端的音频转换当前需要 macOS；音乐或视频播放时设备会拒绝朗读。
+- 支持 `message_read_aloud` 的设备可以在提醒详情点「联网朗读」，电脑端会朗读该条标题并回传完成或失败。电脑断开时请求不会自动重播；朗读不影响未读状态。
 - `desk_show_image` 接收电脑图片的绝对路径，自动转换后传到储存卡并显示。轻触屏幕或调用 `desk_clear_image` 可返回。
 - `desk_set_brightness` 设置 0–100 的屏幕亮度。设为 0 后触摸屏幕可重新点亮。
 - `desk_calibrate_touch` 在屏幕启动三点校准。按屏幕提示触摸三个标记，校准后 `desk_wait_touch` 返回点击位置。长按 3 秒或调用 `desk_cancel_touch_calibration` 可取消校准。校准后，点击角色可播放该角色提供的 `touched` 动作。

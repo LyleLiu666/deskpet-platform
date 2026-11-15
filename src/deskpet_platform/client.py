@@ -171,6 +171,12 @@ class Client:
                     with suppress(Exception):await self.channel.send("speech_cancel")
                 raise
 
+    async def read_request_take(self):
+        async with self._operation:return await self.channel.send('read_request_take')
+
+    async def read_request_finish(self,ticket,success):
+        async with self._operation:return await self.channel.send('read_request_finish',ticket=ticket,success=success)
+
     async def speed_windows(self, recent_seconds=None, long_days=None):
         if self.channel.capabilities.get("speed_windows") != 1:
             raise DeviceError("speed_windows_not_supported")

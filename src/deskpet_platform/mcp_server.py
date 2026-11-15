@@ -93,6 +93,7 @@ class BoardSession:
         self.snapshot = {"connection": "starting"}
         self.lock = asyncio.Lock()
         self.speech_lock = asyncio.Lock()
+        self.screen_speech_task = None
         self.storage_lock = asyncio.Lock()
         self.loop = None
         self.touches = asyncio.Queue(maxsize=32)
@@ -127,6 +128,8 @@ class BoardSession:
         self.computer_preference_client = None
 
     async def drop(self):
+        if self.screen_speech_task and not self.screen_speech_task.done():self.screen_speech_task.cancel()
+        self.screen_speech_task=None
         self.token_snapshot = None
         self.computer_preference_client = None
         if self.client is not None:
@@ -298,6 +301,8 @@ class BoardSession:
                                getattr(getattr(self.client, "link", None), "wireless", False) is True)
                     heartbeat = await self.client.status(compact=True) if compact else await self.client.status()
                     sampled_client = self.client
+                    if self.client.channel.capabilities.get('message_read_aloud')==1:
+                        await self.refresh_read_request(self.client)
                     await self.sync_computer_preferences(sampled_client, heartbeat)
                     self.record_status(heartbeat)
                     try:
@@ -422,6 +427,29 @@ class BoardSession:
         item=await asyncio.to_thread(self.notifications.get,identity)
         if item is None:return {"status":"not_found"}
         return await self.speak(item['title'])
+
+    async def refresh_read_request(self,client):
+        request=await client.read_request_take()
+        identity,ticket=request.get('identity'),request.get('ticket')
+        if (type(identity) is not int or not 0<identity<=0xffffffff or
+            type(ticket) is not int or not 0<ticket<=0xffffffff):return
+        if self.screen_speech_task and not self.screen_speech_task.done():
+            await client.read_request_finish(ticket,False);return
+        self.screen_speech_task=asyncio.create_task(self._screen_speech(client,identity,ticket))
+
+    async def _screen_speech(self,client,identity,ticket):
+        try:
+            result=await self.read_notification(identity)
+            success=result.get('status')=='finished'
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            success=False
+        try:
+            async with self.lock:
+                if self.client is client:await client.read_request_finish(ticket,success)
+        except (OSError,DeviceError):
+            pass # A disconnected board drops the volatile request.
 
     async def process_touch(self, event):
         self.notification_view.touch(event, channel=getattr(self.client, "channel", None))
