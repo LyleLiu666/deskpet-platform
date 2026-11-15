@@ -76,3 +76,17 @@ jobs:
           $env:PYTHONPATH = "$pwd/src;$pwd/tests"
           & ./.venv/Scripts/python.exe -m unittest test_windows_claude_client -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Rehearse actual Codex against a synthetic local API
+        shell: pwsh
+        timeout-minutes: 7
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'DeskPet fresh install'
+          Set-Location $target
+          $fixture = Join-Path $env:RUNNER_TEMP 'deskpet-codex-fixture'
+          npm install --prefix $fixture --no-audit --no-fund @openai/codex@0.159.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:DESKPET_SYNTHETIC_CODEX_CLI = Join-Path $fixture 'node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe'
+          $env:DESKPET_REHEARSE_CODEX = '1'
+          $env:PYTHONPATH = "$pwd/src;$pwd/tests"
+          & ./.venv/Scripts/python.exe -m unittest test_windows_codex_client -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
