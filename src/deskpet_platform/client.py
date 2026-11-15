@@ -24,6 +24,27 @@ SCREEN_PAGES = ("role", "home", "clock", "settings", "roles", "photos", "weather
 DEFAULT_SCREEN_PAGES = ("role", "home", "clock", "photos")
 DASHBOARD_METRICS = ("speed", "quota", "computer", "auto", "weather")
 
+def _appearance_theme(value):
+    if not isinstance(value,str):raise ValueError('主题须为名称或 JSON 文件名。')
+    if value in ('paper','night','sage'):return value
+    if (not value or value.startswith('.') or len(value.encode('utf-8'))>=64 or
+        any(c in '/\\' or ord(c)<32 or ord(c)==127 for c in value) or not value.lower().endswith('.json')):
+        raise ValueError('主题须为内置名称或 Themes 目录中的 JSON 文件名。')
+    return value
+
+def _appearance_wallpaper(value):
+    if not isinstance(value,str):raise ValueError('壁纸须为照片标识或卡上的相对路径。')
+    if not value:return ''
+    if re.fullmatch(r'p-[0-9a-f]{16}',value):value=f'photos/{value}.jpg'
+    folder,separator,name=value.partition('/')
+    if (not separator or folder not in ('photos','media') or not name or name.startswith('.') or
+        any(c in '/\\' or ord(c)<32 or ord(c)==127 for c in name) or
+        not name.lower().endswith(('.jpg','.jpeg'))):
+        raise ValueError('壁纸须为 photos/ 或 media/ 下的 JPG 文件。')
+    result=f'/sdcard/{"Photos" if folder=="photos" else "Media"}/{name}'
+    if len(result.encode('utf-8'))>=280:raise ValueError('壁纸路径过长。')
+    return result
+
 
 class Client:
     """One authenticated board connection. Use as an asynchronous context manager."""
@@ -503,6 +524,15 @@ class Client:
             return
         async with self._operation:
             await self.channel.send("attention_summary", count=min(65535, max(0, count)))
+
+    async def appearance_config(self, *, theme=None, wallpaper=None):
+        if theme is not None and wallpaper is not None:raise ValueError('请分别设置主题和壁纸。')
+        if theme is not None:mode,value='theme',_appearance_theme(theme)
+        elif wallpaper is not None:mode,value='wallpaper',_appearance_wallpaper(wallpaper)
+        else:mode,value='status',None
+        if self.channel.capabilities.get('appearance_config')!=1:raise DeviceError('appearance_config_not_supported')
+        async with self._operation:
+            return await self.channel.send('appearance_config',mode=mode,**({'value':value} if value is not None else {}))
 
     async def show_notice_detail(self, identity):
         if self.channel.capabilities.get("notices") != 1:

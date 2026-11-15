@@ -972,7 +972,7 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                                                  "desk_set_claude_notifications", "desk_set_antigravity_notifications",
                                                  "desk_set_agent_quota",
                                                  "desk_set_opencode_notifications", "desk_set_workbuddy_notifications",
-                                     "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view", "desk_speak", "desk_read_notification", "desk_dashboard_config", "desk_add_theme"})
+                                     "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view", "desk_speak", "desk_read_notification", "desk_dashboard_config", "desk_appearance_config", "desk_add_theme"})
                         for name in ("desk_list_devices", "desk_read_manual"):
                             self.assertIs(tools[name].annotations.readOnlyHint, True)
                             self.assertIs(tools[name].annotations.openWorldHint, False)

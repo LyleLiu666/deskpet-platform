@@ -26,7 +26,7 @@ from .adaptive_speed.runtime import AdaptiveRuntime
 from .agent_speed_probe import AgentSpeedProbe
 from .card_upload import MAX_FILE_BYTES, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
-from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS
+from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS, _appearance_theme, _appearance_wallpaper
 from .codex_hook import configure_codex_hooks, configure_hooks, hook_command, install_hook, remove_hook
 from .codex_quota import fetch_quota
 from .computer_metrics import ComputerMetrics, DisplayPreferences
@@ -572,6 +572,22 @@ class BoardSession:
                 type(quota) is not int or not 0<=quota<len(SOURCES)):
                 raise DeviceError('invalid_dashboard_config_reply')
             return {'status':'ok','metric':DASHBOARD_METRICS[current],'quota_source':SOURCES[quota]}
+
+    async def appearance_config(self,theme,wallpaper):
+        async with self.lock:
+            if self.client is None:return {'status':'not_connected','connection':self.snapshot}
+            if self.client.channel.capabilities.get('appearance_config')!=1:return {'status':'unsupported'}
+            reply=await self.client.appearance_config(theme=theme,wallpaper=wallpaper)
+            current,path=reply.get('theme'),reply.get('wallpaper')
+            try:
+                _appearance_theme(current)
+                if path=='':relative=''
+                elif isinstance(path,str) and path.startswith('/sdcard/Photos/'):relative='photos/'+path[15:]
+                elif isinstance(path,str) and path.startswith('/sdcard/Media/'):relative='media/'+path[14:]
+                else:raise ValueError('invalid path')
+                if _appearance_wallpaper(relative)!=path:raise ValueError('invalid path')
+            except (TypeError,ValueError,UnicodeError):raise DeviceError('invalid_appearance_config_reply') from None
+            return {'status':'ok','theme':current,'wallpaper':relative}
 
     async def publish_weather(self, snapshot, location, *, background_client=None):
         async with self.lock:
@@ -1594,6 +1610,12 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     ) -> dict[str, Any]:
         """查看或设置设备的数据展示项目和额度来源；每次只修改一项。设置在设备重启后保留。"""
         return await sessions.resolve(device_id).dashboard_config(metric,quota_source)
+
+    @server.tool()
+    async def desk_appearance_config(theme: str | None = None, wallpaper: str | None = None,
+                                     device_id: str | None = None) -> dict[str, Any]:
+        """查看或单独设置主题、壁纸；壁纸可用照片标识、photos/ 或 media/ 路径，空字符串清除。"""
+        return await sessions.resolve(device_id).appearance_config(theme,wallpaper)
 
     @server.tool()
     async def desk_add_theme(source: str, name: str = 'theme', device_id: str | None = None) -> dict[str, Any]:
