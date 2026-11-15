@@ -87,6 +87,21 @@ class WindowsStatuslineTests(unittest.TestCase):
         result = subprocess.run([shell[1], "/d", "/s", "/c", command], input=self.input, capture_output=True, timeout=15)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (7, b"old", b"err"))
 
+    def test_large_input_does_not_stall_or_modify_existing_statusline(self):
+        from deskpet_platform.quota_statusline import configure
+        from deskpet_platform.quota_capture import MAX_INPUT_BYTES, QuotaStore
+        shell = ("cmd", os.environ.get("COMSPEC", "cmd.exe"))
+        previous = subprocess.list2cmdline([sys.executable, str(self.old)])
+        self.settings.write_text(json.dumps({"statusLine": {"type": "command", "command": previous}}), encoding="utf-8")
+        configure(self.settings, "antigravity", self.store, enabled=True, windows_shell=shell)
+        command = json.loads(self.settings.read_text(encoding="utf-8"))["statusLine"]["command"]
+        payload = b"x" * (MAX_INPUT_BYTES + 17)
+        result = subprocess.run([shell[1], "/d", "/s", "/c", command], input=payload,
+                                capture_output=True, timeout=5)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (0, b"original:" + payload, b"original-error"))
+        self.assertFalse(QuotaStore(self.store).path.exists())
+
     def test_claude_with_git_bash_keeps_the_previous_status_line(self):
         bash = shutil.which("bash.exe")
         if not bash:
