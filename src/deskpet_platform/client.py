@@ -23,6 +23,7 @@ from .wifi_link import WifiLink
 SCREEN_PAGES = ("role", "home", "clock", "settings", "roles", "photos", "weather", "messages")
 DEFAULT_SCREEN_PAGES = ("role", "home", "clock", "photos")
 DASHBOARD_METRICS = ("speed", "quota", "computer", "auto", "weather")
+DASHBOARD_ROTATION = ("speed", "quota", "computer", "weather")
 
 def _appearance_theme(value):
     if not isinstance(value,str):raise ValueError('主题须为名称或 JSON 文件名。')
@@ -237,12 +238,22 @@ class Client:
         async with self._operation:
             return await self.channel.send("quota_source", source=SOURCES.index(source))
 
-    async def dashboard_config(self, metric=None):
+    async def dashboard_config(self, metric=None, *, rotation=None):
         if self.channel.capabilities.get('dashboard_config')!=1:
             raise DeviceError('dashboard_config_not_supported')
         if metric is not None and metric not in DASHBOARD_METRICS:
             raise ValueError('请选择有效的数据展示项目。')
+        if metric is not None and rotation is not None:
+            raise ValueError('请分别设置数据项目和轮播项目。')
+        if rotation is not None:
+            if (not isinstance(rotation,list) or not rotation or len(rotation)>len(DASHBOARD_ROTATION) or
+                any(not isinstance(item,str) or item not in DASHBOARD_ROTATION for item in rotation) or len(set(rotation))!=len(rotation)):
+                raise ValueError('轮播项目须为不重复的数据项目，至少选择一项。')
+            if self.channel.capabilities.get('dashboard_rotation')!=1:
+                raise DeviceError('dashboard_rotation_not_supported')
+            mask=sum(1<<DASHBOARD_ROTATION.index(item) for item in rotation)
         async with self._operation:
+            if rotation is not None:return await self.channel.send('dashboard_config',mode='set',rotation=mask)
             if metric is None:return await self.channel.send('dashboard_config',mode='status')
             return await self.channel.send('dashboard_config',mode='set',metric=DASHBOARD_METRICS.index(metric))
 

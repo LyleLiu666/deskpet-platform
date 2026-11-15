@@ -27,7 +27,7 @@ from .adaptive_speed.runtime import AdaptiveRuntime
 from .agent_speed_probe import AgentSpeedProbe
 from .card_upload import MAX_FILE_BYTES, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
-from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS, _appearance_theme, _appearance_wallpaper
+from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS, DASHBOARD_ROTATION, _appearance_theme, _appearance_wallpaper
 from .codex_hook import configure_codex_hooks, configure_hooks, hook_command, install_hook, remove_hook
 from .codex_quota import fetch_quota
 from .computer_metrics import ComputerMetrics, DisplayPreferences
@@ -573,19 +573,25 @@ class BoardSession:
             await self.client.set_view(page, make_default=make_default, clock_face=clock_face)
             return {"status": "shown", "page": page}
 
-    async def dashboard_config(self,metric,source):
-        if metric is not None and source is not None:
-            raise ValueError('请分别设置数据项目和额度来源。')
+    async def dashboard_config(self,metric,source,rotation=None):
+        if sum(value is not None for value in (metric,source,rotation))>1:
+            raise ValueError('请分别设置数据项目、额度来源和轮播项目。')
         async with self.lock:
             if self.client is None:return {'status':'not_connected','connection':self.snapshot}
             if self.client.channel.capabilities.get('dashboard_config')!=1:return {'status':'unsupported'}
+            if rotation is not None and self.client.channel.capabilities.get('dashboard_rotation')!=1:return {'status':'unsupported'}
             if source is not None:await self.client.select_quota_source(source)
-            reply=await self.client.dashboard_config(metric)
+            reply=await self.client.dashboard_config(metric,rotation=rotation)
             current,quota=reply.get('metric'),reply.get('quota_source')
             if (type(current) is not int or not 0<=current<len(DASHBOARD_METRICS) or
                 type(quota) is not int or not 0<=quota<len(SOURCES)):
                 raise DeviceError('invalid_dashboard_config_reply')
-            return {'status':'ok','metric':DASHBOARD_METRICS[current],'quota_source':SOURCES[quota]}
+            result={'status':'ok','metric':DASHBOARD_METRICS[current],'quota_source':SOURCES[quota]}
+            if self.client.channel.capabilities.get('dashboard_rotation')==1:
+                mask=reply.get('rotation')
+                if type(mask) is not int or not 1<=mask<=15:raise DeviceError('invalid_dashboard_rotation_reply')
+                result['rotation']=[name for index,name in enumerate(DASHBOARD_ROTATION) if mask & (1<<index)]
+            return result
 
     async def appearance_config(self,theme,wallpaper):
         async with self.lock:
@@ -1625,9 +1631,10 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         metric: Literal['speed','quota','computer','auto','weather'] | None = None,
         quota_source: Literal['codex','claude_code','antigravity_gemini','antigravity_third_party'] | None = None,
         device_id: str | None = None,
+        rotation: list[Literal['speed','quota','computer','weather']] | None = None,
     ) -> dict[str, Any]:
-        """查看或设置设备的数据展示项目和额度来源；每次只修改一项。设置在设备重启后保留。"""
-        return await sessions.resolve(device_id).dashboard_config(metric,quota_source)
+        """查看或分别设置数据项目、额度来源、自动轮播的项目；至少选一项，设置在设备重启后保留。"""
+        return await sessions.resolve(device_id).dashboard_config(metric,quota_source,rotation)
 
     @server.tool()
     async def desk_appearance_config(theme: str | None = None, wallpaper: str | None = None,

@@ -31,3 +31,21 @@ class DashboardConfig(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await session.dashboard_config(None,'claude_code'),{'status':'ok','metric':'weather','quota_source':'claude_code'})
             self.assertEqual(client.channel.send.await_args_list[0].args,('quota_source',))
             with self.assertRaises(ValueError):await session.dashboard_config('speed','codex')
+
+    async def test_rotation_selection_and_older_device_compatibility(self):
+        client=self.client();client.channel.capabilities['dashboard_rotation']=1
+        client.channel.send.return_value={'metric':3,'quota_source':0,'rotation':10}
+        with TemporaryDirectory() as folder:
+            session=BoardSession(Path(folder)/'device.json',no_token_probe=True);session.client=client
+            value=await session.dashboard_config(None,None,['quota','weather'])
+            self.assertEqual(value['rotation'],['quota','weather'])
+            client.channel.send.assert_awaited_with('dashboard_config',mode='set',rotation=10)
+            for invalid in ([],['speed','speed'],['auto'],['wrong']):
+                with self.assertRaises(ValueError):await session.dashboard_config(None,None,invalid)
+            with self.assertRaises(ValueError):await session.dashboard_config('auto',None,['speed'])
+            client.channel.send.return_value={'metric':3,'quota_source':0,'rotation':0}
+            with self.assertRaises(DeviceError):await session.dashboard_config(None,None)
+            client.channel.capabilities.pop('dashboard_rotation')
+            client.channel.send.return_value={'metric':3,'quota_source':0}
+            self.assertEqual((await session.dashboard_config(None,None))['metric'],'auto')
+            self.assertEqual(await session.dashboard_config(None,None,['speed']),{'status':'unsupported'})
