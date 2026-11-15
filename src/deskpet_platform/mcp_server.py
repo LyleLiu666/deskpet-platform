@@ -25,7 +25,7 @@ from .adaptive_speed.runtime import AdaptiveRuntime
 from .agent_speed_probe import AgentSpeedProbe
 from .card_upload import MAX_FILE_BYTES, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
-from .client import Client, SCREEN_PAGES
+from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS
 from .codex_hook import configure_codex_hooks, configure_hooks, hook_command, install_hook, remove_hook
 from .codex_quota import fetch_quota
 from .computer_metrics import ComputerMetrics, DisplayPreferences
@@ -533,6 +533,20 @@ class BoardSession:
                 return {"status": "unsupported"}
             await self.client.set_view(page, make_default=make_default, clock_face=clock_face)
             return {"status": "shown", "page": page}
+
+    async def dashboard_config(self,metric,source):
+        if metric is not None and source is not None:
+            raise ValueError('请分别设置数据项目和额度来源。')
+        async with self.lock:
+            if self.client is None:return {'status':'not_connected','connection':self.snapshot}
+            if self.client.channel.capabilities.get('dashboard_config')!=1:return {'status':'unsupported'}
+            if source is not None:await self.client.select_quota_source(source)
+            reply=await self.client.dashboard_config(metric)
+            current,quota=reply.get('metric'),reply.get('quota_source')
+            if (type(current) is not int or not 0<=current<len(DASHBOARD_METRICS) or
+                type(quota) is not int or not 0<=quota<len(SOURCES)):
+                raise DeviceError('invalid_dashboard_config_reply')
+            return {'status':'ok','metric':DASHBOARD_METRICS[current],'quota_source':SOURCES[quota]}
 
     async def publish_weather(self, snapshot, location, *, background_client=None):
         async with self.lock:
@@ -1512,6 +1526,15 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         """打开指定页面，可保存默认首页，或选择时钟表盘 0 到 5。"""
         session = sessions.resolve(device_id)
         return await session.set_view(page, make_default, clock_face)
+
+    @server.tool()
+    async def desk_dashboard_config(
+        metric: Literal['speed','quota','computer','auto','weather'] | None = None,
+        quota_source: Literal['codex','claude_code','antigravity_gemini','antigravity_third_party'] | None = None,
+        device_id: str | None = None,
+    ) -> dict[str, Any]:
+        """查看或设置设备的数据展示项目和额度来源；每次只修改一项。设置在设备重启后保留。"""
+        return await sessions.resolve(device_id).dashboard_config(metric,quota_source)
 
     @server.tool()
     async def desk_add_photo(source: str, device_id: str | None = None) -> dict[str, Any]:

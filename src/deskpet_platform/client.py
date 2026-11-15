@@ -22,6 +22,7 @@ from .wifi_link import WifiLink
 
 SCREEN_PAGES = ("role", "home", "clock", "settings", "roles", "photos", "weather", "messages")
 DEFAULT_SCREEN_PAGES = ("role", "home", "clock", "photos")
+DASHBOARD_METRICS = ("speed", "quota", "computer", "auto", "weather")
 
 
 class Client:
@@ -214,6 +215,15 @@ class Client:
             raise ValueError("额度来源无效。")
         async with self._operation:
             return await self.channel.send("quota_source", source=SOURCES.index(source))
+
+    async def dashboard_config(self, metric=None):
+        if self.channel.capabilities.get('dashboard_config')!=1:
+            raise DeviceError('dashboard_config_not_supported')
+        if metric is not None and metric not in DASHBOARD_METRICS:
+            raise ValueError('请选择有效的数据展示项目。')
+        async with self._operation:
+            if metric is None:return await self.channel.send('dashboard_config',mode='status')
+            return await self.channel.send('dashboard_config',mode='set',metric=DASHBOARD_METRICS.index(metric))
 
     async def set_role_auto(self, enabled):
         if self.channel.capabilities.get("token_stats") != 1:
