@@ -19,6 +19,10 @@ from test_multi_device_flow import FIRST, SECOND, SyntheticBoard
 
 
 class NotificationPlatformTests(unittest.TestCase):
+    def test_windows_allows_only_verified_claude_hook(self):
+        require_notification_hooks(True, "nt", "claude-hook")
+        with self.assertRaisesRegex(ValueError, "Windows"):
+            require_notification_hooks(True, "nt", "codex-hook")
     def test_windows_install_is_refused_before_unverified_hooks_are_written(self):
         with self.assertRaisesRegex(ValueError, "Windows"):
             require_notification_hooks(True, "nt")
@@ -100,9 +104,8 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
     async def test_windows_notification_setup_does_not_touch_user_settings(self):
         server = create_server(self.config, no_token_probe=True)
         with patch("deskpet_platform.mcp_server.require_notification_hooks",
-                   side_effect=lambda enabled, platform: require_notification_hooks(enabled, "nt")):
+                   side_effect=lambda enabled, platform, hook=None: require_notification_hooks(enabled, "nt", hook)):
             for name, arguments in (("desk_enable_codex_notifications", {}),
-                                    ("desk_set_claude_notifications", {"enabled": True}),
                                     ("desk_set_antigravity_notifications", {"enabled": True})):
                 with self.subTest(name=name), self.assertRaisesRegex(ToolError, "Windows"):
                     await server.call_tool(name, arguments)

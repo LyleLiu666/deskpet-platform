@@ -8,6 +8,32 @@ import unittest
 
 @unittest.skipUnless(os.name == "nt", "Windows onboarding rehearsal")
 class WindowsScenarioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_claude_notifications_are_configured_without_replacing_existing_settings(self):
+        import json
+        from unittest.mock import patch
+        from deskpet_platform.mcp_server import create_server
+        with tempfile.TemporaryDirectory(prefix="DeskPet Claude settings ") as directory:
+            root = Path(directory)
+            settings = root / "claude" / "settings.json"
+            settings.parent.mkdir()
+            original = {"other": {"keep": True}, "hooks": {"PreToolUse": [
+                {"matcher": "OtherTool", "hooks": [{"type": "command", "command": "existing"}]}]}}
+            settings.write_text(json.dumps(original), encoding="utf-8")
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(settings.parent)}):
+                server = create_server(root / "device.json", no_token_probe=True)
+                result = await server.call_tool("desk_set_claude_notifications", {"enabled": True})
+                self.assertTrue(result[1]["added"])
+                configured = json.loads(settings.read_text(encoding="utf-8"))
+                self.assertEqual(configured["other"], original["other"])
+                self.assertEqual(configured["hooks"]["PreToolUse"][0], original["hooks"]["PreToolUse"][0])
+                generated = configured["hooks"]["Stop"][-1]["hooks"][0]["command"]
+                self.assertTrue(generated.startswith("powershell.exe "))
+                again = await server.call_tool("desk_set_claude_notifications", {"enabled": True})
+                self.assertFalse(again[1]["added"])
+                removed = await server.call_tool("desk_set_claude_notifications", {"enabled": False})
+                self.assertTrue(removed[1]["removed"])
+                self.assertEqual(json.loads(settings.read_text(encoding="utf-8")), original)
+
     async def test_pairing_registry_mcp_and_private_agent_state(self):
         from deskpet_platform.device_registry import DeviceRegistry
         from deskpet_platform.mcp_server import create_server

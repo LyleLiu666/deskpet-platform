@@ -24,6 +24,9 @@ CLI_EVENT_MATCHERS = {event: f"^{codex_feedback.CLI_TOOL}$" for event in ("PreTo
 
 
 def hook_command(config, hook="codex-hook", *arguments):
+    if os.name == "nt" and hook == "claude-hook":
+        from .windows_hook_command import build
+        return build(sys.executable, ["-m", "deskpet_platform", "--config", str(config), hook, *arguments])
     return shlex.join([sys.executable, "-m", "deskpet_platform", "--config", str(config), hook, *arguments])
 
 
@@ -158,7 +161,7 @@ def _remove_from_config(config, command, matchers):
     return removed
 
 
-def configure_codex_hooks(path, command, previous_commands, *, enabled):
+def configure_hooks(path, command, previous_commands, *, enabled, matchers, private):
     """Publish a single validated update for the shared command and all old commands."""
     path = Path(path)
     if not enabled and not path.exists() and not path.is_symlink():
@@ -168,16 +171,20 @@ def configure_codex_hooks(path, command, previous_commands, *, enabled):
     descriptor = os.open(path.with_name(f".{path.name}.deskpet.lock"), flags, 0o600)
     try:
         acquire(descriptor)
-        config, original = _load(path)
-        changed = (_add_to_config(config, command, EVENT_MATCHERS) if enabled else
-                   _remove_from_config(config, command, EVENT_MATCHERS))
+        config, original = _load(path, private=private)
+        changed = (_add_to_config(config, command, matchers) if enabled else
+                   _remove_from_config(config, command, matchers))
         for previous in previous_commands:
-            changed = _remove_from_config(config, previous, EVENT_MATCHERS) or changed
+            changed = _remove_from_config(config, previous, matchers) or changed
         if changed:
-            _write(path, config, original=original)
+            _write(path, config, original=original, private=private)
         return changed
     finally:
         os.close(descriptor)
+
+
+def configure_codex_hooks(path, command, previous_commands, *, enabled):
+    return configure_hooks(path, command, previous_commands, enabled=enabled, matchers=EVENT_MATCHERS, private=True)
 
 
 def _remove_groups(existing, command):

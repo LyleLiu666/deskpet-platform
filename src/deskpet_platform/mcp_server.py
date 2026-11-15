@@ -7,6 +7,7 @@ import hashlib
 from importlib.resources import files
 import json
 import os
+import shutil
 from pathlib import Path
 import tempfile
 import time
@@ -25,7 +26,7 @@ from .agent_speed_probe import AgentSpeedProbe
 from .card_upload import MAX_FILE_BYTES, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
 from .client import Client, SCREEN_PAGES
-from .codex_hook import configure_codex_hooks, hook_command, install_hook, remove_hook
+from .codex_hook import configure_codex_hooks, configure_hooks, hook_command, install_hook, remove_hook
 from .codex_quota import fetch_quota
 from .computer_metrics import ComputerMetrics, DisplayPreferences
 from .device_registry import DeviceRegistry
@@ -54,9 +55,12 @@ WIFI_FALLBACK_TIMEOUT = 5
 MAX_CODEX_ALLOWANCE_AGE = 600
 
 
-def require_notification_hooks(enabled, platform):
+def require_notification_hooks(enabled, platform, hook=None):
     if enabled and platform == "nt":
-        raise ValueError("Windows 的 Agent 提醒接入尚未验证；未修改 Agent 设置。")
+        if hook != "claude-hook":
+            raise ValueError("Windows 的此 Agent 提醒接入尚未验证；未修改 Agent 设置。")
+        if os.name == "nt" and not shutil.which("powershell.exe"):
+            raise ValueError("未找到 Windows PowerShell；未修改 Agent 设置。")
 
 
 class CardFile(BaseModel):
@@ -1305,7 +1309,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         return command, previous
 
     async def configure_notifications(enabled, device_id, hook, configure, *arguments):
-        require_notification_hooks(enabled, os.name)
+        require_notification_hooks(enabled, os.name, hook)
         command, previous = notification_commands(device_id, hook, *arguments)
 
         def apply():
@@ -1693,8 +1697,11 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         from .claude_feedback import MATCHERS, settings_path
 
         path = settings_path()
-        changed = await configure_notifications(enabled, device_id, "claude-hook",
-            lambda command, *, enabled: (install_hook if enabled else remove_hook)(path, command, matchers=MATCHERS, private=False))
+        require_notification_hooks(enabled, os.name, "claude-hook")
+        command, previous = notification_commands(device_id, "claude-hook")
+        async with hook_configuration_lock:
+            changed = await asyncio.to_thread(configure_hooks, path, command, previous, enabled=enabled,
+                                               matchers=MATCHERS, private=False)
         if enabled:
             return {"status": "configured", "added": changed, "config": str(path),
                     "next_step": "打开新的 Claude Code 会话验证提醒。"}

@@ -1,4 +1,4 @@
-"""Experimental fail-open Windows hook proxy; not installed in user settings yet."""
+"""Fail-open Windows hook proxy that does not persist incoming event data."""
 import base64
 import subprocess
 
