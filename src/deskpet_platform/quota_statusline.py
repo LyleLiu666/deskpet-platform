@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import stat
 import sys
 import tempfile
@@ -147,6 +148,8 @@ def configure(path, source, store, *, enabled, executable=None, windows_shell=No
             len(windows_shell) != 2 or windows_shell[0] not in ("bash", "powershell", "cmd") or
             not isinstance(windows_shell[1], str) or not windows_shell[1]):
         raise ValueError("Windows 状态栏命令环境无效，未修改 Agent 设置。")
+    if os.name == "nt" and enabled and not shutil.which("powershell.exe"):
+        raise ValueError("未找到 Windows PowerShell，未修改 Agent 设置。")
     if source not in READERS:
         raise ValueError("不支持的额度来源。")
     path, store = Path(path), Path(store).expanduser().resolve()
