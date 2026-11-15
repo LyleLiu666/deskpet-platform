@@ -385,6 +385,22 @@ class CardUploadTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError,'desk_add_photo'):await session.upload_files(items)
             client.upload_file.assert_not_awaited()
 
+    async def test_named_theme_upload_is_stable_and_restricted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'theme.json';content=b'{"paper":"#ffffff"}';source.write_bytes(content)
+            written={}
+            async def upload(path,source):
+                written[path]=Path(source).read_bytes();return {'path':path,'bytes':len(written[path])}
+            client=SimpleNamespace(channel=SimpleNamespace(capabilities={'theme_json_upload':1,'card_restricted_paths':1}),upload_file=upload)
+            session=BoardSession(root/'device.json',no_token_probe=True);session.client=client
+            result=await session.add_theme(str(source),'forest')
+            path='themes/forest-'+hashlib.sha256(content).hexdigest()[:16]+'.json'
+            self.assertEqual(result['status'],'completed');self.assertEqual(written,{path:content})
+            for invalid in ('../x','x/y','', 'a'*25,'名字'):
+                with self.assertRaises(ValueError):await session.add_theme(str(source),invalid)
+            source.write_bytes(b'x'*2049)
+            with self.assertRaises(ValueError):await session.add_theme(str(source),'test')
+
     async def test_native_photo_is_not_sent_to_a_replaced_connection(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);photo=root/'photo.png';Image.new('RGB',(20,20),'red').save(photo)

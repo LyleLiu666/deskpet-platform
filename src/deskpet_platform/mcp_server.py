@@ -976,8 +976,11 @@ class BoardSession:
             if expected_client is not None and client is not expected_client:
                 return {"status": "connection_changed", "completed": [], "connection": self.snapshot}
             if client.channel.capabilities.get('card_restricted_paths')==1:
-                if any(not re.fullmatch(r'photos/p-[0-9a-f]{16}\.jpg',path) for _,path in checked):
-                    raise ValueError('此设备的普通素材请用 desk_add_photo 导入图片；角色请用 desk_install_role。')
+                def supported(path):
+                    return (client.channel.capabilities.get('photo_jpeg_upload')==1 and re.fullmatch(r'photos/p-[0-9a-f]{16}\.jpg',path) or
+                            client.channel.capabilities.get('theme_json_upload')==1 and re.fullmatch(r'themes/[A-Za-z0-9][A-Za-z0-9_-]{0,23}-[0-9a-f]{16}\.json',path))
+                if any(not supported(path) for _,path in checked):
+                    raise ValueError('此设备请用 desk_add_photo 导入图片、desk_add_theme 导入主题，或用 desk_install_role 安装角色。')
             completed = []
             for source, path in checked:
                 try:
@@ -1241,6 +1244,24 @@ class BoardSession:
             if self.client is None:
                 return {"status": "not_connected", "connection": self.snapshot}
             return await self.client.clear_image() if source is None else await self.client.show_image(source)
+
+    async def add_theme(self,source,name):
+        if not isinstance(name,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,23}',name):
+            raise ValueError('主题名称请使用 1 至 24 位英文字母、数字、下划线或连字符，并以字母或数字开头。')
+        path=Path(source).expanduser()
+        if not path.is_absolute() or not path.is_file():raise ValueError('请提供本机主题 JSON 文件的绝对路径。')
+        client=self.client
+        if client is None:return {'status':'not_connected','connection':self.snapshot}
+        if client.channel.capabilities.get('theme_json_upload')!=1:return {'status':'unsupported'}
+        def read():
+            with path.open('rb') as stream:return stream.read(2049)
+        payload=await asyncio.to_thread(read)
+        if not 0<len(payload)<=2048:raise ValueError('主题文件须为 1 至 2048 字节。')
+        filename=f'{name}-{hashlib.sha256(payload).hexdigest()[:16]}.json'
+        with tempfile.TemporaryDirectory(prefix='deskpet-theme-') as directory:
+            staged=Path(directory)/'theme.json';staged.write_bytes(payload)
+            item=CardFile(source=str(staged),path=f'themes/{filename}')
+            return {'theme':filename,**await self.upload_files([item],expected_client=client)}
 
     async def add_photo(self, source):
         path = Path(source).expanduser()
@@ -1549,6 +1570,11 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     ) -> dict[str, Any]:
         """查看或设置设备的数据展示项目和额度来源；每次只修改一项。设置在设备重启后保留。"""
         return await sessions.resolve(device_id).dashboard_config(metric,quota_source)
+
+    @server.tool()
+    async def desk_add_theme(source: str, name: str = 'theme', device_id: str | None = None) -> dict[str, Any]:
+        """导入设备配色 JSON；名称可用 1 至 24 位英文字母、数字、下划线或连字符。设备校验可读性。"""
+        return await sessions.resolve(device_id).add_theme(source,name)
 
     @server.tool()
     async def desk_add_photo(source: str, device_id: str | None = None) -> dict[str, Any]:
