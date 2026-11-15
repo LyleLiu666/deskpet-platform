@@ -142,7 +142,7 @@ def configure(path, source, store, *, enabled, executable=None, windows_shell=No
     The caller must use the Agent's actual user settings path.  Project or
     administrator settings may override these settings and require verification.
     """
-    if os.name == "nt" and windows_shell is None:
+    if os.name == "nt" and enabled and windows_shell is None:
         raise ValueError("Windows 状态栏接入尚未验证，未修改 Agent 设置。")
     if windows_shell is not None and (os.name != "nt" or not isinstance(windows_shell, (tuple, list)) or
             len(windows_shell) != 2 or windows_shell[0] not in ("bash", "powershell", "cmd") or

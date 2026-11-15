@@ -57,7 +57,9 @@ class WindowsClaudeClientRehearsal(unittest.TestCase):
         node = shutil.which("node.exe")
         cli = Path(os.environ["DESKPET_SYNTHETIC_CLAUDE_CLI"])
         bash = shutil.which("bash.exe")
-        self.assertTrue(node and cli.is_file() and bash, "fixture requires Node, Claude CLI and Git Bash")
+        self.assertTrue(node and cli.is_file() and bash,
+                        f"fixture prerequisites: node={bool(node)} cli={cli.is_file()} bash={bool(bash)}; "
+                        f"package entries={[p.name for p in cli.parent.iterdir()] if cli.parent.is_dir() else []}")
         with tempfile.TemporaryDirectory(prefix="DeskPet Claude fixture ") as temporary:
             root = Path(temporary)
             project, profile = root / "project with spaces", root / "profile"

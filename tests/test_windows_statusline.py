@@ -50,6 +50,17 @@ class WindowsStatuslineTests(unittest.TestCase):
         self.assertTrue(configure(self.settings,source,self.store,enabled=False,windows_shell=shell))
         self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")),original)
 
+    def test_removal_works_even_if_shell_cannot_be_detected_anymore(self):
+        from unittest.mock import patch
+        from deskpet_platform.quota_statusline import configure
+        original = {"statusLine": {"type": "command", "command": "echo old"}}
+        self.settings.write_text(json.dumps(original), encoding="utf-8")
+        shell = ("cmd", os.environ.get("COMSPEC", "cmd.exe"))
+        configure(self.settings, "antigravity", self.store, enabled=True, windows_shell=shell)
+        with patch("deskpet_platform.quota_statusline.shutil.which", return_value=None):
+            self.assertTrue(configure(self.settings, "antigravity", self.store, enabled=False))
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")), original)
+
     def test_does_not_replace_settings_when_windows_powershell_is_unavailable(self):
         from unittest.mock import patch
         from deskpet_platform.quota_statusline import configure
