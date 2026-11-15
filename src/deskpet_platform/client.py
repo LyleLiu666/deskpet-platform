@@ -487,12 +487,16 @@ class Client:
             return await self.channel.send("message_view", mode=mode, **fields)
 
     async def sync_messages(self, records):
+        records = list(records)
         rows = [{"id": item["id"], "created": int(item["created_at"]), "seen": item["seen"],
                  "title": _notice_title(item["title"]).hex()} for item in records]
         async with self._operation:
             await self.channel.send("notice_cache_begin", count=len(rows))
-            for row in rows:
+            for record, row in zip(records, rows):
                 await self.channel.send("notice_cache_row", **row)
+                if self.channel.capabilities.get("message_metadata") == 1:
+                    await self.channel.send("notice_cache_info", id=record["id"], title=record["title"],
+                                            source=record["source"], category=record["category"])
             await self.channel.send("notice_cache_commit")
 
     async def show_text(self, text: str):

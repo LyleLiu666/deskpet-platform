@@ -33,6 +33,27 @@ KEY = bytes(range(32))
 
 
 class PlatformTests(unittest.IsolatedAsyncioTestCase):
+    async def test_message_sync_sends_full_metadata_only_when_supported(self):
+        client = Client(DeviceConfig(DEVICE, KEY))
+        client.channel = AsyncMock()
+        record = {"id": 27, "created_at": 1700000000, "seen": False,
+                  "title": "任务完成" * 16, "source": "codex", "category": "completed"}
+        client.channel.capabilities = {"message_cache": 1}
+        await client.sync_messages([record])
+        self.assertEqual([call.args[0] for call in client.channel.send.await_args_list],
+                         ["notice_cache_begin", "notice_cache_row", "notice_cache_commit"])
+        client.channel.send.reset_mock()
+        client.channel.capabilities["message_metadata"] = 1
+        await client.sync_messages([record])
+        calls = client.channel.send.await_args_list
+        self.assertEqual([call.args[0] for call in calls],
+                         ["notice_cache_begin", "notice_cache_row", "notice_cache_info", "notice_cache_commit"])
+        self.assertEqual(calls[2].kwargs, {"id": 27, "title": record["title"],
+                                          "source": "codex", "category": "completed"})
+        envelope = dict(epoch="a" * 48, seq=4294967295, type="notice_cache_info", **calls[2].kwargs)
+        envelope.update(title="😀" * 64, source="a" * 32)
+        self.assertLessEqual(len(("P1," + json.dumps(envelope, ensure_ascii=True, separators=(",", ":")) + "\n").encode()), 1024)
+
     async def test_text_delivery_reports_view_change_without_losing_link(self):
         client = Client(DeviceConfig(DEVICE, KEY))
         client.channel = AsyncMock()
