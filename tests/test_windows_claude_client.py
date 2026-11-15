@@ -109,10 +109,14 @@ class WindowsClaudeClientRehearsal(unittest.TestCase):
                 try:
                     deadline = time.monotonic() + 45
                     quota = QuotaStore(store)
+                    trust_selected_at = None
                     trusted = False
                     while time.monotonic() < deadline and process.isalive():
-                        if not trusted and "Yes," in "".join(output) and "trust" in "".join(output):
-                            process.write("\x1b[B\r")
+                        if trust_selected_at is None and "Yes," in "".join(output) and "trust" in "".join(output):
+                            process.write("\x1b[B")
+                            trust_selected_at = time.monotonic()
+                        elif trust_selected_at is not None and not trusted and time.monotonic() - trust_selected_at > .5:
+                            process.write("\r")
                             trusted = True
                         if observed.is_file() and quota.read("claude_code", time.time()) is not None and server.paths:
                             break
