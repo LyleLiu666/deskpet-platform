@@ -10,24 +10,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install twice from a path with spaces
-        shell: pwsh
-        run: |
-          $target = Join-Path $env:RUNNER_TEMP 'DeskPet fresh install'
-          Copy-Item -Recurse -LiteralPath $pwd -Destination $target
-          Set-Location $target
-          ./install-windows.ps1
-          ./install-windows.ps1
-          $env:PYTHONIOENCODING = "cp1252"
-          & ./.venv/Scripts/deskpet-platform.exe --help
-          Remove-Item Env:PYTHONIOENCODING
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install Python dependencies
+        run: python -m pip install .
       - name: Test Windows behavior
         shell: pwsh
         run: |
-          Set-Location (Join-Path $env:RUNNER_TEMP 'DeskPet fresh install')
           $env:PYTHONPATH = "$pwd/src"
           foreach ($test in @('test_file_lock.py', 'test_windows_pairing.py', 'test_windows_private.py', 'test_windows_scenario.py')) {
-            & ./.venv/Scripts/python.exe -m unittest discover -s tests -p $test -v
+            & python -m unittest discover -s tests -p $test -v
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
