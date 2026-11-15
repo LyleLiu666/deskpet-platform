@@ -24,7 +24,7 @@ CLI_EVENT_MATCHERS = {event: f"^{codex_feedback.CLI_TOOL}$" for event in ("PreTo
 
 
 def hook_command(config, hook="codex-hook", *arguments):
-    if os.name == "nt" and hook == "claude-hook":
+    if os.name == "nt" and hook in ("claude-hook", "codex-hook"):
         from .windows_hook_command import build
         return build(sys.executable, ["-m", "deskpet_platform", "--config", str(config), hook, *arguments])
     return shlex.join([sys.executable, "-m", "deskpet_platform", "--config", str(config), hook, *arguments])

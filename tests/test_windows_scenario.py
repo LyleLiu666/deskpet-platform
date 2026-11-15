@@ -8,6 +8,30 @@ import unittest
 
 @unittest.skipUnless(os.name == "nt", "Windows onboarding rehearsal")
 class WindowsScenarioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_codex_notifications_are_configured_without_replacing_existing_hooks(self):
+        import json
+        from unittest.mock import patch
+        from deskpet_platform.mcp_server import create_server
+        with tempfile.TemporaryDirectory(prefix="DeskPet Codex settings ") as directory:
+            root = Path(directory)
+            profile = root / "codex"
+            profile.mkdir()
+            path = profile / "hooks.json"
+            original = {"other": True, "hooks": {"Stop": [
+                {"hooks": [{"type": "command", "command": "existing"}]}]}}
+            path.write_text(json.dumps(original), encoding="utf-8")
+            with patch.dict(os.environ, {"CODEX_HOME": str(profile)}):
+                server = create_server(root / "device.json", no_token_probe=True)
+                enabled = await server.call_tool("desk_enable_codex_notifications", {})
+                self.assertTrue(enabled[1]["added"])
+                configured = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(configured["other"], True)
+                self.assertEqual(configured["hooks"]["Stop"][0], original["hooks"]["Stop"][0])
+                self.assertTrue(configured["hooks"]["Stop"][-1]["hooks"][0]["command"].startswith("powershell.exe "))
+                self.assertFalse((await server.call_tool("desk_enable_codex_notifications", {}))[1]["added"])
+                self.assertTrue((await server.call_tool("desk_disable_codex_notifications", {}))[1]["removed"])
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+
     async def test_claude_notifications_are_configured_without_replacing_existing_settings(self):
         import json
         from unittest.mock import patch

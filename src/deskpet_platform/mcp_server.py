@@ -57,7 +57,7 @@ MAX_CODEX_ALLOWANCE_AGE = 600
 
 def require_notification_hooks(enabled, platform, hook=None):
     if enabled and platform == "nt":
-        if hook != "claude-hook":
+        if hook not in ("claude-hook", "codex-hook"):
             raise ValueError("Windows 的此 Agent 提醒接入尚未验证；未修改 Agent 设置。")
         if os.name == "nt" and not shutil.which("powershell.exe"):
             raise ValueError("未找到 Windows PowerShell；未修改 Agent 设置。")
@@ -1676,7 +1676,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     @server.tool()
     async def desk_enable_codex_notifications(device_id: str | None = None) -> dict[str, Any]:
         """安装一个 Codex 钩子，为所有已配对设备启用完成和待应答提醒。"""
-        require_notification_hooks(True, os.name)
+        require_notification_hooks(True, os.name, "codex-hook")
         path = codex_home() / "hooks.json"
         command, previous = notification_commands(device_id, "codex-hook")
         added = await asyncio.to_thread(configure_codex_hooks, path, command, previous, enabled=True)
