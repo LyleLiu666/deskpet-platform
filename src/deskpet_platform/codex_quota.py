@@ -78,7 +78,7 @@ async def fetch_quota():
 
     try:
         async with asyncio.timeout(10):
-            await send('initialize', id=1, params={'clientInfo': {'name': 'deskpet_platform', 'version': '0.1.0'}})
+            await send('initialize', id=1, params={'clientInfo': {'name': 'deskpet_platform', 'version': '0.1.0rc1'}})
             if not await receive(1):
                 return None
             await send('initialized')

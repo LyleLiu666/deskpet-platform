@@ -90,6 +90,12 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.second_path = registry.path_for(SECOND.device_id)
         self.inbox = NotificationStore(self.root / "notifications.sqlite3")
         self.second = NotificationStore(self.second_path.parent / "notifications.sqlite3", source=self.inbox)
+        self.addAsyncCleanup(self._drain_background_operations)
+
+    async def _drain_background_operations(self):
+        # Cancelled asyncio.to_thread calls may still have SQLite files open.
+        # Finish those threads before removing the isolated Windows fixture.
+        await asyncio.get_running_loop().shutdown_default_executor()
 
     async def wait_for(self, condition, timeout=8):
         async with asyncio.timeout(timeout):
