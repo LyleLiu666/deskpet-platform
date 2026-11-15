@@ -114,6 +114,17 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["detail_crc"], [])
         self.assertNotIn("cache_detail_begin", [command for command, _ in self.channel.commands])
 
+    async def test_invalid_dismissal_is_never_acknowledged(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
+        self.store.add_agent_event("codex", "session", "q", "response", "Project")
+        self.channel.receipts = [{"has_receipt": True, "id": "p-1-forged", "content_revision": 1,
+                                  "feedback_dismissal": True}]
+        await self.sync()
+        self.assertEqual(len(self.store.cache_records(active_only=True)), 1)
+        operations = [command for command, _ in self.channel.commands]
+        self.assertIn("cache_abort", operations)
+        self.assertNotIn("cache_receipt_ack", operations)
+
     async def test_local_inbox_keeps_one_question_per_session_and_drops_read_completions(self):
         self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1)
         old = self.store.add_agent_event("codex", "same-session", "old", "response", "Old", parent_turn="turn-1")
