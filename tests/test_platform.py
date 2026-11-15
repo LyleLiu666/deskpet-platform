@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 import hashlib
 import hmac
 from pathlib import Path
@@ -934,6 +935,7 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                                                  "desk_set_brightness", "desk_calibrate_touch", "desk_cancel_touch_calibration",
                                                  "desk_enable_codex_notifications", "desk_disable_codex_notifications",
                                                  "desk_set_claude_notifications", "desk_set_antigravity_notifications",
+                                                 "desk_set_agent_quota",
                                                  "desk_set_opencode_notifications", "desk_set_workbuddy_notifications",
                                                  "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view"})
                         for name in ("desk_list_devices", "desk_read_manual"):
@@ -954,30 +956,37 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(resource.contents[0].text, result.content[0].text)
                         status = await session.call_tool("desk_status")
                         self.assertEqual(status.structuredContent["connection"], "not_paired")
-                        configured = await session.call_tool("desk_set_opencode_notifications", {"enabled": True})
-                        self.assertFalse(configured.isError)
-                        plugin = Path(configured.structuredContent["config"])
-                        self.assertEqual(plugin.parent, Path(directory) / "config" / "opencode" / "plugins")
-                        self.assertTrue(plugin.is_file())
-                        disabled = await session.call_tool("desk_set_opencode_notifications", {"enabled": False})
-                        self.assertFalse(disabled.isError)
-                        self.assertFalse(plugin.exists())
-                        settings = Path(directory) / "home/.workbuddy-ai/settings.json"
-                        settings.parent.mkdir(parents=True)
-                        existing = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "existing"}]}]}}
-                        settings.write_text(json.dumps(existing))
-                        workbuddy = {"edition": "workbuddy_ai", "enabled": True}
-                        configured = await session.call_tool("desk_set_workbuddy_notifications", workbuddy)
-                        self.assertFalse(configured.isError)
-                        self.assertEqual(Path(configured.structuredContent["config"]), settings)
-                        hooks = json.loads(settings.read_text())["hooks"]
-                        self.assertEqual(hooks["Stop"][0], existing["hooks"]["Stop"][0])
-                        self.assertTrue(hooks["Stop"][1]["hooks"][0]["command"].endswith("workbuddy-hook --edition workbuddy_ai"))
-                        self.assertEqual(hooks["PreToolUse"][0]["matcher"], "AskUserQuestion")
-                        self.assertEqual(hooks["Notification"][0]["matcher"], "^permission_prompt$")
-                        disabled = await session.call_tool("desk_set_workbuddy_notifications", {**workbuddy, "enabled": False})
-                        self.assertFalse(disabled.isError)
-                        self.assertEqual(json.loads(settings.read_text()), existing)
+                        if os.name == "nt":
+                            for name, arguments in (("desk_set_opencode_notifications", {"enabled": True}),
+                                                    ("desk_set_workbuddy_notifications", {"enabled": True})):
+                                result = await session.call_tool(name, arguments)
+                                self.assertTrue(result.isError)
+                                self.assertIn("Windows", result.content[0].text)
+                        else:
+                            configured = await session.call_tool("desk_set_opencode_notifications", {"enabled": True})
+                            self.assertFalse(configured.isError)
+                            plugin = Path(configured.structuredContent["config"])
+                            self.assertEqual(plugin.parent, Path(directory) / "config" / "opencode" / "plugins")
+                            self.assertTrue(plugin.is_file())
+                            disabled = await session.call_tool("desk_set_opencode_notifications", {"enabled": False})
+                            self.assertFalse(disabled.isError)
+                            self.assertFalse(plugin.exists())
+                            settings = Path(directory) / "home/.workbuddy-ai/settings.json"
+                            settings.parent.mkdir(parents=True)
+                            existing = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "existing"}]}]}}
+                            settings.write_text(json.dumps(existing))
+                            workbuddy = {"edition": "workbuddy_ai", "enabled": True}
+                            configured = await session.call_tool("desk_set_workbuddy_notifications", workbuddy)
+                            self.assertFalse(configured.isError)
+                            self.assertEqual(Path(configured.structuredContent["config"]), settings)
+                            hooks = json.loads(settings.read_text())["hooks"]
+                            self.assertEqual(hooks["Stop"][0], existing["hooks"]["Stop"][0])
+                            self.assertTrue(hooks["Stop"][1]["hooks"][0]["command"].endswith("workbuddy-hook --edition workbuddy_ai"))
+                            self.assertEqual(hooks["PreToolUse"][0]["matcher"], "AskUserQuestion")
+                            self.assertEqual(hooks["Notification"][0]["matcher"], "^permission_prompt$")
+                            disabled = await session.call_tool("desk_set_workbuddy_notifications", {**workbuddy, "enabled": False})
+                            self.assertFalse(disabled.isError)
+                            self.assertEqual(json.loads(settings.read_text()), existing)
                         preview = await session.call_tool("desk_role_preview")
                         self.assertEqual(preview.structuredContent["status"], "not_connected")
                         album = await session.call_tool("desk_photo_album")

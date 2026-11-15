@@ -15,6 +15,7 @@ from .card_upload import upload_file, upload_usb, validate_path
 from .channel import Channel, CommandRejected, DeviceError
 from .image_display import prepare_image
 from .pairing import DeviceConfig, valid_device_uuid
+from .quota_projection import SOURCES
 from .role_install import MAX_ROLE_ACTIONS, MAX_ROLE_ID_LENGTH, valid_identity
 from .wifi_link import WifiLink
 
@@ -162,6 +163,24 @@ class Client:
             if windows is not None:
                 return await self.channel.send("token_update", **snapshot, speed_windows=windows)
             return await self.channel.send("token_update", **snapshot)
+
+    async def update_quota(self, reading):
+        if self.channel.capabilities.get("quota_sources") != 1:
+            raise DeviceError("quota_sources_not_supported")
+        source = reading.get("source")
+        if source not in SOURCES:
+            raise ValueError("额度来源无效。")
+        fields = {key: value for key, value in reading.items() if key != "source"}
+        async with self._operation:
+            return await self.channel.send("quota_snapshot", source=SOURCES.index(source), **fields)
+
+    async def select_quota_source(self, source):
+        if self.channel.capabilities.get("quota_sources") != 1:
+            raise DeviceError("quota_sources_not_supported")
+        if source not in SOURCES:
+            raise ValueError("额度来源无效。")
+        async with self._operation:
+            return await self.channel.send("quota_source", source=SOURCES.index(source))
 
     async def set_role_auto(self, enabled):
         if self.channel.capabilities.get("token_stats") != 1:

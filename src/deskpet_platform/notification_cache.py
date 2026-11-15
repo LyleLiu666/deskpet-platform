@@ -24,7 +24,17 @@ def _fingerprint(item, bitmap):
     return f"{zlib.crc32(canonical):08x}"
 
 
-def _prepare(record, *, finished_gray=False):
+def _prepare(record, *, finished_gray=False, feedback_dismissal=False):
+    if feedback_dismissal and record["category"] == "response" and not record["resolved"]:
+        session = record.get("session", "")[:8]
+        display = {**record, "title": f'{session} · {record["title"]}'[:160]}
+        row = notification_row(display)
+        timestamp = int(record["created_at"] * 1000)
+        revision = zlib.crc32((record["cache_id"] + ":feedback").encode("ascii")) or 1
+        return (dict(id=record["cache_id"], kind=5, revision=1, content_revision=revision,
+                     created_ms=timestamp, updated_ms=timestamp, unread=not record["seen"],
+                     title=base64.b64encode(display["title"].encode()).decode("ascii"), detail_crc=[]),
+                row["title"], None, None)
     if "session" in record:
         rendered = render_cached_detail(record, finished_gray=finished_gray)
         pixels = rendered.pop("pixels")
@@ -129,7 +139,8 @@ class NotificationCache:
         records = self._records(channel)
         if (channel.boot, generation, records) == self.confirmed:
             return
-        receipt = await channel.send("cache_receipt_begin")
+        supports_dismissal = channel.capabilities.get("cache_feedback_dismissal") == 1
+        receipt = await channel.send("cache_receipt_begin", **({"feedback_dismissal": True} if supports_dismissal else {}))
         yield
         if receipt.get("cache_busy"):
             return
@@ -146,8 +157,13 @@ class NotificationCache:
             if not receipt["has_receipt"]:
                 break
             had_receipts = True
-            self.store.mark_cached_seen(receipt["id"],
-                                        grouped_completions=channel.capabilities.get("agent_local_inbox") == 1)
+            if receipt.get("feedback_dismissal") is True:
+                if not supports_dismissal or not self.store.dismiss_cached_response(receipt["id"]):
+                    await channel.send("cache_abort")
+                    return
+            else:
+                self.store.mark_cached_seen(receipt["id"],
+                                            grouped_completions=channel.capabilities.get("agent_local_inbox") == 1)
             await channel.send("cache_receipt_ack", id=receipt["id"],
                                content_revision=receipt["content_revision"])
             yield
@@ -183,10 +199,11 @@ class NotificationCache:
         prepared = []
         finished_gray = channel.capabilities.get("agent_local_inbox") == 1
         for record in records:
-            item, bitmap, detail, pixels = _prepare(record, finished_gray=finished_gray)
+            item, bitmap, detail, pixels = _prepare(record, finished_gray=finished_gray,
+                                                    feedback_dismissal=supports_dismissal)
             reusable = active.get(_fingerprint(item, bitmap)) if reuse else None
             prepared.append((item, bitmap, reusable))
-            if reusable is not None:
+            if reusable is not None or detail is None:
                 continue
             reply = await channel.send("cache_detail_begin", **detail)
             yield

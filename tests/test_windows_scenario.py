@@ -1,0 +1,134 @@
+import asyncio
+import os
+from pathlib import Path
+import tempfile
+import time
+import unittest
+
+
+@unittest.skipUnless(os.name == "nt", "Windows onboarding rehearsal")
+class WindowsScenarioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_codex_notifications_are_configured_without_replacing_existing_hooks(self):
+        import json
+        from unittest.mock import patch
+        from deskpet_platform.mcp_server import create_server
+        with tempfile.TemporaryDirectory(prefix="DeskPet Codex settings ") as directory:
+            root = Path(directory)
+            profile = root / "codex"
+            profile.mkdir()
+            path = profile / "hooks.json"
+            original = {"other": True, "hooks": {"Stop": [
+                {"hooks": [{"type": "command", "command": "existing"}]}]}}
+            path.write_text(json.dumps(original), encoding="utf-8")
+            with patch.dict(os.environ, {"CODEX_HOME": str(profile)}):
+                server = create_server(root / "device.json", no_token_probe=True)
+                enabled = await server.call_tool("desk_enable_codex_notifications", {})
+                self.assertTrue(enabled[1]["added"])
+                configured = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(configured["other"], True)
+                self.assertEqual(configured["hooks"]["Stop"][0], original["hooks"]["Stop"][0])
+                self.assertTrue(configured["hooks"]["Stop"][-1]["hooks"][0]["command"].startswith("powershell.exe "))
+                self.assertFalse((await server.call_tool("desk_enable_codex_notifications", {}))[1]["added"])
+                self.assertTrue((await server.call_tool("desk_disable_codex_notifications", {}))[1]["removed"])
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+
+    async def test_claude_notifications_are_configured_without_replacing_existing_settings(self):
+        import json
+        from unittest.mock import patch
+        from deskpet_platform.mcp_server import create_server
+        with tempfile.TemporaryDirectory(prefix="DeskPet Claude settings ") as directory:
+            root = Path(directory)
+            settings = root / "claude" / "settings.json"
+            settings.parent.mkdir()
+            original = {"other": {"keep": True}, "hooks": {"PreToolUse": [
+                {"matcher": "OtherTool", "hooks": [{"type": "command", "command": "existing"}]}]}}
+            settings.write_text(json.dumps(original), encoding="utf-8")
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(settings.parent)}):
+                server = create_server(root / "device.json", no_token_probe=True)
+                result = await server.call_tool("desk_set_claude_notifications", {"enabled": True})
+                self.assertTrue(result[1]["added"])
+                configured = json.loads(settings.read_text(encoding="utf-8"))
+                self.assertEqual(configured["other"], original["other"])
+                self.assertEqual(configured["hooks"]["PreToolUse"][0], original["hooks"]["PreToolUse"][0])
+                generated = configured["hooks"]["Stop"][-1]["hooks"][0]["command"]
+                self.assertTrue(generated.startswith("powershell.exe "))
+                await server.call_tool("desk_set_agent_quota", {"source": "claude_code", "enabled": True})
+                with_quota = json.loads(settings.read_text(encoding="utf-8"))
+                self.assertEqual(with_quota["hooks"], configured["hooks"])
+                await server.call_tool("desk_set_agent_quota", {"source": "claude_code", "enabled": False})
+                self.assertEqual(json.loads(settings.read_text(encoding="utf-8")), configured)
+                again = await server.call_tool("desk_set_claude_notifications", {"enabled": True})
+                self.assertFalse(again[1]["added"])
+                removed = await server.call_tool("desk_set_claude_notifications", {"enabled": False})
+                self.assertTrue(removed[1]["removed"])
+                self.assertEqual(json.loads(settings.read_text(encoding="utf-8")), original)
+
+    async def test_pairing_registry_mcp_and_private_agent_state(self):
+        from deskpet_platform.device_registry import DeviceRegistry
+        from deskpet_platform.mcp_server import create_server
+        from deskpet_platform.notifications import NotificationStore
+        from deskpet_platform.pairing import DeviceConfig
+        from deskpet_platform.quota_capture import QuotaStore
+        from deskpet_platform.usb_link import valid_usb_port, windows_port_identity
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory(prefix="DeskPet user with spaces ") as directory:
+            root = Path(directory)
+            path = root / "device.json"
+            config = DeviceConfig("02:00:00:00:00:01", bytes(range(32)), device_id="00000000-0000-4000-8000-000000000001")
+            registry = DeviceRegistry(path)
+            registry.save_default(config, None)
+            self.assertEqual(registry.get(config.device_id), config)
+            self.assertEqual(registry.list()[0]["id"], config.device_id)
+            server = create_server(path, no_token_probe=True)
+            result = await server.call_tool("desk_list_devices", {})
+            self.assertEqual(result[1]["devices"][0]["id"], config.device_id)
+            notices = NotificationStore(root / "notifications.sqlite3")
+            notices.add_agent_event("claude_code", "synthetic-session", "synthetic-turn", "completed", "Fixture")
+            self.assertEqual(notices.list()[0]["title"], "Fixture")
+            self.assertEqual(notices.path.parent.name, ".deskpet-private")
+            quotas = QuotaStore(root / "agent-quota.sqlite3")
+            now = int(time.time())
+            quotas.record("claude_code", {"rate_limits":{"five_hour":{"used_percentage":20,"resets_at":now+600}}}, now)
+            self.assertEqual(quotas.read("claude_code", now), {"quotas":[[80,300,now+600]]})
+            self.assertEqual(quotas.path.parent, notices.path.parent)
+            self.assertTrue(valid_usb_port("COM12"))
+            adapter = SimpleNamespace(device="COM12",vid=1,pid=2,serial_number="fixture",location="1-1",hwid="fixture")
+            self.assertEqual(windows_port_identity("com12",[adapter])[2], "fixture")
+
+    async def test_unverified_windows_notification_hooks_are_not_installed(self):
+        from deskpet_platform.mcp_server import require_notification_hooks
+        with self.assertRaisesRegex(ValueError, "Windows"):
+            require_notification_hooks(True, "nt")
+        require_notification_hooks(False, "nt")
+
+    async def test_codex_shim_path_rejects_command_interpreters_metacharacters(self):
+        from unittest.mock import patch
+        from deskpet_platform.codex_quota import fetch_quota
+        for character in ("&", "|", "<", ">", "^", "(", ")", "%"):
+            with self.subTest(character=character), patch("deskpet_platform.codex_quota.shutil.which", return_value=f"C:\\test{character}bad\\codex.cmd"):
+                with self.assertRaises(ValueError):
+                    await fetch_quota()
+
+    async def test_codex_quota_can_start_a_windows_command_shim(self):
+        import json
+        import sys
+        from unittest.mock import patch
+        from deskpet_platform.codex_quota import fetch_quota
+
+        with tempfile.TemporaryDirectory(prefix="DeskPet codex with spaces ") as directory:
+            root = Path(directory)
+            fixture = root / "fake_codex.py"
+            fixture.write_text('''import json,sys,time
+for line in sys.stdin:
+    message=json.loads(line)
+    if message.get("method")=="initialize":
+        print(json.dumps({"id":message["id"],"result":{"protocolVersion":"test"}}),flush=True)
+    elif message.get("method")=="account/rateLimits/read":
+        print(json.dumps({"id":message["id"],"result":{"rateLimitsByLimitId":{"codex":{"primary":{"windowDurationMins":300,"usedPercent":20,"resetsAt":int(time.time())+600}}}}}),flush=True)
+''', encoding="utf-8")
+            shim = root / "codex.cmd"
+            shim.write_text(f'@echo off\r\n"{sys.executable}" "{fixture}" %*\r\n', encoding="utf-8")
+            with patch("deskpet_platform.codex_quota.shutil.which", return_value=str(shim)):
+                reading = await fetch_quota()
+            self.assertEqual(reading["quotas"][0][:2], [80, 300])

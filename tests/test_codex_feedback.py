@@ -26,6 +26,26 @@ class CodexFeedbackTests(unittest.TestCase):
         return {"hook_event_name": "UserPromptSubmit", "session_id": session,
                 "prompt": "<send_user_message_question_reply>\n" + json.dumps(items) + "\n</send_user_message_question_reply>"}
 
+    def test_question_carries_project_and_session_title_without_question_text(self):
+        with patch("deskpet_platform.codex_feedback.session_title", return_value="Session title"):
+            codex_feedback.deliver(self.store, self.event)
+        record = self.store.cache_records(active_only=True)[0]
+        self.assertIn("project", record["title"])
+        self.assertIn("Session title", record["title"])
+        self.assertNotIn("private question", record["title"])
+
+    def test_concurrent_settings_change_is_not_overwritten(self):
+        path = Path(self.temp.name) / "settings.json"
+        path.write_text('{"user": "old"}', encoding="utf-8")
+        original = path.read_bytes()
+        path.write_text('{"user": "new"}', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "其他程序修改"):
+            codex_hook._write(path, {"hooks": {}}, original=original)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"user": "new"})
+        with self.assertRaisesRegex(ValueError, "其他程序修改"):
+            codex_hook._write(path, {"hooks": {}}, original=None)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"user": "new"})
+
     def test_questions_and_responses_are_exact_and_private(self):
         with patch.dict(os.environ, {"CODEX_HOME": self.temp.name}):
             self.assertEqual(codex_feedback.deliver(self.store, self.event), 2)

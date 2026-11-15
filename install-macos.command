@@ -6,14 +6,14 @@ if [[ "$(uname -s)" != Darwin ]]; then
   exit 2
 fi
 if command -v uv >/dev/null; then
-  uv sync --locked
+  UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --locked --python ">=3.11,<3.15"
 elif python_cmd="$(command -v python3)" &&
      { [[ "$python_cmd" != /usr/bin/python3 ]] || /usr/bin/xcode-select -p >/dev/null 2>&1; } &&
-     "$python_cmd" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' 2>/dev/null; then
+     "$python_cmd" -c 'import sys; raise SystemExit(not ((3, 11) <= sys.version_info < (3, 15)))' 2>/dev/null; then
   "$python_cmd" -m venv .venv
   .venv/bin/python -m pip install .
 else
-  printf '%s\n' '未找到可用的 Python 3.11 或更新版本，也未找到 uv。' \
+  printf '%s\n' '未找到可用的 Python 3.11 至 3.14，也未找到 uv。' \
     '请安装 Python 后重新打开 install-macos.command。' \
     'Python 官方下载：https://www.python.org/downloads/macos/' >&2
   exit 2

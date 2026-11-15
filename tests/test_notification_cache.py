@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from pathlib import Path
 import tempfile
@@ -92,6 +93,39 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
             if self.cache.transfer is None:
                 return
         self.fail("cache transfer did not finish")
+
+    async def test_explicit_dismissal_receipt_removes_only_that_reminder(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
+        question = self.store.add_agent_event("codex", "session", "q", "response", "Question")
+        record = self.store.cache_records(active_only=True)[0]
+        self.channel.receipts = [{"has_receipt": True, "id": record["cache_id"],
+                                  "content_revision": 1, "feedback_dismissal": True}]
+        await self.sync()
+        self.assertEqual(self.store.cache_records(active_only=True), [])
+        self.assertFalse(self.store.list()[0]["resolved"])
+        self.assertEqual(self.store.list()[0]["id"], question)
+        self.assertIn(("cache_receipt_begin", {"feedback_dismissal": True}), self.channel.commands)
+
+    async def test_feedback_card_uses_local_confirmation_without_detail_transfer(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
+        self.store.add_agent_event("claude_code", "1234567890", "question", "response", "repository")
+        await self.sync()
+        item = next(fields for command, fields in self.channel.commands if command == "cache_item")
+        self.assertEqual(item["kind"], 5)
+        self.assertEqual(item["detail_crc"], [])
+        self.assertEqual(base64.b64decode(item["title"]).decode(), "12345678 · repository")
+        self.assertNotIn("cache_detail_begin", [command for command, _ in self.channel.commands])
+
+    async def test_invalid_dismissal_is_never_acknowledged(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
+        self.store.add_agent_event("codex", "session", "q", "response", "Project")
+        self.channel.receipts = [{"has_receipt": True, "id": "p-1-forged", "content_revision": 1,
+                                  "feedback_dismissal": True}]
+        await self.sync()
+        self.assertEqual(len(self.store.cache_records(active_only=True)), 1)
+        operations = [command for command, _ in self.channel.commands]
+        self.assertIn("cache_abort", operations)
+        self.assertNotIn("cache_receipt_ack", operations)
 
     async def test_local_inbox_keeps_one_question_per_session_and_drops_read_completions(self):
         self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1)

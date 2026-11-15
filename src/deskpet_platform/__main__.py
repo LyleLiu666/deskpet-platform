@@ -2,6 +2,7 @@ import argparse
 import asyncio
 from getpass import getpass
 import json
+import os
 from pathlib import Path
 import sys
 from dataclasses import replace
@@ -46,6 +47,12 @@ async def interact(args):
 
 
 def main():
+    # Windows pipes may default to a legacy code page, but both our Chinese
+    # messages and MCP's JSON transport need UTF-8.
+    if os.name == "nt":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="deskpet-platform")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     commands = parser.add_subparsers(dest="command", required=True)

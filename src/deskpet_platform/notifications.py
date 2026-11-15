@@ -5,10 +5,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import fcntl
 import sqlite3
 import time
 import asyncio
+
+from .file_lock import acquire, release
 
 
 SOURCE_NAMES = {"codex": "Codex", "claude_code": "Claude Code", "workbuddy": "WorkBuddy",
@@ -52,18 +53,26 @@ def session_title(session, cwd):
 
 class NotificationStore:
     def __init__(self, path, *, source=None):
+        if os.name == "nt":
+            from .windows_private import state_path
+            path = state_path(path)
         self.path = Path(path)
         self.source = source
 
     def _connect(self, *, timeout=2):
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name == "nt":
+            from .windows_private import ensure_private_directory
+            self.path.parent.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_directory(self.path.parent)
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
             pass
         else:
             os.close(descriptor)
-        if self.path.is_symlink() or self.path.stat().st_mode & 0o077:
+        if self.path.is_symlink() or (os.name != "nt" and self.path.stat().st_mode & 0o077):
             raise ValueError("notification_store_requires_private_permissions")
         db = sqlite3.connect(self.path.resolve().as_uri(), uri=True, timeout=timeout)
         try:
@@ -89,6 +98,12 @@ class NotificationStore:
                     db.execute("BEGIN IMMEDIATE")
                     if db.execute(resolved_schema).fetchone() is None:
                         db.execute("ALTER TABLE notifications ADD COLUMN resolved REAL")
+            dismissed_schema = "SELECT 1 FROM pragma_table_info('notifications') WHERE name='dismissed'"
+            if db.execute(dismissed_schema).fetchone() is None:
+                with db:
+                    db.execute("BEGIN IMMEDIATE")
+                    if db.execute(dismissed_schema).fetchone() is None:
+                        db.execute("ALTER TABLE notifications ADD COLUMN dismissed REAL")
             turn_schema = "SELECT 1 FROM pragma_table_info('notifications') WHERE name='parent_turn'"
             if db.execute(turn_schema).fetchone() is None:
                 with db:
@@ -250,7 +265,7 @@ class NotificationStore:
                 WHERE NOT ? OR (category='completed' AND id IN (
                     SELECT MAX(id) FROM notifications WHERE category='completed' AND seen IS NULL
                     GROUP BY source,session))
-                    OR (category='response' AND resolved IS NULL AND NOT ({SUPERSEDED_QUESTION}) AND NOT EXISTS (
+                    OR (category='response' AND resolved IS NULL AND dismissed IS NULL AND NOT ({SUPERSEDED_QUESTION}) AND NOT EXISTS (
                         SELECT 1 FROM notifications AS newer
                         WHERE newer.source=n.source AND newer.session=n.session
                           AND newer.category='response' AND newer.id>n.id
@@ -300,6 +315,17 @@ class NotificationStore:
                                (time.time(), identity, identity))
                 db.execute("UPDATE notifications SET seen=COALESCE(seen,?) WHERE id=?", (time.time(), identity))
 
+    def dismiss_cached_response(self, cache_id):
+        """Dismiss one board's reminder without asserting that it was answered."""
+        with closing(self._connect()) as db, db:
+            identity = self._matching_cache_record(db, cache_id)
+            if identity is None:
+                return False
+            now = time.time()
+            return db.execute("""UPDATE notifications SET dismissed=COALESCE(dismissed,?),
+                seen=COALESCE(seen,?) WHERE id=? AND category='response'""",
+                (now, now, identity)).rowcount > 0
+
     def mark_list_seen_through_cache_record(self, cache_id, *, include_responses=False):
         """Record that the list presented the inbox through its exact TF snapshot."""
         with closing(self._connect()) as db, db:
@@ -318,11 +344,11 @@ class NotificationStore:
                 WHERE seen IS NULL AND category='completed' GROUP BY source ORDER BY MAX(id) DESC""").fetchall()
             response = db.execute(f"""SELECT n.source,groups.amount,n.id,n.title FROM notifications n JOIN
                 (SELECT source,COUNT(*) amount,MAX(id) latest FROM notifications
-                 AS n WHERE resolved IS NULL AND category='response' AND NOT ({SUPERSEDED_QUESTION}) GROUP BY source) groups
+                 AS n WHERE resolved IS NULL AND dismissed IS NULL AND category='response' AND NOT ({SUPERSEDED_QUESTION}) GROUP BY source) groups
                 ON n.id=groups.latest ORDER BY n.id DESC""").fetchall()
             if include_receipts:
                 receipts = [row[0] for row in db.execute(f"""SELECT id FROM notifications n WHERE shown IS NULL AND
-                    ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL
+                    ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL AND dismissed IS NULL
                     AND NOT ({SUPERSEDED_QUESTION})))""")]
         summary = {"completed_count": sum(row[1] for row in completed),
                 "completed_sources": [row[0] for row in completed],
@@ -357,7 +383,7 @@ class NotificationStore:
             rows = db.execute(f"""SELECT id,shown IS NULL,category='response' AND
                          id>COALESCE((SELECT through_id FROM notification_attention WHERE id=1),0)
                 FROM notifications WHERE id IN ({placeholders}) AND
-                  ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL))""",
+                  ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL AND dismissed IS NULL))""",
                 identities).fetchall()
         return tuple(identity for identity, shown_pending, _ in rows if shown_pending), max(
             (identity for identity, _, attention_pending in rows if attention_pending), default=0)
@@ -375,7 +401,7 @@ class NotificationStore:
     def pending_attention(self):
         with closing(self._connect()) as db:
             return db.execute(f"""SELECT COALESCE(MAX(id),0) FROM notifications n
-                WHERE category='response' AND resolved IS NULL AND NOT ({SUPERSEDED_QUESTION})
+                WHERE category='response' AND resolved IS NULL AND dismissed IS NULL AND NOT ({SUPERSEDED_QUESTION})
                 AND id>COALESCE((SELECT through_id FROM notification_attention WHERE id=1),0)""").fetchone()[0]
 
     def acknowledge_attention(self, identity):
@@ -441,7 +467,7 @@ class NotificationStore:
     def has_active_notifications(self):
         with closing(self._connect()) as db:
             return db.execute(f"""SELECT 1 FROM notifications n WHERE
-                (category='response' AND resolved IS NULL AND NOT ({SUPERSEDED_QUESTION})) OR
+                (category='response' AND resolved IS NULL AND dismissed IS NULL AND NOT ({SUPERSEDED_QUESTION})) OR
                 (category='completed' AND seen IS NULL) LIMIT 1""").fetchone() is not None
 
 
@@ -487,7 +513,7 @@ def request_worker_yield(config_path):
     descriptor = os.open(root / "notification-worker.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire(descriptor, blocking=False)
         except BlockingIOError:
             signal = os.open(root / "notification-handoff", os.O_CREAT | os.O_WRONLY, 0o600)
             os.close(signal)
@@ -512,7 +538,7 @@ async def run_worker(config_path, *, client_factory=None, max_seconds=86400, pol
     descriptor = os.open(root / "notification-dispatch.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire(descriptor, blocking=False)
         except BlockingIOError:
             return
         while time.monotonic() < deadline:
@@ -570,7 +596,7 @@ def _release_idle_dispatch(inbox, descriptor, through):
             # The next hook starts its worker after committing. Release the
             # dispatch lock before that commit is possible. The per-board
             # locks remain held until each old connection has closed.
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            release(descriptor)
             return True
     except (OSError, sqlite3.Error, ValueError):
         return False
@@ -603,7 +629,7 @@ async def _run_device_worker(config_path, *, source, client_factory, deadline, p
     try:
         while time.monotonic() < deadline:
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquire(descriptor, blocking=False)
                 break
             except BlockingIOError:
                 await asyncio.sleep(1)

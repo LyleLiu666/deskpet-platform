@@ -13,9 +13,22 @@ from mcp.server.fastmcp.exceptions import ToolError
 from deskpet_platform.client import Client
 from deskpet_platform.codex_hook import hook_command, install_hook, receive
 from deskpet_platform.device_registry import DeviceRegistry
-from deskpet_platform.mcp_server import create_server
+from deskpet_platform.mcp_server import create_server, require_notification_hooks
 from deskpet_platform.notifications import NotificationStore, run_worker
 from test_multi_device_flow import FIRST, SECOND, SyntheticBoard
+
+
+class NotificationPlatformTests(unittest.TestCase):
+    def test_windows_allows_only_verified_agent_hooks(self):
+        require_notification_hooks(True, "nt", "claude-hook")
+        require_notification_hooks(True, "nt", "codex-hook")
+        with self.assertRaisesRegex(ValueError, "Windows"):
+            require_notification_hooks(True, "nt", "antigravity-hook")
+    def test_windows_install_is_refused_before_unverified_hooks_are_written(self):
+        with self.assertRaisesRegex(ValueError, "Windows"):
+            require_notification_hooks(True, "nt")
+        require_notification_hooks(False, "nt")
+        require_notification_hooks(True, "posix")
 
 
 class NotificationBoard(SyntheticBoard):
@@ -88,6 +101,15 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
              patch("deskpet_platform.codex_hook.subprocess.Popen") as spawn:
             receive(config or self.config)
         return spawn
+
+    async def test_windows_notification_setup_does_not_touch_user_settings(self):
+        server = create_server(self.config, no_token_probe=True)
+        with patch("deskpet_platform.mcp_server.require_notification_hooks",
+                   side_effect=lambda enabled, platform, hook=None: require_notification_hooks(enabled, "nt", hook)):
+            for name, arguments in (("desk_set_antigravity_notifications", {"enabled": True}),):
+                with self.subTest(name=name), self.assertRaisesRegex(ToolError, "Windows"):
+                    await server.call_tool(name, arguments)
+        self.assertFalse((self.root / "codex-profile" / "hooks.json").exists())
 
     async def test_codex_hook_routes_to_both_boards_and_retries_offline_inbox(self):
         boards = {item.identity: NotificationBoard(item) for item in (FIRST, SECOND)}

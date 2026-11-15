@@ -23,7 +23,7 @@ class InstallFreshnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="deskpet-package-test-") as directory:
             project = Path(directory) / "project"
             project.mkdir()
-            for name in ("LICENSE", "MANIFEST.in", "pyproject.toml", "uv.lock", "README.md", "install-macos.command"):
+            for name in ("LICENSE", "MANIFEST.in", "pyproject.toml", "uv.lock", "README.md", "install-macos.command", "install-windows.ps1"):
                 shutil.copy2(ROOT / name, project / name)
             for name in onboarding_files:
                 (project / name).parent.mkdir(parents=True, exist_ok=True)
@@ -36,6 +36,7 @@ class InstallFreshnessTests(unittest.TestCase):
                 self.assertIn("uv.lock", members)
                 self.assertEqual(archive.extractfile(members["LICENSE"]).read(), (ROOT / "LICENSE").read_bytes())
                 self.assertTrue(members["install-macos.command"].mode & 0o100)
+                self.assertIn("install-windows.ps1", members)
                 for name in (*onboarding_files, "src/deskpet_platform/manuals/operations.md",
                              "src/deskpet_platform/manuals/roles.md"):
                     with self.subTest(archive_file=name):

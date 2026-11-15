@@ -1,11 +1,11 @@
 """Local paired devices; identity remains independent of their current transport."""
 from contextlib import contextmanager
 from dataclasses import replace
-import fcntl
 import os
 from pathlib import Path
 import re
 
+from .file_lock import acquire, release
 from .pairing import DEVICE_ID, DeviceConfig, valid_device_uuid
 
 
@@ -31,15 +31,15 @@ class DeviceRegistry:
     @contextmanager
     def _locked(self):
         self.root.mkdir(parents=True, mode=0o700, exist_ok=True)
-        if self.root.is_symlink() or self.root.stat().st_mode & 0o077:
+        if self.root.is_symlink() or (os.name != 'nt' and self.root.stat().st_mode & 0o077):
             raise ValueError('device_registry_requires_private_directory')
         flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
         fd = os.open(self.root / '.lock', flags, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            acquire(fd)
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            release(fd)
             os.close(fd)
 
     def _entries(self):
@@ -52,7 +52,7 @@ class DeviceRegistry:
                 continue
             if directory.is_symlink() or not directory.is_dir():
                 raise ValueError('invalid_device_registry_entry')
-            if directory.stat().st_mode & 0o077:
+            if os.name != 'nt' and directory.stat().st_mode & 0o077:
                 raise ValueError('device_registry_requires_private_directory')
             path = directory / 'device.json'
             if path.is_symlink():
