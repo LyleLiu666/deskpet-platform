@@ -18,7 +18,9 @@ jobs:
           Set-Location $target
           ./install-windows.ps1
           ./install-windows.ps1
+          $env:PYTHONIOENCODING = "cp1252"
           & ./.venv/Scripts/deskpet-platform.exe --help
+          Remove-Item Env:PYTHONIOENCODING
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test Windows behavior
         shell: pwsh
