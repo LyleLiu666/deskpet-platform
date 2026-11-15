@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -70,7 +71,7 @@ class QuotaCaptureTests(unittest.TestCase):
             capture.stdin.close()
             output, error = previous.communicate(timeout=5)
             self.assertEqual(previous.returncode, 0, error)
-            self.assertEqual(output, b"existing status: keep this input\n")
+            self.assertEqual(output, ("existing status: keep this input" + os.linesep).encode())
             self.assertEqual(capture.wait(timeout=5), 0)
             self.assertEqual(self.store.read("claude_code", time.time()), {"quotas": [[25, 10080, now + 600]]})
         finally:
@@ -99,7 +100,11 @@ class QuotaCaptureTests(unittest.TestCase):
     def test_capture_never_writes_through_a_symlink(self):
         target = self.root / "existing-file"
         target.write_bytes(b"keep")
-        self.store.path.symlink_to(target)
+        self.store.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.store.path.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symbolic links are unavailable to this user")
         with self.assertRaises(ValueError):
             self.store.record("claude_code", self.claude, self.now)
         self.assertEqual(target.read_bytes(), b"keep")
