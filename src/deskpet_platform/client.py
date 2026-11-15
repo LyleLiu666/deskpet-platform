@@ -498,6 +498,12 @@ class Client:
         async with self._operation:
             await self.channel.send("notice_count", count=min(65535, max(0, count)))
 
+    async def set_attention_summary(self, count):
+        if self.channel.capabilities.get("attention_summary") != 1:
+            return
+        async with self._operation:
+            await self.channel.send("attention_summary", count=min(65535, max(0, count)))
+
     async def show_notice_detail(self, identity):
         if self.channel.capabilities.get("notices") != 1:
             return

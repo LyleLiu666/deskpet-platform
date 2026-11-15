@@ -104,6 +104,9 @@ class BoardSession:
         self.notification_cache = NotificationCache(self.notifications)
         self.next_notification_attempt = 0.0
         self.last_notice_count = None
+        self.attention_client = None
+        self.attention_count = None
+        self.attention_due = 0.0
         self.last_message_cache = None
         self.weather_path = Path(path).parent / "weather-location.json"
         self.weather_lock = asyncio.Lock()
@@ -133,6 +136,7 @@ class BoardSession:
         self.screen_speech_task=None
         self.token_snapshot = None
         self.computer_preference_client = None
+        self.attention_client = None
         if self.client is not None:
             client, self.client = self.client, None
             self.dropped_touches += getattr(client.channel, "dropped_events", 0)
@@ -306,10 +310,14 @@ class BoardSession:
                         await self.refresh_read_request(self.client)
                     await self.sync_computer_preferences(sampled_client, heartbeat)
                     self.record_status(heartbeat)
+                    notification_sync_ok = True
                     try:
                         await asyncio.to_thread(self.notifications.sync)
                     except (OSError, sqlite3.Error, ValueError):
+                        notification_sync_ok = False
                         self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
+                    if notification_sync_ok and self.client.channel.capabilities.get("attention_summary") == 1:
+                        await self.refresh_attention_summary(self.client)
                     if self.client.channel.capabilities.get("touch_demo") == 1:
                         while event := await self.client.pending_touch():
                             try:
@@ -354,6 +362,22 @@ class BoardSession:
                         and self.notification_cache.transfer is not None):
                     delay = .1
             await asyncio.sleep(delay)
+
+    async def refresh_attention_summary(self, client, *, now=None):
+        if client.channel.capabilities.get("attention_summary") != 1:
+            return
+        now = time.monotonic() if now is None else now
+        try:
+            summary = await asyncio.to_thread(self.notifications.home_summary)
+        except (OSError, sqlite3.Error, ValueError):
+            self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
+            return
+        count = min(65535, summary["response_count"])
+        if client is not self.attention_client or count != self.attention_count or now >= self.attention_due:
+            await client.set_attention_summary(count)
+            self.attention_client = client
+            self.attention_count = count
+            self.attention_due = now + 5
 
     async def refresh_messages(self):
         ids = await self.client.pending_notice_reads()
