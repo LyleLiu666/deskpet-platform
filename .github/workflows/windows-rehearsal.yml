@@ -40,7 +40,7 @@ jobs:
         run: |
           Set-Location (Join-Path $env:RUNNER_TEMP 'DeskPet fresh install')
           $env:PYTHONPATH = "$pwd/src"
-          foreach ($test in @('test_file_lock.py', 'test_windows_pairing.py', 'test_windows_private.py', 'test_windows_scenario.py')) {
+          foreach ($test in @('test_file_lock.py', 'test_windows_pairing.py', 'test_windows_private.py', 'test_windows_scenario.py', 'test_pair_portal.py', 'test_multi_device_flow.py')) {
             & ./.venv/Scripts/python.exe -m unittest discover -s tests -p $test -v
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
