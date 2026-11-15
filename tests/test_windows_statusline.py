@@ -61,6 +61,25 @@ class WindowsStatuslineTests(unittest.TestCase):
                           windows_shell=("cmd", os.environ.get("COMSPEC", "cmd.exe")))
         self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")), original)
 
+    def test_removal_leaves_a_user_replaced_command_alone(self):
+        from deskpet_platform.quota_statusline import configure
+        original = {"statusLine": {"type": "command", "command": "echo old"}}
+        self.settings.write_text(json.dumps(original), encoding="utf-8")
+        shell = ("cmd", os.environ.get("COMSPEC", "cmd.exe"))
+        configure(self.settings, "antigravity", self.store, enabled=True, windows_shell=shell)
+        changed = json.loads(self.settings.read_text(encoding="utf-8"))
+        changed["statusLine"]["command"] = "echo user-changed"
+        self.settings.write_text(json.dumps(changed), encoding="utf-8")
+        self.assertFalse(configure(self.settings, "antigravity", self.store, enabled=False, windows_shell=shell))
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")), changed)
+
+    def test_capture_store_path_with_shell_metacharacters_is_literal(self):
+        self.store = self.root / "state & 50%" / "quota.sqlite3"
+        powershell = shutil.which("powershell.exe")
+        previous = "& '" + sys.executable.replace("'", "''") + "' '" + str(self.old).replace("'", "''") + "'"
+        self.do_rehearsal("claude_code", ("powershell", powershell), previous,
+                          [powershell, "-NoProfile", "-NonInteractive", "-Command"])
+
     def test_existing_settings_acl_survives_install_and_remove(self):
         from deskpet_platform.quota_statusline import configure
         from deskpet_platform.windows_private import current_user_sid

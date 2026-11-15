@@ -46,3 +46,19 @@ jobs:
           }
           & ./.venv/Scripts/python.exe -m unittest test_platform.PlatformTests.test_wifi_probe_accepts_only_the_paired_board_proof test_platform.PlatformTests.test_handshake_display_and_disconnect_on_local_wire test_platform.PlatformTests.test_real_mcp_lists_and_reads_manuals_without_pairing test_multi_device_notifications.NotificationPlatformTests.test_windows_install_is_refused_before_unverified_hooks_are_written test_multi_device_notifications.MultiDeviceNotificationTests.test_windows_notification_setup_does_not_touch_user_settings -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Rehearse actual Claude Code against a synthetic local API
+        shell: pwsh
+        timeout-minutes: 4
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'DeskPet fresh install'
+          Set-Location $target
+          & ./.venv/Scripts/python.exe -m pip install pywinpty==2.0.15
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $fixture = Join-Path $env:RUNNER_TEMP 'deskpet-claude-fixture'
+          npm install --prefix $fixture --no-audit --no-fund @anthropic-ai/claude-code@2.1.281
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:DESKPET_SYNTHETIC_CLAUDE_CLI = Join-Path $fixture 'node_modules/@anthropic-ai/claude-code/cli.js'
+          $env:DESKPET_REHEARSE_CLAUDE = '1'
+          $env:PYTHONPATH = "$pwd/src;$pwd/tests"
+          & ./.venv/Scripts/python.exe -m unittest test_windows_claude_client -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
