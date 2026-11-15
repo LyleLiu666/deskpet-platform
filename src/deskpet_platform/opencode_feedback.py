@@ -1,10 +1,11 @@
 """Install and receive OpenCode's local notification plugin."""
 from errno import ELOOP
-import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+
+from .file_lock import acquire
 import shlex
 import stat
 import tempfile
@@ -30,7 +31,7 @@ def configure(path, command, *, enabled):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = os.open(path.with_name(f".{path.name}.lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        acquire(lock)
         previous = _read_plugin(path)
         if previous is not None and previous != source:
             installed_command = b"const command = " + arguments + b";\n"

@@ -1,5 +1,4 @@
 """Install and receive local Codex hooks without replacing existing hooks."""
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -9,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 
+from .file_lock import acquire
 from .notifications import NotificationStore
 from . import codex_feedback
 from .device_registry import DeviceRegistry
@@ -44,7 +44,7 @@ def _load(path, *, private=True):
         raise ValueError("Hooks 设置文件不能是符号链接。")
     if path.exists():
         allowed_mode = 0o600 if private else 0o644
-        if stat.S_IMODE(path.stat().st_mode) & ~allowed_mode:
+        if os.name != "nt" and stat.S_IMODE(path.stat().st_mode) & ~allowed_mode:
             raise ValueError("Hooks 设置文件权限过宽，请检查文件权限。")
         try:
             config = json.loads(path.read_text(encoding="utf-8"))
@@ -58,17 +58,19 @@ def _load(path, *, private=True):
 
 
 def _write(path, config, *, private=True):
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
-        temporary = Path(stream.name)
-        try:
-            if not private and path.exists():
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            if os.name != "nt" and not private and path.exists():
                 os.fchmod(stream.fileno(), stat.S_IMODE(path.stat().st_mode))
             json.dump(config, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-            os.replace(temporary, path)
-        finally:
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
             temporary.unlink(missing_ok=True)
 
 
@@ -149,7 +151,7 @@ def configure_codex_hooks(path, command, previous_commands, *, enabled):
     flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path.with_name(f".{path.name}.deskpet.lock"), flags, 0o600)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        acquire(descriptor)
         config = _load(path)
         changed = (_add_to_config(config, command, EVENT_MATCHERS) if enabled else
                    _remove_from_config(config, command, EVENT_MATCHERS))

@@ -4,10 +4,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import fcntl
 import sqlite3
 import time
 import asyncio
+
+from .file_lock import acquire, release
 
 
 SOURCE_NAMES = {"codex": "Codex", "claude_code": "Claude Code", "workbuddy": "WorkBuddy",
@@ -42,18 +43,26 @@ def session_title(session, cwd):
 
 class NotificationStore:
     def __init__(self, path, *, source=None):
+        if os.name == "nt":
+            from .windows_private import state_path
+            path = state_path(path)
         self.path = Path(path)
         self.source = source
 
     def _connect(self, *, timeout=2):
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name == "nt":
+            from .windows_private import ensure_private_directory
+            self.path.parent.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_directory(self.path.parent)
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
             pass
         else:
             os.close(descriptor)
-        if self.path.is_symlink() or self.path.stat().st_mode & 0o077:
+        if self.path.is_symlink() or (os.name != "nt" and self.path.stat().st_mode & 0o077):
             raise ValueError("notification_store_requires_private_permissions")
         db = sqlite3.connect(self.path.resolve().as_uri(), uri=True, timeout=timeout)
         try:
@@ -391,7 +400,7 @@ def request_worker_yield(config_path):
     descriptor = os.open(root / "notification-worker.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire(descriptor, blocking=False)
         except BlockingIOError:
             signal = os.open(root / "notification-handoff", os.O_CREAT | os.O_WRONLY, 0o600)
             os.close(signal)
@@ -416,7 +425,7 @@ async def run_worker(config_path, *, client_factory=None, max_seconds=86400, pol
     descriptor = os.open(root / "notification-dispatch.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire(descriptor, blocking=False)
         except BlockingIOError:
             return
         while time.monotonic() < deadline:
@@ -474,7 +483,7 @@ def _release_idle_dispatch(inbox, descriptor, through):
             # The next hook starts its worker after committing. Release the
             # dispatch lock before that commit is possible. The per-board
             # locks remain held until each old connection has closed.
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            release(descriptor)
             return True
     except (OSError, sqlite3.Error, ValueError):
         return False
@@ -507,7 +516,7 @@ async def _run_device_worker(config_path, *, source, client_factory, deadline, p
     try:
         while time.monotonic() < deadline:
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquire(descriptor, blocking=False)
                 break
             except BlockingIOError:
                 await asyncio.sleep(1)

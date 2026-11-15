@@ -6,10 +6,12 @@ import stat
 import time
 
 from .pairing import DEVICE_ID, DeviceConfig
-from .usb_link import default_serial_factory
+from .usb_link import default_serial_factory, valid_usb_port
 
 
 def load_network(path):
+    if os.name == "nt":
+        raise ValueError("Windows 请使用小板上的二维码配网。")
     path = Path(path).expanduser()
     if not path.is_absolute():
         raise ValueError("Wi-Fi 凭据文件需要绝对路径。")
@@ -30,7 +32,7 @@ def load_network(path):
 def probe_usb(port, expected_identity, credentials_file=None, *, serial_factory=default_serial_factory):
     if not DEVICE_ID.fullmatch(expected_identity):
         raise ValueError("请提供登记的小板完整 MAC 地址。")
-    if not Path(port).is_absolute() or not port.startswith("/dev/"):
+    if not valid_usb_port(port):
         raise ValueError("请提供已确认属于该板的 USB 串口绝对路径。")
     network = load_network(credentials_file) if credentials_file is not None else None
     with serial_factory(port=None, baudrate=115200, timeout=0.25, write_timeout=1, exclusive=True) as device:
