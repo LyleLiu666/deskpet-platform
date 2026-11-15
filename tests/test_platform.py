@@ -427,6 +427,33 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
             client.close.assert_awaited_once()
             self.assertIsNone(session.client)
 
+    async def test_device_status_explains_local_network_failure_without_claiming_its_cause(self):
+        import errno
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / 'device.json')
+            try:
+                try:
+                    raise OSError(errno.EHOSTUNREACH, 'no route')
+                except OSError as cause:
+                    raise OSError('wifi_discovery_unreachable') from cause
+            except OSError as error:
+                await session.record_link_error(error)
+            status = await session.get_status()
+            self.assertEqual(status['connection'], 'offline')
+            self.assertEqual(status['reason'], 'local_network_unreachable')
+            self.assertIn('局域网权限', status['next_step'])
+            self.assertIn('网络', status['next_step'])
+            await session.record_link_error(OSError('wifi_device_absent'))
+            self.assertNotIn('reason', await session.get_status())
+
+    async def test_busy_status_distinguishes_automatic_handoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / 'device.json')
+            with patch('deskpet_platform.mcp_server.request_worker_yield', return_value=True):
+                await session.record_link_error(RuntimeError('device_busy: held'))
+            self.assertEqual((await session.get_status())['connection'], 'busy')
+            self.assertIn('稍后', (await session.get_status())['next_step'])
+
     async def test_expired_control_session_is_dropped_and_poll_can_reconnect(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "device.json"
