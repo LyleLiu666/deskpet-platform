@@ -47,17 +47,18 @@ def _load(path, *, private=True):
         if os.name != "nt" and stat.S_IMODE(path.stat().st_mode) & ~allowed_mode:
             raise ValueError("Hooks 设置文件权限过宽，请检查文件权限。")
         try:
-            config = json.loads(path.read_text(encoding="utf-8"))
+            original = path.read_bytes()
+            config = json.loads(original)
         except (OSError, ValueError) as error:
             raise ValueError("Hooks 设置文件无法解析，未修改原文件。") from error
     else:
-        config = {}
+        config = {}; original = None
     if not isinstance(config, dict) or not isinstance(config.get("hooks", {}), dict):
         raise ValueError("Hooks 设置文件结构无效，未修改原文件。")
-    return config
+    return config, original
 
 
-def _write(path, config, *, private=True):
+def _write(path, config, *, original, private=True):
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
@@ -68,7 +69,22 @@ def _write(path, config, *, private=True):
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        if path.is_symlink():
+            raise ValueError("Hooks 设置文件已改变，未修改。")
+        try:
+            current = path.read_bytes()
+        except FileNotFoundError:
+            current = None
+        if current != original:
+            raise ValueError("Hooks 设置文件刚被其他程序修改，请重试。")
+        if os.name == "nt" and original is not None:
+            from .quota_windows_statusline import replace_file
+            replace_file(path, temporary)
+        elif os.name == "nt":
+            # Do not replace a file created by another program meanwhile.
+            os.rename(temporary, path)
+        else:
+            os.replace(temporary, path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -76,10 +92,10 @@ def _write(path, config, *, private=True):
 
 def install_hook(path, command, *, matchers=EVENT_MATCHERS, private=True):
     path = Path(path)
-    config = _load(path, private=private)
+    config, original = _load(path, private=private)
     added = _add_to_config(config, command, matchers)
     if added:
-        _write(path, config, private=private)
+        _write(path, config, original=original, private=private)
     return added
 
 
@@ -119,10 +135,10 @@ def remove_hook(path, command, *, matchers=EVENT_MATCHERS, private=True):
     path = Path(path)
     if not path.exists() and not path.is_symlink():
         return False
-    config = _load(path, private=private)
+    config, original = _load(path, private=private)
     removed = _remove_from_config(config, command, matchers)
     if removed:
-        _write(path, config, private=private)
+        _write(path, config, original=original, private=private)
     return removed
 
 
@@ -152,13 +168,13 @@ def configure_codex_hooks(path, command, previous_commands, *, enabled):
     descriptor = os.open(path.with_name(f".{path.name}.deskpet.lock"), flags, 0o600)
     try:
         acquire(descriptor)
-        config = _load(path)
+        config, original = _load(path)
         changed = (_add_to_config(config, command, EVENT_MATCHERS) if enabled else
                    _remove_from_config(config, command, EVENT_MATCHERS))
         for previous in previous_commands:
             changed = _remove_from_config(config, previous, EVENT_MATCHERS) or changed
         if changed:
-            _write(path, config)
+            _write(path, config, original=original)
         return changed
     finally:
         os.close(descriptor)
