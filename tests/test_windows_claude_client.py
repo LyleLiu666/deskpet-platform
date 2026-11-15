@@ -54,6 +54,10 @@ class WindowsClaudeClientRehearsal(unittest.TestCase):
         from winpty import PtyProcess
         from deskpet_platform.quota_capture import QuotaStore
         from deskpet_platform.quota_statusline import configure
+        from deskpet_platform.claude_feedback import MATCHERS
+        from deskpet_platform.codex_hook import install_hook, remove_hook
+        from deskpet_platform.notifications import NotificationStore
+        from deskpet_platform.windows_hook_command import build as build_hook
 
         cli = Path(os.environ["DESKPET_SYNTHETIC_CLAUDE_CLI"])
         bash = shutil.which("bash.exe")
@@ -86,6 +90,10 @@ class WindowsClaudeClientRehearsal(unittest.TestCase):
             (profile / ".claude.json").write_text(json.dumps(state), encoding="utf-8")
             store = root / "quota.sqlite3"
             configure(settings, "claude_code", store, enabled=True, windows_shell=("bash", bash))
+            config = root / "isolated notifications" / "device.json"
+            hook = build_hook(sys.executable, ["-m", "deskpet_platform", "--config", str(config), "claude-hook"])
+            install_hook(settings, hook, matchers=MATCHERS, private=False)
+            notifications = NotificationStore(config.parent / "notifications.sqlite3")
             with ThreadingHTTPServer(("127.0.0.1", 0), FakeClaudeAPI) as server:
                 server.paths = []
                 service = Thread(target=server.serve_forever, daemon=True)
@@ -123,13 +131,16 @@ class WindowsClaudeClientRehearsal(unittest.TestCase):
                         elif trust_selected_at is not None and not trusted and time.monotonic() - trust_selected_at > .5:
                             process.write("\r")
                             trusted = True
-                        if observed.is_file() and quota.read("claude_code", time.time()) is not None and server.paths:
+                        if (observed.is_file() and quota.read("claude_code", time.time()) is not None and server.paths
+                                and notifications.path.is_file() and notifications.list()):
                             break
                         time.sleep(.1)
                     self.assertTrue(observed.is_file(), "original statusline did not run; output=" + "".join(output)[-3000:])
                     self.assertTrue(json.loads(observed.read_text())["has_model"])
                     self.assertIsNotNone(quota.read("claude_code", time.time()))
                     self.assertTrue(any(path.startswith("/v1/messages") for path in server.paths), server.paths)
+                    self.assertTrue(any(item["source"] == "claude_code" and item["category"] == "completed"
+                                        for item in notifications.list()), "actual Claude Stop hook did not reach isolated inbox")
                     before_removal = json.loads(settings.read_text(encoding="utf-8"))
                     self.assertTrue(configure(settings, "claude_code", store, enabled=False, windows_shell=("bash", bash)))
                     restored = json.loads(settings.read_text(encoding="utf-8"))
@@ -137,6 +148,7 @@ class WindowsClaudeClientRehearsal(unittest.TestCase):
                     before_removal.pop("statusLine")
                     restored.pop("statusLine")
                     self.assertEqual(restored, before_removal)
+                    self.assertTrue(remove_hook(settings, hook, matchers=MATCHERS, private=False))
                 finally:
                     process.close(force=True)
                     server.shutdown()
