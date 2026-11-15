@@ -30,12 +30,15 @@ class WindowsStatuslineTests(unittest.TestCase):
         self.assertTrue(configure(self.settings, "claude_code", self.store, enabled=True))
         self.assertFalse(configure(self.settings, "claude_code", self.store, enabled=True))
         command = json.loads(self.settings.read_text(encoding="utf-8"))["statusLine"]["command"]
-        for shell in ([shutil.which("powershell.exe"), "-NoProfile", "-Command", command],
-                      [shutil.which("bash.exe"), "-c", command]):
+        for index, shell in enumerate(([shutil.which("powershell.exe"), "-NoProfile", "-Command", command],
+                                       [shutil.which("bash.exe"), "-c", command])):
             if shell[0]:
-                result = subprocess.run(shell, input=self.input, capture_output=True, timeout=15)
+                payload = json.loads(self.input)
+                payload["rate_limits"]["five_hour"]["used_percentage"] = 20 + index
+                result = subprocess.run(shell, input=json.dumps(payload).encode(), capture_output=True, timeout=15)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIsNotNone(QuotaStore(self.store).read("claude_code", time.time()))
+                reading = QuotaStore(self.store).read("claude_code", time.time())
+                self.assertEqual(reading["quotas"][0][0], 80 - index)
         self.assertTrue(configure(self.settings, "claude_code", self.store, enabled=False))
         self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")), {"other": True})
 

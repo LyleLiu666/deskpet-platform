@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from pathlib import Path
 import tempfile
@@ -112,6 +113,7 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
         item = next(fields for command, fields in self.channel.commands if command == "cache_item")
         self.assertEqual(item["kind"], 5)
         self.assertEqual(item["detail_crc"], [])
+        self.assertEqual(base64.b64decode(item["title"]).decode(), "12345678 · repository")
         self.assertNotIn("cache_detail_begin", [command for command, _ in self.channel.commands])
 
     async def test_invalid_dismissal_is_never_acknowledged(self):

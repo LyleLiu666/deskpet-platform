@@ -187,6 +187,8 @@ def configure(path, source, store, *, enabled, executable=None, windows_shell=No
                 # There is no old command to interpret: the wrapper itself
                 # works under both Claude's Git Bash and PowerShell runners.
                 windows_shell = ("powershell", shutil.which("powershell.exe"))
+            elif source != "claude_code":
+                raise ValueError("Windows 上此 Agent 的额度采集尚未完成验证，未修改 Agent 设置。")
             else:
                 raise ValueError("无法确认现有状态栏的命令环境，未修改 Agent 设置。")
         if status is not None:
