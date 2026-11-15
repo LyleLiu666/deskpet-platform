@@ -28,6 +28,7 @@ $entries = (Get-Acl -LiteralPath $Path).Access | Where-Object { $_.AccessControl
             for item in (root, path):
                 result = subprocess.run(["powershell", "-NoProfile", "-File", str(probe), str(item)],
                                         check=True, text=True, capture_output=True, timeout=15)
+                self.assertTrue(result.stdout.strip(), result.stderr)
                 sids = json.loads(result.stdout)
                 if isinstance(sids, str):
                     sids = [sids]
