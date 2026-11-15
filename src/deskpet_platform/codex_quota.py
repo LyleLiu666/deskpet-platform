@@ -4,6 +4,7 @@ from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import json
 import os
 from pathlib import Path
+import shutil
 import time
 
 
@@ -47,8 +48,19 @@ async def fetch_quota():
         str(Path.home()/'.local/bin'),
         '/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS',
     ))
+    command = ['codex', 'app-server', '--listen', 'stdio://']
+    if os.name == 'nt':
+        executable = shutil.which('codex', path=path)
+        if executable is None:
+            raise FileNotFoundError('codex executable not found')
+        command[0] = executable
+        if executable.lower().endswith(('.cmd', '.bat')):
+            if any(character in executable for character in ('%', '"', '\r', '\n')):
+                raise ValueError('codex command path cannot be safely invoked')
+            command_line = f'"{executable}" app-server --listen stdio://'
+            command = [os.environ.get('COMSPEC', 'cmd.exe'), '/d', '/v:off', '/s', '/c', command_line]
     process = await asyncio.create_subprocess_exec(
-        'codex', 'app-server', '--listen', 'stdio://',
+        *command,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         limit=262144, env={**os.environ, 'PATH': path},
     )
@@ -74,6 +86,12 @@ async def fetch_quota():
             result = await receive(2)
             return quota_reading(result, time.time()) if result else None
     finally:
+        if os.name == 'nt' and process.stdin is not None and process.returncode is None:
+            process.stdin.close()
+            try:
+                await asyncio.wait_for(process.wait(), 1)
+            except asyncio.TimeoutError:
+                pass
         if process.returncode is None:
             try:
                 process.terminate()

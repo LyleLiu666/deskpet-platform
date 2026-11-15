@@ -40,3 +40,26 @@ class WindowsScenarioTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(valid_usb_port("COM12"))
             adapter = SimpleNamespace(device="COM12",vid=1,pid=2,serial_number="fixture",location="1-1",hwid="fixture")
             self.assertEqual(windows_port_identity("com12",[adapter])[2], "fixture")
+
+    async def test_codex_quota_can_start_a_windows_command_shim(self):
+        import json
+        import sys
+        from unittest.mock import patch
+        from deskpet_platform.codex_quota import fetch_quota
+
+        with tempfile.TemporaryDirectory(prefix="DeskPet codex with spaces ") as directory:
+            root = Path(directory)
+            fixture = root / "fake_codex.py"
+            fixture.write_text('''import json,sys,time
+for line in sys.stdin:
+    message=json.loads(line)
+    if message.get("method")=="initialize":
+        print(json.dumps({"id":message["id"],"result":{"protocolVersion":"test"}}),flush=True)
+    elif message.get("method")=="account/rateLimits/read":
+        print(json.dumps({"id":message["id"],"result":{"rateLimitsByLimitId":{"codex":{"primary":{"windowDurationMins":300,"usedPercent":20,"resetsAt":int(time.time())+600}}}}}),flush=True)
+''', encoding="utf-8")
+            shim = root / "codex.cmd"
+            shim.write_text(f'@echo off\r\n"{sys.executable}" "{fixture}" %*\r\n', encoding="utf-8")
+            with patch("deskpet_platform.codex_quota.shutil.which", return_value=str(shim)):
+                reading = await fetch_quota()
+            self.assertEqual(reading["quotas"][0][:2], [80, 300])
