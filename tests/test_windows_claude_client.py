@@ -116,7 +116,7 @@ class WindowsClaudeClientRehearsal(unittest.TestCase):
                             process.write("\x1b[B")
                             trust_selected_at = time.monotonic()
                         elif trust_selected_at is not None and not trusted and time.monotonic() - trust_selected_at > .5:
-                            process.write("\r")
+                            process.write("\n")
                             trusted = True
                         if observed.is_file() and quota.read("claude_code", time.time()) is not None and server.paths:
                             break
