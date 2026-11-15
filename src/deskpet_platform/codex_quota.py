@@ -57,8 +57,8 @@ async def fetch_quota():
         if executable.lower().endswith(('.cmd', '.bat')):
             if any(character in executable for character in ('%', '"', '\r', '\n')):
                 raise ValueError('codex command path cannot be safely invoked')
-            command_line = f'""{executable}" app-server --listen stdio://"'
-            command = [os.environ.get('COMSPEC', 'cmd.exe'), '/d', '/v:off', '/s', '/c', command_line]
+            command = [os.environ.get('COMSPEC', 'cmd.exe'), '/d', '/v:off', '/c',
+                       executable, 'app-server', '--listen', 'stdio://']
     process = await asyncio.create_subprocess_exec(
         *command,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=None,
