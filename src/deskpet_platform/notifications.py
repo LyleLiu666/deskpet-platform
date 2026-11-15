@@ -223,6 +223,13 @@ class NotificationStore:
                               (limit,)).fetchall()
         return self._items(rows)
 
+    def get(self, identity):
+        if type(identity) is not int or identity<1:raise ValueError('通知编号无效。')
+        with closing(self._connect()) as db:
+            row=db.execute('SELECT id,title,created,shown,seen,source,category,resolved FROM notifications WHERE id=?',
+                           (identity,)).fetchone()
+        return self._items([row])[0] if row else None
+
     def list_page(self, page, *, page_size=4, anchor=None, pending_first=False):
         if (type(page) is not int or page < 1 or type(page_size) is not int or not 1 <= page_size <= 100 or
                 (anchor is not None and (type(anchor) is not int or anchor < 0))):

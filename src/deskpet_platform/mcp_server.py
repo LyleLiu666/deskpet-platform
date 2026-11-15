@@ -47,6 +47,7 @@ from .token_metrics import TokenMetrics
 from .usb_setup import probe_usb
 from .usb_link import UsbLink, UsbPort, find_usb_devices, read_usb_identity
 from .weather import fetch_relay_weather, fetch_weather
+from .speech import synthesize_speech, validate_text
 from .wifi_link import probe_board
 
 Manual = Literal["operations", "development", "roles"]
@@ -394,6 +395,22 @@ class BoardSession:
             reply = await self.client.message_view(mode, identity)
             fields = ("view", "cached_count", "cached_unread", "page", "pages", "messages", "message")
             return {"status": "ok", **{key: reply[key] for key in fields if key in reply}}
+
+    async def speak(self,text):
+        text=validate_text(text)
+        async with self.lock:
+            client=self.client
+            if client is None:return {"status":"not_connected","connection":self.snapshot}
+            if client.channel.capabilities.get("speech_pcm")!=1:return {"status":"unsupported"}
+        pcm=await synthesize_speech(text)
+        async with self.lock:
+            if self.client is not client:return {"status":"not_connected","connection":self.snapshot}
+            return await client.play_speech_pcm(pcm)
+
+    async def read_notification(self,identity):
+        item=await asyncio.to_thread(self.notifications.get,identity)
+        if item is None:return {"status":"not_found"}
+        return await self.speak(item['title'])
 
     async def process_touch(self, event):
         self.notification_view.touch(event, channel=getattr(self.client, "channel", None))
@@ -1765,6 +1782,16 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         await asyncio.to_thread(session.notifications.sync)
         items = await asyncio.to_thread(session.notifications.list, limit)
         return {"notifications": items, "unseen": await asyncio.to_thread(session.notifications.unseen_count)}
+
+    @server.tool()
+    async def desk_speak(text: str, device_id: str | None = None) -> dict[str, Any]:
+        """主动朗读不超过 80 字的单行文字。文字会发送至微软 Edge 在线语音服务，音频不保存在设备卡上。"""
+        return await sessions.resolve(device_id).speak(text)
+
+    @server.tool()
+    async def desk_read_notification(identity: int, device_id: str | None = None) -> dict[str, Any]:
+        """主动朗读一条提醒的标题；标题会发送至微软 Edge 在线语音服务，不改变已读状态。"""
+        return await sessions.resolve(device_id).read_notification(identity)
 
     @server.tool()
     async def desk_message_view(

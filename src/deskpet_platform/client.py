@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import tempfile
 import zlib
+from contextlib import suppress
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -143,6 +144,32 @@ class Client:
             raise DeviceError("weather_not_supported")
         async with self._operation:
             return await self.channel.send("weather_relay", **snapshot)
+
+    async def play_speech_pcm(self, pcm, *, poll_interval=.1):
+        """Play 16 kHz mono PCM16, clearing the device buffer on failure."""
+        if not isinstance(pcm,bytes) or not 0<len(pcm)<=160000 or len(pcm)%2:
+            raise ValueError("语音音频须为不超过五秒的 16 kHz 单声道 PCM。")
+        if self.channel.capabilities.get("speech_pcm") != 1:
+            raise DeviceError("speech_not_supported")
+        async with self._operation:
+            started=False
+            try:
+                await self.channel.send("speech_begin",bytes=len(pcm),crc32=zlib.crc32(pcm))
+                started=True
+                for offset in range(0,len(pcm),384):
+                    await self.channel.send("speech_chunk",offset=offset,data=pcm[offset:offset+384].hex())
+                await self.channel.send("speech_commit")
+                async with asyncio.timeout(15):
+                    while True:
+                        result=await self.channel.send("speech_status")
+                        status=result.get("speech_status")
+                        if status=="finished":return {"status":"finished","duration_ms":round(len(pcm)/32)}
+                        if status not in ("queued","playing"):raise DeviceError("speech_"+str(status))
+                        await asyncio.sleep(poll_interval)
+            except BaseException:
+                if started:
+                    with suppress(Exception):await self.channel.send("speech_cancel")
+                raise
 
     async def speed_windows(self, recent_seconds=None, long_days=None):
         if self.channel.capabilities.get("speed_windows") != 1:
