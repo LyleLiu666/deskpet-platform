@@ -309,7 +309,8 @@ class BoardSession:
                             await self.refresh_agent_notifications(heartbeat)
                         except (sqlite3.Error, ValueError):
                             self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
-                    elif time.monotonic() >= self.next_notification_attempt:
+                    elif (self.client.channel.capabilities.get("text_present") == 1 and
+                          heartbeat.get("pet_page") == 0 and time.monotonic() >= self.next_notification_attempt):
                         self.next_notification_attempt = time.monotonic() + 4
                         try:
                             await deliver_next(self.client, self.notifications)

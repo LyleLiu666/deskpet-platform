@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .adaptive_speed.config import Config as SpeedConfig
 from .card_upload import upload_file, upload_usb, validate_path
-from .channel import Channel, CommandRejected, DeviceError
+from .channel import Channel, CommandRejected, DeviceError, TextNotVisible
 from .image_display import prepare_image
 from .pairing import DeviceConfig, valid_device_uuid
 from .role_install import MAX_ROLE_ACTIONS, MAX_ROLE_ID_LENGTH, valid_identity
@@ -483,8 +483,10 @@ class Client:
             raise DeviceError("text_not_supported")
         async with self._operation:
             state = await self.channel.send("heartbeat")
-            if state.get("pet_page") != 0 or type(state.get("view_token")) is not int:
-                raise DeviceError("请在设备上打开桌宠首页。")
+            if type(state.get("pet_page")) is not int or type(state.get("view_token")) is not int:
+                raise DeviceError("设备未提供有效的文字显示状态。")
+            if state["pet_page"] != 0:
+                raise TextNotVisible("请在设备上打开桌宠首页。")
             generation = state.get("text_generation", 0) + 1
             answer = await self.channel.send(
                 "text_begin", generation=generation, view_token=state["view_token"],
@@ -492,6 +494,8 @@ class Client:
                 display_ms=4000, ttl_ms=3000,
             )
             if answer.get("text_status") != "receiving":
+                if answer.get("text_reason") == "view_changed":
+                    raise TextNotVisible("设备画面已切换，提醒将在画面可用时重试。")
                 raise DeviceError("设备当前无法接收测试文字。")
             for index, offset in enumerate(range(0, len(bitmap), 192)):
                 answer = await self.channel.send("text_chunk", generation=generation, index=index,

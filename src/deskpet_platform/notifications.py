@@ -9,6 +9,7 @@ import fcntl
 import sqlite3
 import time
 import asyncio
+from .channel import TextNotVisible
 
 
 SOURCE_NAMES = {"codex": "Codex", "claude_code": "Claude Code", "workbuddy": "WorkBuddy",
@@ -472,9 +473,12 @@ async def deliver_next(client, store):
         if item["action_pending"] is None:
             store.set_action_pending(item["id"], item["category"] == "completed")
     try:
-        receipt = await client.show_text(notification_text(item))
-    except ValueError:
-        receipt = await client.show_text(notification_text(item, detail=False))
+        try:
+            receipt = await client.show_text(notification_text(item))
+        except ValueError:
+            receipt = await client.show_text(notification_text(item, detail=False))
+    except TextNotVisible:
+        return False
     if receipt.get("status") not in ("shown", "finished"):
         return False
     store.mark_shown(item["id"])
