@@ -60,6 +60,24 @@ jobs:
           ./install-windows.ps1
           & ./.venv/Scripts/deskpet-platform.exe --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install the uploaded GitHub release draft asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP 'DeskPet downloaded release'
+          New-Item -ItemType Directory -Path $destination | Out-Null
+          gh release download v0.1.0-rc1 --repo $env:GITHUB_REPOSITORY --dir $destination --pattern '*.tar.gz' --pattern SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $archive = Join-Path $destination 'deskpet_platform-0.1.0.tar.gz'
+          $line = Get-Content (Join-Path $destination 'SHA256SUMS.txt') | Where-Object { $_ -match '  deskpet_platform-0.1.0.tar.gz$' }
+          if (-not $line -or (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower() -ne $line.Substring(0,64)) { throw 'Release checksum mismatch' }
+          tar -xzf $archive -C $destination
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Set-Location (Join-Path $destination 'deskpet_platform-0.1.0')
+          ./install-windows.ps1
+          & ./.venv/Scripts/deskpet-platform.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Rehearse actual Claude Code against a synthetic local API
         shell: pwsh
         timeout-minutes: 4
