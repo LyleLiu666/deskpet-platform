@@ -50,6 +50,23 @@ class WindowsHookCommandTests(unittest.TestCase):
         self.assertEqual(self.record.read_bytes(), payload)
         self.assertEqual(result.returncode, 0)
 
+    @unittest.skipUnless(os.name == "nt", "Windows isolated notification rehearsal")
+    def test_synthetic_claude_question_and_answer_reach_the_real_hook(self):
+        from deskpet_platform.notifications import NotificationStore
+        config = self.root / "isolated state" / "device.json"
+        store = NotificationStore(config.parent / "notifications.sqlite3")
+        event = {"session_id": "fixture-session", "cwd": str(self.root),
+                 "tool_name": "AskUserQuestion", "tool_use_id": "fixture-question",
+                 "tool_input": {"questions": [{"question": "private fixture"}]}}
+        args = ("-m", "deskpet_platform", "--config", str(config), "claude-hook")
+        for phase in ("PreToolUse", "PostToolUse"):
+            payload = json.dumps({**event, "hook_event_name": phase}).encode()
+            _, result = self.run_hook(sys.executable, *args, data=payload)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(json.loads(result.stdout), {})
+            self.assertEqual(store.home_summary()["response_count"], 1 if phase == "PreToolUse" else 0)
+        self.assertTrue(store.list()[0]["resolved"])
+
     def test_stalled_hook_does_not_block_agent(self):
         self.script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
         _, result = self.run_hook(sys.executable, str(self.script))
