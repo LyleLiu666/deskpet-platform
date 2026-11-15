@@ -28,6 +28,11 @@ class WindowsScenarioTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(configured["hooks"]["PreToolUse"][0], original["hooks"]["PreToolUse"][0])
                 generated = configured["hooks"]["Stop"][-1]["hooks"][0]["command"]
                 self.assertTrue(generated.startswith("powershell.exe "))
+                await server.call_tool("desk_set_agent_quota", {"source": "claude_code", "enabled": True})
+                with_quota = json.loads(settings.read_text(encoding="utf-8"))
+                self.assertEqual(with_quota["hooks"], configured["hooks"])
+                await server.call_tool("desk_set_agent_quota", {"source": "claude_code", "enabled": False})
+                self.assertEqual(json.loads(settings.read_text(encoding="utf-8")), configured)
                 again = await server.call_tool("desk_set_claude_notifications", {"enabled": True})
                 self.assertFalse(again[1]["added"])
                 removed = await server.call_tool("desk_set_claude_notifications", {"enabled": False})

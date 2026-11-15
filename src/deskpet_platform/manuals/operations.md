@@ -84,11 +84,11 @@ tool_timeout_sec = 1200
 - `desk_set_role_base` 设置持续播放的角色动作；临时动作结束后回到持续动作。切换角色或重启后恢复该角色默认动作。
 - `desk_upload_files` 可以传输 `desk/` 和 `photos/` 下的文件。写入 `roles/` 使用 `desk_install_role`。
 - `desk_delete_resource` 可删除 `roles/<角色标识>` 对应的完整角色、`photos/<照片标识>` 对应的照片及缩略图，或 `desk/` 下的单个文件。删除当前角色或试播前保存的角色前，先切换到其他角色。
-- Windows 上的 Agent 提醒钩子尚未完成验证，当前不会安装新的钩子；配对和手动控制可继续使用。
+- Windows 上可启用 Claude Code 提醒；Codex 和其他 Agent 的提醒钩子尚未完成验证，当前不会安装。配对和手动控制可继续使用。
 - 在已验证的环境中，每种 Agent 在电脑上启用一次，提醒会发给这套配置中所有已配对的小屏。离线设备重新连接后会补收。每台小屏各自保存投递与已读状态。在 Agent 里答复后，各设备都清除该条待应答提示。调亮度、切换角色和查看单台设备的提醒仍按设备 ID 选择。
 - 用 `desk_enable_codex_notifications` 启用 Codex 提醒，再到 Codex 的 `/hooks` 或设置中的 Hooks 审核并信任新增条目。工具会返回写入的 `hooks.json` 路径。为 MCP 设置 `CODEX_HOME` 后，启用和停用操作都使用该目录。小屏可通过 Wi-Fi 连接时，关闭 MCP 后也可由本机后台进程投递。`desk_list_notifications` 和 `desk_mark_notification_seen` 管理小屏自己的提醒记录。`desk_disable_codex_notifications` 移除本程序的 hook，保留已有提醒。[Codex Hooks 说明](https://developers.openai.com/codex/hooks)
 - 额度来源在小屏「监控设置」中选择：Codex、Claude Code、Antigravity Gemini 或 Antigravity Claude/GPT。Codex 使用其本机账户接口；账号未返回的积分或重置卡显示为空。Claude Code 和 Antigravity CLI 在 macOS 上可分别调用 `desk_set_agent_quota(source="claude_code", enabled=true)` 或 `desk_set_agent_quota(source="antigravity", enabled=true)` 启用采集，再打开对应 Agent 会话。原状态栏命令会保留；调用同一工具并传 `enabled=false` 可移除采集。Windows 上，Claude Code 没有现有自定义状态栏时可以同样启用；如果已有状态栏，程序暂不自动修改，避免使用错误的命令环境。Antigravity 的 Windows 采集尚未验证。启用自定义状态栏可能隐藏 Claude Code 原本显示的部分快捷键提示。Agent 没有提供有效数据、会话未开始、状态栏被其他设置覆盖或数据过期时，小屏显示 `--`，并不代表额度为零。Antigravity 的模型组映射尚未用真实账户数据验收；桌面应用的额度接口也未验证。
-- 用 `desk_set_claude_notifications` 启用或关闭 Claude Code 提醒。已启用旧版提醒的用户可再次启用以更新钩子。Claude Code 2.1.281 的隔离会话验证了完成、提问和答复。按 Esc 取消的问题会在下次发送消息或完成一轮时清除。[Claude Code Hooks 说明](https://code.claude.com/docs/en/hooks)
+- 用 `desk_set_claude_notifications` 启用或关闭 Claude Code 提醒。已启用旧版提醒的用户可再次启用以更新钩子。Claude Code 2.1.281 的 macOS 隔离会话验证了完成、提问和答复；Windows 隔离会话验证了完成，提问和答复使用合成事件验证。按 Esc 取消的问题会在下次发送消息或完成一轮时清除。[Claude Code Hooks 说明](https://code.claude.com/docs/en/hooks)
 - 用 `desk_set_antigravity_notifications` 启用或关闭 Antigravity 的完成和提问提醒。已启用旧版提醒的用户可再次启用以更新钩子。Antigravity CLI 1.5.7 已通过真实完成和提问钩子测试。桌面应用和授权弹窗仍待验证。[Antigravity Hooks 说明](https://antigravity.google/docs/hooks)
 - 用 `desk_set_opencode_notifications` 启用或关闭 OpenCode 完成、提问和授权提醒。已安装旧版的用户可再次启用以升级插件，之后重启 OpenCode。中止或删除会话会清除该会话的待应答状态，保留提醒记录。OpenCode 1.18.25 的隔离实例已验证完成、提问、答复和拒绝授权。实机验证拒绝授权只清除对应请求。日常桌面配置仍待验收。[OpenCode V1 插件配置](https://opencode.ai/v1/docs/plugins/)
 - 用 `desk_set_workbuddy_notifications` 启用或关闭 WorkBuddy 的完成、提问和授权提醒。WorkBuddy 使用默认的 `workbuddy`，WorkBuddy AI 使用 `workbuddy_ai`。启用后重启相应应用。提问按请求编号清除。授权按会话轮次合并，并在该轮结束时清除。两版内置 CLI 已通过完成提醒测试，WorkBuddy 5.1.5 另通过授权提示和拒绝后清除的实机测试。桌面应用及 WorkBuddy AI 授权仍待验收。
