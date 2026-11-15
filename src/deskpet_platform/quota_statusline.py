@@ -76,7 +76,7 @@ def _metadata(command):
             if (not isinstance(shell, list) or len(shell) != 2 or shell[0] not in ("bash", "powershell", "cmd") or
                     not isinstance(shell[1], str) or not shell[1]):
                 raise ValueError
-        if _command(data) != command:
+        if "windows_shell" not in data and _command(data) != command:
             raise ValueError
         return data
     except (ValueError, TypeError, KeyError, UnicodeError):

@@ -31,8 +31,11 @@ class WindowsStatuslineTests(unittest.TestCase):
         self.assertTrue(configure(self.settings,source,self.store,enabled=True,executable=executable,windows_shell=shell))
         self.assertFalse(configure(self.settings,source,self.store,enabled=True,executable=executable,windows_shell=shell))
         command = json.loads(self.settings.read_text(encoding="utf-8"))["statusLine"]["command"]
+        baseline = subprocess.run([*parent, old_command], input=self.input, capture_output=True, timeout=15)
         result = subprocess.run([*parent, command], input=self.input, capture_output=True, timeout=15)
-        self.assertEqual((result.returncode,result.stdout,result.stderr),(0,b"original:"+self.input,b"original-error"))
+        self.assertEqual((result.returncode,result.stdout,result.stderr),
+                         (baseline.returncode,baseline.stdout,baseline.stderr))
+        self.assertEqual(baseline.returncode, 0)
         if executable is None:
             reading = QuotaStore(self.store).read(source,time.time())
             self.assertIsNotNone(reading)
