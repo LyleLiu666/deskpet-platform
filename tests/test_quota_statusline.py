@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -6,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from deskpet_platform.quota_capture import QuotaStore
 from deskpet_platform.quota_statusline import configure
@@ -29,6 +31,21 @@ class QuotaStatuslineTests(unittest.TestCase):
     def run_command(self, data):
         command = self.settings_json()["statusLine"]["command"]
         return subprocess.run(["/bin/sh", "-c", command], input=data, capture_output=True, timeout=5)
+
+    def test_windows_empty_claude_statusline_can_be_set_without_guessing_previous_shell(self):
+        from deskpet_platform import quota_statusline
+        class WindowsOS:
+            name = "nt"
+            def __getattr__(self, key):
+                return getattr(os, key)
+        self.write_settings({"other": True})
+        with patch.object(quota_statusline, "os", WindowsOS()), \
+             patch.object(quota_statusline.shutil, "which", return_value="C:/Windows/powershell.exe"), \
+             patch.object(quota_statusline, "_write") as write:
+            self.assertTrue(configure(self.settings, "claude_code", self.store, enabled=True))
+        installed = write.call_args.args[1]
+        metadata = quota_statusline._metadata(installed["statusLine"]["command"])
+        self.assertIsNone(metadata["original_command"])
 
     def test_existing_statusline_receives_original_input_and_metadata_survives_round_trip(self):
         script = self.root / "previous status.py"

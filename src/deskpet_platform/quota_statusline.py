@@ -1,8 +1,7 @@
 """Add quota capture to a local Agent status line while preserving its command.
 
 The user settings remain the source of truth and contain enough information
-to undo precisely this installation. Windows support is being rehearsed with
-an explicitly selected shell; automatic selection is not enabled yet.
+to undo precisely this installation.
 """
 
 import base64
@@ -142,8 +141,6 @@ def configure(path, source, store, *, enabled, executable=None, windows_shell=No
     The caller must use the Agent's actual user settings path.  Project or
     administrator settings may override these settings and require verification.
     """
-    if os.name == "nt" and enabled and windows_shell is None:
-        raise ValueError("Windows 状态栏接入尚未验证，未修改 Agent 设置。")
     if windows_shell is not None and (os.name != "nt" or not isinstance(windows_shell, (tuple, list)) or
             len(windows_shell) != 2 or windows_shell[0] not in ("bash", "powershell", "cmd") or
             not isinstance(windows_shell[1], str) or not windows_shell[1]):
@@ -183,6 +180,15 @@ def configure(path, source, store, *, enabled, executable=None, windows_shell=No
                 settings.pop("statusLine")
             _write(path, settings, raw)
             return True
+        if os.name == "nt" and windows_shell is None:
+            if previous and "windows_shell" in previous:
+                windows_shell = previous["windows_shell"]
+            elif source == "claude_code" and current is None:
+                # There is no old command to interpret: the wrapper itself
+                # works under both Claude's Git Bash and PowerShell runners.
+                windows_shell = ("powershell", shutil.which("powershell.exe"))
+            else:
+                raise ValueError("无法确认现有状态栏的命令环境，未修改 Agent 设置。")
         if status is not None:
             if status.get("enabled") is False or status.get("type", "command") != "command":
                 raise ValueError("Agent 状态栏已关闭或格式不支持，未修改。")
