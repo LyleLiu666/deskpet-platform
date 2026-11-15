@@ -42,17 +42,25 @@ function RunCommand([string]$exe, [string]$arguments, [byte[]]$bytes, [bool]$dis
     $process.StartInfo = $info
     try {
         if (!$process.Start()) { return -1 }
+        $watch = [Diagnostics.Stopwatch]::StartNew()
         if ($discard) { $out = [IO.Stream]::Null; $err = [IO.Stream]::Null }
         else { $out = [Console]::OpenStandardOutput(); $err = [Console]::OpenStandardError() }
         $outTask = $process.StandardOutput.BaseStream.CopyToAsync($out)
         $errTask = $process.StandardError.BaseStream.CopyToAsync($err)
         try {
             $write = $process.StandardInput.BaseStream.WriteAsync($bytes, 0, $bytes.Length)
-            if ($discard -and !$write.Wait(2500)) { $process.Kill(); return -1 }
+            if ($discard -and !$write.Wait(1500)) {
+                $process.Kill(); $null = $process.WaitForExit(500); return -1
+            }
             $null = $write.GetAwaiter().GetResult()
             $process.StandardInput.Close()
         } catch { try { $process.StandardInput.Close() } catch {} }
-        if ($discard -and !$process.WaitForExit(2500)) { $process.Kill(); return -1 }
+        if ($discard) {
+            $remaining = 1500 - [int]$watch.ElapsedMilliseconds
+            if ($remaining -le 0 -or !$process.WaitForExit($remaining)) {
+                $process.Kill(); $null = $process.WaitForExit(500); return -1
+            }
+        }
         $process.WaitForExit()
         $null = $outTask.GetAwaiter().GetResult()
         $null = $errTask.GetAwaiter().GetResult()

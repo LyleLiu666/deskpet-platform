@@ -79,6 +79,30 @@ class WindowsStatuslineEncodingTests(unittest.TestCase):
             self.assertEqual((result.returncode, result.stdout, result.stderr),
                              (0, b"old:" + payload, b"previous-error"))
 
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is required for the proxy rehearsal")
+    def test_stalled_capture_does_not_block_existing_statusline(self):
+        powershell = shutil.which("pwsh")
+        with tempfile.TemporaryDirectory(prefix="deskpet stalled capture ") as directory:
+            root = Path(directory)
+            package = root / "deskpet_platform"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "quota_capture.py").write_text("import time; time.sleep(30)", encoding="utf-8")
+            old = root / "previous.py"
+            old.write_text("import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())", encoding="utf-8")
+            quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+            value = self.metadata("powershell")
+            value.update(store=str(root / "quota.sqlite3"), executable=sys.executable,
+                         original_command=f"& {quote(sys.executable)} {quote(old)}",
+                         windows_shell=["powershell", powershell])
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root)
+            payload = b'{"fixture":"preserved"}'
+            encoded = _command(value)[len(PREFIX):]
+            result = subprocess.run([powershell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                                    input=payload, capture_output=True, timeout=3, env=env)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, payload, b""))
+
     @unittest.skipUnless(os.name != "nt" and shutil.which("pwsh") and shutil.which("bash"),
                          "a POSIX Bash and PowerShell are required for this proxy rehearsal")
     def test_bash_parent_keeps_original_input_and_exit_status(self):
