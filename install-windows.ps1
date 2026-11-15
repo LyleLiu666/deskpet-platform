@@ -2,8 +2,14 @@ $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 if ($env:OS -ne 'Windows_NT') { throw 'This installer requires Windows.' }
 if (Get-Command uv -ErrorAction SilentlyContinue) {
-    & uv sync --locked --python ">=3.11,<3.15"
-    if ($LASTEXITCODE -ne 0) { throw 'Installation failed. Check the error above and retry.' }
+    $previousEnvironment = $env:UV_PROJECT_ENVIRONMENT
+    try {
+        $env:UV_PROJECT_ENVIRONMENT = Join-Path $PSScriptRoot '.venv'
+        & uv sync --locked --python ">=3.11,<3.15"
+        if ($LASTEXITCODE -ne 0) { throw 'Installation failed. Check the error above and retry.' }
+    } finally {
+        $env:UV_PROJECT_ENVIRONMENT = $previousEnvironment
+    }
 } else {
     $python = $null
     $pythonArgs = @()

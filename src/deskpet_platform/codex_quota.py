@@ -61,7 +61,7 @@ async def fetch_quota():
                        executable, 'app-server', '--listen', 'stdio://']
     process = await asyncio.create_subprocess_exec(
         *command,
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=None,
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         limit=262144, env={**os.environ, 'PATH': path},
     )
 
