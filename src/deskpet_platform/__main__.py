@@ -88,6 +88,9 @@ def main():
     workbuddy.add_argument("--edition", choices=EDITIONS, default="workbuddy")
     commands.add_parser("notification-worker", help="在后台发送待处理的提醒")
     commands.add_parser("receiver-worker", help="在后台发送独立设备的提醒")
+    service = commands.add_parser("receiver-service", help="持续更新独立设备的数据和提醒")
+    service.add_argument("--shared-config", type=Path, required=True, help="原设备配置，用于共享提醒和额度")
+    service.add_argument("--token-probe", type=Path, help="AgentSpeedProbe 程序路径")
     args = parser.parse_args()
     args.config = args.config.expanduser().resolve()
     if args.command == "codex-hook":
@@ -121,6 +124,10 @@ def main():
     if args.command == "receiver-worker":
         from .notifications import run_receiver_worker
         asyncio.run(run_receiver_worker(args.config))
+        return
+    if args.command == "receiver-service":
+        from .notifications import run_live_receiver
+        asyncio.run(run_live_receiver(args.config, args.shared_config.expanduser().resolve(), token_probe=args.token_probe))
         return
     if args.command == "mcp":
         from .mcp_server import create_server

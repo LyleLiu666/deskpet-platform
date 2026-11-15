@@ -613,6 +613,71 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(registry.list()),1)
             self.assertEqual(notifications.NotificationStore(receiver.parent/'notifications.sqlite3').unseen_count(),1)
 
+    async def test_live_receiver_runs_data_sources_and_releases_them_on_handoff(self):
+        from deskpet_platform.device_registry import DeviceRegistry
+        started, stopped = [], []
+        class Session:
+            def __init__(self, path, **kwargs):
+                self.path, self.kwargs = path, kwargs
+                started.append(('session', kwargs))
+            async def drop(self): stopped.append('drop')
+        def make_poll(name):
+            async def run(self):
+                started.append(name)
+                try:
+                    await asyncio.Future()
+                finally:
+                    stopped.append(name)
+            return run
+        for name in ('poll', 'poll_weather', 'poll_tokens', 'poll_quota', 'poll_quota_display', 'poll_computer_metrics'):
+            setattr(Session, name, make_poll(name))
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'device.json'
+            DeviceConfig('02:00:00:00:00:01', bytes(range(32))).save(config)
+            receiver = DeviceRegistry(config).add_receiver(DeviceConfig('02:00:00:00:00:02', bytes(range(32))))
+            with patch('deskpet_platform.mcp_server.BoardSession', Session):
+                task = asyncio.create_task(notifications.run_live_receiver(receiver, config, max_seconds=.35,
+                                                                          poll_interval=.02, handoff_delay=.03))
+                await asyncio.sleep(.08)
+                self.assertTrue(notifications.request_worker_yield(receiver))
+                await task
+            sessions = [item[1] for item in started if isinstance(item, tuple)]
+            self.assertGreaterEqual(len(sessions), 2)
+            self.assertEqual(sessions[0]['notification_source'].path, config.parent / 'notifications.sqlite3')
+            self.assertEqual(sessions[0]['quota_store'].path, config.parent / 'agent-quota.sqlite3')
+            for name in ('poll', 'poll_weather', 'poll_tokens', 'poll_quota', 'poll_quota_display', 'poll_computer_metrics'):
+                self.assertGreaterEqual(started.count(name), 2)
+                self.assertEqual(started.count(name), stopped.count(name))
+
+    async def test_live_receiver_rejects_unregistered_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory) / 'device.json'
+            other = Path(directory) / 'other.json'
+            DeviceConfig('02:00:00:00:00:01', bytes(range(32))).save(shared)
+            DeviceConfig('02:00:00:00:00:02', bytes(range(32))).save(other)
+            with self.assertRaises(ValueError):
+                await notifications.run_live_receiver(other, shared, max_seconds=.1)
+
+    async def test_live_receiver_surfaces_failed_data_task_and_closes_session(self):
+        from deskpet_platform.device_registry import DeviceRegistry
+        closed = []
+        class Session:
+            def __init__(self, *args, **kwargs): pass
+            async def poll(self):
+                await asyncio.sleep(.01)
+                raise RuntimeError('data task failed')
+            async def wait(self): await asyncio.Future()
+            poll_weather = poll_tokens = poll_quota = poll_quota_display = poll_computer_metrics = wait
+            async def drop(self): closed.append(True)
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory) / 'device.json'
+            DeviceConfig('02:00:00:00:00:01', bytes(range(32))).save(shared)
+            receiver = DeviceRegistry(shared).add_receiver(DeviceConfig('02:00:00:00:00:02', bytes(range(32))))
+            with patch('deskpet_platform.mcp_server.BoardSession', Session):
+                with self.assertRaisesRegex(RuntimeError, 'data task failed'):
+                    await notifications.run_live_receiver(receiver, shared, max_seconds=1, poll_interval=.02)
+            self.assertEqual(closed, [True])
+
     async def test_receiver_worker_runs_while_existing_dispatcher_is_locked(self):
         from deskpet_platform.device_registry import DeviceRegistry
         from deskpet_platform.file_lock import acquire, release

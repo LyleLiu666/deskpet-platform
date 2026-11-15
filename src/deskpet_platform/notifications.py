@@ -555,6 +555,24 @@ async def run_receiver_worker(config_path, *, client_factory=None, max_seconds=8
                               receivers_only=True)
 
 
+async def run_live_receiver(config_path, shared_config, *, client_factory=None, token_probe=None, max_seconds=86400,
+                            poll_interval=0.5, handoff_delay=7):
+    """Keep one registered receiver's data and notifications up to date."""
+    from .device_registry import DeviceRegistry
+    from .quota_capture import QuotaStore
+    config_path, shared_config = Path(config_path), Path(shared_config)
+    if config_path.resolve() not in {path.resolve() for path in DeviceRegistry(shared_config).receiver_paths()}:
+        raise ValueError('设备不是已登记的独立接收端。')
+    probe = Path(token_probe).expanduser() if token_probe is not None else shared_config.parent / 'bin/AgentSpeedProbe'
+    if token_probe is not None and not probe.is_file():
+        raise ValueError('找不到指定的速度采集程序。')
+    await _run_device_worker(config_path, source=NotificationStore(shared_config.parent / 'notifications.sqlite3'),
+                             client_factory=client_factory, deadline=time.monotonic() + max_seconds,
+                             poll_interval=poll_interval, handoff_delay=handoff_delay,
+                             live_options={'token_probe': probe if probe.is_file() else None,
+                                           'quota_store': QuotaStore(shared_config.parent / 'agent-quota.sqlite3')})
+
+
 async def _run_workers(config_path, *, client_factory, max_seconds, poll_interval, handoff_delay, idle_seconds, receivers_only):
     from .device_registry import DeviceRegistry
 
@@ -643,7 +661,7 @@ def _sync_active(store):
 
 
 async def _run_device_worker(config_path, *, source, client_factory, deadline, poll_interval,
-                             handoff_delay):
+                             handoff_delay, live_options=None):
     from .client import Client
     from .mcp_server import BoardSession
     from .pairing import DeviceConfig
@@ -656,8 +674,24 @@ async def _run_device_worker(config_path, *, source, client_factory, deadline, p
         return
     lock_path = config_path.parent / "notification-worker.lock"
     descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    task = None
+    tasks = []
     session = None
+    def start_session():
+        board = BoardSession(config_path, background=True, client_factory=client_factory,
+                             notification_source=source, **(live_options or {}))
+        methods = [board.poll]
+        if live_options is not None:
+            methods.extend((board.poll_weather, board.poll_tokens, board.poll_quota,
+                            board.poll_quota_display, board.poll_computer_metrics))
+        return board, [asyncio.create_task(method()) for method in methods]
+
+    async def stop_session():
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if session is not None:
+            await session.drop()
+
     try:
         while time.monotonic() < deadline:
             try:
@@ -668,22 +702,20 @@ async def _run_device_worker(config_path, *, source, client_factory, deadline, p
         else:
             return
         handoff = config_path.parent / "notification-handoff"
-        session = BoardSession(config_path, background=True, client_factory=client_factory, notification_source=source)
-        task = asyncio.create_task(session.poll())
+        session, tasks = start_session()
         while time.monotonic() < deadline:
+            if live_options is not None:
+                for task in tasks:
+                    if task.done():
+                        task.result()
+                        raise RuntimeError('独立设备的数据更新意外停止。')
             if handoff.exists():
                 handoff.unlink(missing_ok=True)
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-                await session.drop()
+                await stop_session()
+                session, tasks = None, []
                 await asyncio.sleep(handoff_delay)
-                session = BoardSession(config_path, background=True, client_factory=client_factory, notification_source=source)
-                task = asyncio.create_task(session.poll())
+                session, tasks = start_session()
             await asyncio.sleep(poll_interval)
     finally:
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        if session is not None:
-            await session.drop()
+        await stop_session()
         os.close(descriptor)
