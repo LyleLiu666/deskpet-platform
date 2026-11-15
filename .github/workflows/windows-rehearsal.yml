@@ -44,5 +44,5 @@ jobs:
             & ./.venv/Scripts/python.exe -m unittest discover -s tests -p $test -v
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-          & ./.venv/Scripts/python.exe -m unittest test_platform.PlatformTests.test_wifi_probe_accepts_only_the_paired_board_proof test_platform.PlatformTests.test_handshake_display_and_disconnect_on_local_wire -v
+          & ./.venv/Scripts/python.exe -m unittest test_platform.PlatformTests.test_wifi_probe_accepts_only_the_paired_board_proof test_platform.PlatformTests.test_handshake_display_and_disconnect_on_local_wire test_platform.PlatformTests.test_real_mcp_lists_and_reads_manuals_without_pairing -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
