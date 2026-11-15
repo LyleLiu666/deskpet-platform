@@ -1,0 +1,118 @@
+"""Build a reversible Windows status-line wrapper without storing its input on disk."""
+import base64
+import json
+import subprocess
+
+PREFIX = "powershell.exe -NoProfile -NonInteractive -EncodedCommand "
+MARKER = "# deskpet-quota-windows-v1-"
+
+# This script is embedded in the Agent's setting. It can still forward input
+# to the original command if the DeskPet Python environment is removed.
+SCRIPT = r'''
+$ErrorActionPreference = 'Stop'
+function Decode([string]$value) {
+    [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($value))
+}
+$meta = (Decode '__METADATA__') | ConvertFrom-Json
+$captureArgs = Decode '__CAPTURE_ARGS__'
+$previousArgs = Decode '__PREVIOUS_ARGS__'
+$inputStream = [IO.MemoryStream]::new()
+[Console]::OpenStandardInput().CopyTo($inputStream)
+$data = $inputStream.ToArray()
+$inputStream.Dispose()
+function RunCommand([string]$exe, [string]$arguments, [byte[]]$bytes, [bool]$discard) {
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $exe
+    $info.Arguments = $arguments
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardInput = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    try {
+        if (!$process.Start()) { return -1 }
+        if ($discard) { $out = [IO.Stream]::Null; $err = [IO.Stream]::Null }
+        else { $out = [Console]::OpenStandardOutput(); $err = [Console]::OpenStandardError() }
+        $outTask = $process.StandardOutput.BaseStream.CopyToAsync($out)
+        $errTask = $process.StandardError.BaseStream.CopyToAsync($err)
+        try {
+            $write = $process.StandardInput.BaseStream.WriteAsync($bytes, 0, $bytes.Length)
+            if ($discard -and !$write.Wait(2500)) { $process.Kill(); return -1 }
+            $write.GetAwaiter().GetResult()
+            $process.StandardInput.Close()
+        } catch { try { $process.StandardInput.Close() } catch {} }
+        if ($discard -and !$process.WaitForExit(2500)) { $process.Kill(); return -1 }
+        $process.WaitForExit()
+        $outTask.GetAwaiter().GetResult()
+        $errTask.GetAwaiter().GetResult()
+        return $process.ExitCode
+    } catch { return -1 }
+    finally { $process.Dispose() }
+}
+$ignored = RunCommand $meta.executable $captureArgs $data $true
+if ($null -ne $meta.original_command -and $meta.original_command.Length -gt 0) {
+    $result = RunCommand ($meta.windows_shell[1]) $previousArgs $data $false
+    if ($result -lt 0) { exit 1 }
+    exit $result
+}
+exit 0
+'''.lstrip()
+
+
+def _b64(value):
+    return base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+
+def command(metadata):
+    shell, executable = metadata["windows_shell"]
+    original = metadata["original_command"] or ""
+    if shell == "bash":
+        previous_args = subprocess.list2cmdline(["-c", original])
+    elif shell == "powershell":
+        previous_args = subprocess.list2cmdline(["-NoProfile", "-NonInteractive", "-Command", original])
+    elif shell == "cmd":
+        previous_args = f'/d /s /c "{original}"'
+    else:
+        raise ValueError("不支持的 Windows 状态栏命令环境。")
+    capture_args = subprocess.list2cmdline(["-m", "deskpet_platform.quota_capture",
+                                            metadata["source"], metadata["store"]])
+    encoded_meta = _b64(json.dumps(metadata, ensure_ascii=True, separators=(",", ":")))
+    script = (MARKER + encoded_meta + "\n" + SCRIPT.replace("__METADATA__", encoded_meta)
+              .replace("__CAPTURE_ARGS__", _b64(capture_args))
+              .replace("__PREVIOUS_ARGS__", _b64(previous_args)))
+    result = PREFIX + base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    if len(result) > 30000:
+        raise ValueError("状态栏命令过长，未修改 Agent 设置。")
+    return result
+
+
+def metadata(command_text):
+    if not isinstance(command_text, str) or not command_text.startswith(PREFIX):
+        return None
+    try:
+        script = base64.b64decode(command_text[len(PREFIX):], validate=True).decode("utf-16le")
+        first = script.split("\n", 1)[0]
+        if not first.startswith(MARKER):
+            return None
+        data = json.loads(base64.b64decode(first[len(MARKER):], validate=True))
+        if command(data) != command_text:
+            raise ValueError
+        return data
+    except (ValueError, TypeError, KeyError, UnicodeError, IndexError):
+        raise ValueError("DeskPet 额度状态栏配置已被修改，请先检查原有设置。") from None
+
+
+def replace_file(path, replacement):
+    """Replace an existing settings file while preserving its Windows ACL."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    function = kernel.ReplaceFileW
+    function.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                         wintypes.DWORD, wintypes.LPVOID, wintypes.LPVOID]
+    function.restype = wintypes.BOOL
+    if not function(str(path), str(replacement), None, 0, None, None):
+        raise ctypes.WinError(ctypes.get_last_error())

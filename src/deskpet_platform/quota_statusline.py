@@ -1,8 +1,8 @@
 """Add quota capture to a local Agent status line while preserving its command.
 
-Only POSIX shells are supported here.  In particular, a Windows command shell
-cannot safely be treated like /bin/sh.  The user settings remain the source of
-truth and contain enough information to undo precisely this installation.
+The user settings remain the source of truth and contain enough information
+to undo precisely this installation. Windows support is being rehearsed with
+an explicitly selected shell; automatic selection is not enabled yet.
 """
 
 import base64
@@ -30,6 +30,9 @@ def settings_path(source):
 
 
 def _command(metadata):
+    if "windows_shell" in metadata:
+        from .quota_windows_statusline import command
+        return command(metadata)
     encoded = base64.urlsafe_b64encode(json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
                                        .encode()).decode().rstrip("=")
     capture = shlex.join([metadata["executable"], "-m", "deskpet_platform.quota_capture",
@@ -44,21 +47,39 @@ def _command(metadata):
 
 
 def _metadata(command):
-    if not isinstance(command, str) or not command.startswith(MARKER):
+    if not isinstance(command, str):
         return None
-    token = command[len(MARKER):].partition("\n")[0]
+    from .quota_windows_statusline import PREFIX, metadata as windows_metadata
+    if command.startswith(PREFIX):
+        data = windows_metadata(command)
+        if data is None:
+            return None
+    elif command.startswith(MARKER):
+        token = command[len(MARKER):].partition("\n")[0]
+        try:
+            raw = base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True)
+            data = json.loads(raw)
+        except (ValueError, TypeError, UnicodeError):
+            raise ValueError("DeskPet 额度状态栏配置已被修改，请先检查原有设置。") from None
+    else:
+        return None
     try:
-        raw = base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True)
-        data = json.loads(raw)
-        if (not isinstance(data, dict) or set(data) != {"source", "store", "executable", "original_command",
-                                                        "had_status", "added_type", "added_stack"} or
-                data["source"] not in READERS or not all(isinstance(data[k], str) for k in ("store", "executable")) or
+        required = {"source", "store", "executable", "original_command", "had_status", "added_type", "added_stack"}
+        if not isinstance(data, dict) or set(data) not in (required, required | {"windows_shell"}):
+            raise ValueError
+        if (data["source"] not in READERS or not all(isinstance(data[k], str) for k in ("store", "executable")) or
                 not (data["original_command"] is None or isinstance(data["original_command"], str)) or
-                any(type(data[k]) is not bool for k in ("had_status", "added_type", "added_stack")) or
-                _command(data) != command):
+                any(type(data[k]) is not bool for k in ("had_status", "added_type", "added_stack"))):
+            raise ValueError
+        if "windows_shell" in data:
+            shell = data["windows_shell"]
+            if (not isinstance(shell, list) or len(shell) != 2 or shell[0] not in ("bash", "powershell", "cmd") or
+                    not isinstance(shell[1], str) or not shell[1]):
+                raise ValueError
+        if _command(data) != command:
             raise ValueError
         return data
-    except (ValueError, TypeError, UnicodeError):
+    except (ValueError, TypeError, KeyError, UnicodeError):
         raise ValueError("DeskPet 额度状态栏配置已被修改，请先检查原有设置。") from None
 
 
@@ -84,7 +105,8 @@ def _write(path, settings, original):
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
             temporary = Path(stream.name)
-            os.fchmod(stream.fileno(), previous_mode)
+            if os.name != "nt":
+                os.fchmod(stream.fileno(), previous_mode)
             json.dump(settings, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
             stream.flush()
@@ -97,20 +119,31 @@ def _write(path, settings, original):
             current = None
         if current != original:
             raise ValueError("Agent 设置文件刚被其他程序修改，请重试。")
-        os.replace(temporary, path)
+        if os.name == "nt" and original is not None:
+            from .quota_windows_statusline import replace_file
+            replace_file(path, temporary)
+        elif os.name == "nt":
+            # On Windows rename fails rather than replacing a newly created file.
+            os.rename(temporary, path)
+        else:
+            os.replace(temporary, path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
 
 
-def configure(path, source, store, *, enabled, executable=None):
+def configure(path, source, store, *, enabled, executable=None, windows_shell=None):
     """Install or remove our status line command; return whether settings changed.
 
     The caller must use the Agent's actual user settings path.  Project or
     administrator settings may override these settings and require verification.
     """
-    if os.name == "nt":
+    if os.name == "nt" and windows_shell is None:
         raise ValueError("Windows 状态栏接入尚未验证，未修改 Agent 设置。")
+    if windows_shell is not None and (os.name != "nt" or not isinstance(windows_shell, (tuple, list)) or
+            len(windows_shell) != 2 or windows_shell[0] not in ("bash", "powershell", "cmd") or
+            not isinstance(windows_shell[1], str) or not windows_shell[1]):
+        raise ValueError("Windows 状态栏命令环境无效，未修改 Agent 设置。")
     if source not in READERS:
         raise ValueError("不支持的额度来源。")
     path, store = Path(path), Path(store).expanduser().resolve()
@@ -156,6 +189,8 @@ def configure(path, source, store, *, enabled, executable=None):
                         "original_command": current, "had_status": status is not None,
                         "added_type": status is None or "type" not in status,
                         "added_stack": source == "antigravity" and status is None}
+        if windows_shell is not None:
+            metadata["windows_shell"] = list(windows_shell)
         command = _command(metadata)
         if previous and current == command:
             return False
