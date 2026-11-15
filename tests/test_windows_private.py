@@ -23,8 +23,10 @@ $entries = (Get-Acl -LiteralPath $Path).Access | Where-Object { $_.AccessControl
 }
 @($entries) | ConvertTo-Json -Compress
 '''
+            probe = Path(directory) / "read-acl.ps1"
+            probe.write_text(script, encoding="utf-8")
             for item in (root, path):
-                result = subprocess.run(["powershell", "-NoProfile", "-Command", script, str(item)],
+                result = subprocess.run(["powershell", "-NoProfile", "-File", str(probe), str(item)],
                                         check=True, text=True, capture_output=True, timeout=15)
                 sids = json.loads(result.stdout)
                 if isinstance(sids, str):
