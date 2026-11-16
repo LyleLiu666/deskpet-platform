@@ -107,6 +107,7 @@ class BoardSession:
         self.last_notice_count = None
         self.attention_client = None
         self.attention_count = None
+        self.attention_source = None
         self.attention_due = 0.0
         self.last_message_cache = None
         self.weather_path = Path(path).parent / "weather-location.json"
@@ -387,10 +388,20 @@ class BoardSession:
             self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
             return
         count = min(65535, summary["response_count"])
-        if client is not self.attention_client or count != self.attention_count or now >= self.attention_due:
-            await client.set_attention_summary(count)
+        supports_source=client.channel.capabilities.get('attention_source')==1
+        sources=summary['response_sources']
+        source=0
+        if count and len(sources)>1:
+            source=6
+        elif count and sources:
+            source={'codex':1,'claude_code':2,'antigravity':3,'opencode':4,'workbuddy':5}.get(sources[0]['source'],0)
+        current_source=source if supports_source else None
+        if client is not self.attention_client or count != self.attention_count or current_source != self.attention_source or now >= self.attention_due:
+            if supports_source:await client.set_attention_summary(count,source=source)
+            else:await client.set_attention_summary(count)
             self.attention_client = client
             self.attention_count = count
+            self.attention_source = current_source
             self.attention_due = now + 5
 
     async def refresh_messages(self):

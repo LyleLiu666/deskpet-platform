@@ -538,11 +538,17 @@ class Client:
         async with self._operation:
             await self.channel.send("notice_count", count=min(65535, max(0, count)))
 
-    async def set_attention_summary(self, count):
+    async def set_attention_summary(self, count, *, source=0):
         if self.channel.capabilities.get("attention_summary") != 1:
             return
+        if type(source) is not int or not 0<=source<=6:
+            raise ValueError('invalid_attention_source')
+        count=min(65535,max(0,count))
+        fields={'count':count}
+        if self.channel.capabilities.get('attention_source')==1:
+            fields['source']=source if count else 0
         async with self._operation:
-            await self.channel.send("attention_summary", count=min(65535, max(0, count)))
+            await self.channel.send("attention_summary", **fields)
 
     async def appearance_config(self, *, theme=None, wallpaper=None):
         if theme is not None and wallpaper is not None:raise ValueError('请分别设置主题和壁纸。')

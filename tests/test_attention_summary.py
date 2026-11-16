@@ -18,9 +18,15 @@ class AttentionSummaryTests(unittest.IsolatedAsyncioTestCase):
         client.channel.send = AsyncMock(return_value={'ok': True})
         await client.set_attention_summary(3)
         client.channel.send.assert_awaited_once_with('attention_summary', count=3)
+        client.channel.capabilities['attention_source'] = 1
+        await client.set_attention_summary(2,source=1)
+        client.channel.send.assert_awaited_with('attention_summary', count=2,source=1)
+        await client.set_attention_summary(0,source=1)
+        client.channel.send.assert_awaited_with('attention_summary', count=0,source=0)
+        with self.assertRaises(ValueError): await client.set_attention_summary(2,source=7)
         client.channel.capabilities = {}
         await client.set_attention_summary(5)
-        self.assertEqual(client.channel.send.await_count, 1)
+        self.assertEqual(client.channel.send.await_count, 3)
 
     async def test_unanswered_is_distinct_from_unread_and_refreshes(self):
         with TemporaryDirectory() as directory:
@@ -42,6 +48,23 @@ class AttentionSummaryTests(unittest.IsolatedAsyncioTestCase):
             client.channel.capabilities = {}
             await session.refresh_attention_summary(client, now=20)
             self.assertEqual(client.set_attention_summary.await_count, 3)
+
+    async def test_source_changes_refresh_even_when_count_is_unchanged(self):
+        with TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory)/'device.json', no_token_probe=True)
+            client = type('Client', (), {})()
+            client.channel = type('Channel', (), {'capabilities': {'attention_summary': 1, 'attention_source': 1}})()
+            client.set_attention_summary = AsyncMock()
+            first=session.notifications.add_agent_event('codex','session','q1','response','Question')
+            await session.refresh_attention_summary(client,now=0)
+            client.set_attention_summary.assert_awaited_with(1,source=1)
+            session.notifications.resolve_response(first)
+            session.notifications.add_agent_event('claude_code','session','q2','response','Question')
+            await session.refresh_attention_summary(client,now=1)
+            client.set_attention_summary.assert_awaited_with(1,source=2)
+            session.notifications.add_agent_event('opencode','session','q3','response','Question')
+            await session.refresh_attention_summary(client,now=2)
+            client.set_attention_summary.assert_awaited_with(2,source=6)
 
     async def test_failed_send_is_retried_and_new_client_gets_current_state(self):
         with TemporaryDirectory() as directory:
