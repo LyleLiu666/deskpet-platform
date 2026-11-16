@@ -60,7 +60,7 @@ def build_dotnet(source, destination, notices, target, work):
     shutil.copyfile(zstd / "LICENSE", notices / "ZstdSharp-LICENSE.txt")
 
 
-def build(output, target):
+def build(output, target, *, fixture_output=None):
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="deskpet-probe-") as temporary:
         work = Path(temporary)
@@ -82,7 +82,10 @@ def build(output, target):
             shutil.copy2(built / binary.name, binary)
         else:
             build_dotnet(source, binary, notices, target, work)
-        verify(binary, source / FIXTURE)
+        fixture = source / FIXTURE
+        verify(binary, fixture)
+        if fixture_output is not None:
+            shutil.copyfile(fixture, fixture_output)
         label = target.replace("win-", "windows-")
         return Path(shutil.make_archive(str(output / f"AgentSpeedProbe-{label}"),
                                         "zip" if windows else "gztar", bundle))
@@ -91,8 +94,9 @@ def build(output, target):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--fixture-out", type=Path)
     arguments = parser.parse_args()
     target = TARGETS.get((platform.system(), platform.machine().lower()))
     if target is None:
         parser.error("Use a native macOS arm64, Windows x64, or Linux x64/arm64 build machine.")
-    print(build(arguments.output.resolve(), target))
+    print(build(arguments.output.resolve(), target, fixture_output=arguments.fixture_out))

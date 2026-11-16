@@ -8,8 +8,10 @@ import subprocess
 import sys
 import tempfile
 
+from verify_token_probe import verify as verify_probe
 
-def verify(archive):
+
+def verify(archive, fixture):
     with tempfile.TemporaryDirectory(prefix="DeskPet clean install ") as temporary:
         root = Path(temporary).resolve()
         source = root / "source"
@@ -35,13 +37,12 @@ def verify(archive):
         if json.loads(subprocess.check_output(
                 [*invocation, "--no-token-probe"], cwd=root, env=env, encoding="utf-8"))["speed"]["status"] != "disabled":
             raise RuntimeError("Could not disable the bundled probe")
-        raw = subprocess.check_output([str(probe), "--watch", "1"], cwd=root, env=env,
-                                      encoding="utf-8", timeout=20)
-        if not all(key in json.loads(raw.splitlines()[0]) for key in ("t", "state", "live")):
-            raise RuntimeError("Installed probe did not start")
+        verify_probe(probe, fixture)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path)
-    verify(parser.parse_args().archive.resolve())
+    parser.add_argument("fixture", type=Path)
+    args = parser.parse_args()
+    verify(args.archive.resolve(), args.fixture.resolve())
