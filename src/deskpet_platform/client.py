@@ -425,6 +425,29 @@ class Client:
         async with self._upload, self._operation:
             return await self.channel.send('wallpaper_delete', path=path)
 
+    async def list_wallpapers(self, cursor=''):
+        if self.channel.capabilities.get('wallpaper_list')!=1:raise DeviceError('wallpaper_list_not_supported')
+        if not isinstance(cursor,str) or (cursor and not cursor.startswith(('photos/','media/','wallpapers/'))):
+            raise ValueError('请使用上一页返回的壁纸路径。')
+        _appearance_wallpaper(cursor)
+        async with self._upload, self._operation:
+            result=await self.channel.send('wallpaper_list',cursor=cursor)
+        items=result.get('wallpapers');more=result.get('more')
+        if not isinstance(items,list) or len(items)>3 or type(more) is not bool or (more and not items):
+            raise DeviceError('invalid_wallpaper_list_response')
+        paths=[]
+        for item in items:
+            if not isinstance(item,dict) or type(item.get('selected')) is not bool:
+                raise DeviceError('invalid_wallpaper_list_response')
+            path=item.get('path')
+            try:
+                if not isinstance(path,str) or not path.startswith(('photos/','media/','wallpapers/')) or not _appearance_wallpaper(path):raise ValueError('invalid')
+            except (TypeError,ValueError):raise DeviceError('invalid_wallpaper_list_response') from None
+            if path in paths or path==cursor:raise DeviceError('invalid_wallpaper_list_response')
+            paths.append(path)
+        if sum(item['selected'] for item in items)>1:raise DeviceError('invalid_wallpaper_list_response')
+        return {'wallpapers':items,'next_cursor':paths[-1] if more else None}
+
     async def prepare_role(self, identity, version, actions, finish_action=None):
         if self.channel.capabilities.get("role_actions") != 1:
             raise DeviceError("role_actions_not_supported")

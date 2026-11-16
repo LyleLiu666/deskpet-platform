@@ -1364,6 +1364,12 @@ class BoardSession:
             if type(result.get('deleted')) is not bool:raise DeviceError('invalid_wallpaper_delete_response')
             return {'path':path,'deleted':result['deleted']}
 
+    async def list_wallpapers(self, cursor):
+        async with self.storage_lock, self.lock:
+            if self.client is None:return {'status':'not_connected','connection':self.snapshot}
+            if self.client.channel.capabilities.get('wallpaper_list')!=1:return {'status':'unsupported'}
+            return await self.client.list_wallpapers(cursor)
+
     async def add_photo(self, source):
         path = Path(source).expanduser()
         if not path.is_absolute() or not path.is_file():
@@ -1693,6 +1699,11 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     async def desk_delete_wallpaper(path: str, device_id: str | None = None) -> dict[str, Any]:
         """删除指定的已导入壁纸；正在使用的壁纸需先切换。"""
         return await sessions.resolve(device_id).delete_wallpaper(path)
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def desk_list_wallpapers(cursor: str = '', device_id: str | None = None) -> dict[str, Any]:
+        """分页列出可用壁纸及当前选择；传入上页返回的 next_cursor 查看下一页。"""
+        return await sessions.resolve(device_id).list_wallpapers(cursor)
 
     @server.tool()
     async def desk_add_theme(source: str, name: str = 'theme', device_id: str | None = None) -> dict[str, Any]:

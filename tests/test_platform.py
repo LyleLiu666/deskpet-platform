@@ -100,6 +100,26 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(DeviceError):
             await client.delete_wallpaper(path)
 
+    async def test_wallpaper_listing_validates_pages_and_exposes_cursor(self):
+        client=Client(DeviceConfig(DEVICE,KEY));client.channel=AsyncMock()
+        client.channel.capabilities={'wallpaper_list':1}
+        path='wallpapers/paper-0123456789abcdef.jpg'
+        client.channel.send.return_value={'wallpapers':[{'path':path,'selected':True}],'more':True}
+        page=await client.list_wallpapers()
+        self.assertEqual(page,{'wallpapers':[{'path':path,'selected':True}],'next_cursor':path})
+        client.channel.send.assert_awaited_with('wallpaper_list',cursor='')
+        client.channel.send.return_value={'wallpapers':[],'more':False}
+        self.assertEqual(await client.list_wallpapers(path),{'wallpapers':[],'next_cursor':None})
+        client.channel.send.return_value={'wallpapers':[],'more':True}
+        with self.assertRaises(DeviceError):await client.list_wallpapers()
+        client.channel.send.return_value={'wallpapers':[{'path':path,'selected':False}],'more':True}
+        with self.assertRaises(DeviceError):await client.list_wallpapers(path)
+        client.channel.send.return_value={'wallpapers':[{'path':'photos/../x.jpg','selected':False}],'more':False}
+        with self.assertRaises(DeviceError):await client.list_wallpapers()
+        with self.assertRaises(ValueError):await client.list_wallpapers('photos/../x.jpg')
+        client.channel.capabilities={}
+        with self.assertRaises(DeviceError):await client.list_wallpapers()
+
     async def test_clock_edit_sdk_validates_a_single_field_adjustment(self):
         class Channel:
             capabilities = {"clock_edit": 1}
@@ -1014,8 +1034,8 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                                                  "desk_set_claude_notifications", "desk_set_antigravity_notifications",
                                                  "desk_set_agent_quota",
                                                  "desk_set_opencode_notifications", "desk_set_workbuddy_notifications",
-                                     "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view", "desk_speak", "desk_read_notification", "desk_dashboard_config", "desk_appearance_config", "desk_add_theme", "desk_add_wallpaper", "desk_delete_wallpaper"})
-                        for name in ("desk_list_devices", "desk_read_manual"):
+                                     "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view", "desk_speak", "desk_read_notification", "desk_dashboard_config", "desk_appearance_config", "desk_add_theme", "desk_add_wallpaper", "desk_delete_wallpaper", "desk_list_wallpapers"})
+                        for name in ("desk_list_devices", "desk_read_manual", "desk_list_wallpapers"):
                             self.assertIs(tools[name].annotations.readOnlyHint, True)
                             self.assertIs(tools[name].annotations.openWorldHint, False)
                         for name in ("desk_status", "desk_show_text", "desk_pair_usb"):
