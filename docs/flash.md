@@ -27,4 +27,4 @@ python -m esptool --chip esp32 --port PORT flash_id
 python -m esptool --chip esp32 --port PORT write_flash --verify 0x1000 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 firmware.bin
 ```
 
-如果找不到串口，先换数据线或数据口。若识别到串口但无法连接芯片，对照板型说明进入下载模式后重试。写入校验成功后，重启小板，打开 Wi-Fi 设置，用手机扫码配网。让电脑与小板处于同一局域网，再按[操作手册](../src/deskpet_platform/manuals/operations.md#手机扫码配网和配对)完成配对。最后让 Agent 查询设备状态并让小板显示一行测试文字。
+如果找不到串口，先换数据线或数据口。Windows 设备管理器若识别到 USB 转串口芯片但没有 COM 口，检查该芯片的串口驱动是否已安装。若识别到串口但无法连接芯片，对照板型说明进入下载模式后重试。写入校验成功后，重启小板，打开 Wi-Fi 设置，用手机扫码配网。让电脑与小板处于同一局域网，再按[操作手册](../src/deskpet_platform/manuals/operations.md#手机扫码配网和配对)完成配对。最后让 Agent 查询设备状态并让小板显示一行测试文字。

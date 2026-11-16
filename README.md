@@ -41,7 +41,7 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
    用 --token-probe 指定其绝对路径。如果我希望跳过测速，给 MCP 加
    --no-token-probe，继续完成 DeskPet 安装和配对。找不到采集程序时先告诉我，
    由我决定是否安装。请勿在聊天中显示 Wi-Fi 密码、配对码或密钥。
-   需要重开 Agent 会话时明确告诉我，并在新会话继续验证。
+   需要重开 Agent 会话时提醒我先关闭占用搭搭的旧会话，再在新会话验证。
 4. 用 desk_list_devices 确认目标设备 ID，再用 desk_status 验证连接。
    配置了 Agent Speed 时，用 desk_token_status 检查是否收到有效读数。
    告诉我已验证的结果，以及还需要我在小板或手机上完成的步骤。
@@ -60,7 +60,7 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 
 ## 手动安装
 
-在仓库目录或解压后的源码包目录中，macOS 可运行 `./install-macos.command`，Windows 可在 PowerShell 中运行 `powershell -ExecutionPolicy Bypass -File .\install-windows.ps1`。安装使用已有的 uv 或 Python 3.11 至 3.14。[macOS 下载](https://www.python.org/downloads/macos/) · [Windows 下载](https://www.python.org/downloads/windows/)
+在仓库目录或解压后的源码包目录中，macOS 在终端运行 `bash ./install-macos.command`，Windows 在 PowerShell 中运行 `powershell -ExecutionPolicy Bypass -File .\install-windows.ps1`。安装使用已有的 uv 或 Python 3.11 至 3.14。[macOS 下载](https://www.python.org/downloads/macos/) · [Windows 下载](https://www.python.org/downloads/windows/)
 
 Windows 安装完成后，程序位于 `.venv\Scripts\deskpet-platform.exe`；MCP 使用该程序的绝对路径和 `mcp` 参数。下列命令展示 macOS 路径。
 
@@ -71,7 +71,7 @@ python3 -m venv .venv
 .venv/bin/deskpet-platform status
 ```
 
-已有本地 wheel 文件时，可将上面的 `pip install .` 改为 `pip install /绝对路径/deskpet_platform-0.1.0rc1-py3-none-any.whl`。
+已有本地 wheel 文件时，可将上面的 `pip install .` 改为 `pip install /绝对路径/deskpet_platform-0.1.0rc2-py3-none-any.whl`。
 
 用 MCP 的 `desk_pair_usb` 配对已登记的小板。提供本机私有 Wi-Fi 凭据文件时，同一步也可完成配网。需要手动设置时，可扫描小板上的配网二维码，再用 `desk_pair_begin` 打开本机配对页。一块小板同一时间由一套服务连接。
 

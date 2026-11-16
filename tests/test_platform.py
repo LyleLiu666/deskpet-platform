@@ -479,7 +479,10 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('局域网权限', status['next_step'])
             self.assertIn('网络', status['next_step'])
             await session.record_link_error(OSError('wifi_device_absent'))
-            self.assertNotIn('reason', await session.get_status())
+            status = await session.get_status()
+            self.assertNotIn('reason', status)
+            self.assertIn('防火墙', status['next_step'])
+            self.assertIn('填写搭搭显示的 IP', status['next_step'])
 
     async def test_busy_status_distinguishes_automatic_handoff(self):
         with tempfile.TemporaryDirectory() as directory:

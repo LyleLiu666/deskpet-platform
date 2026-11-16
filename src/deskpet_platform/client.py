@@ -3,8 +3,10 @@ import asyncio
 from dataclasses import asdict
 from datetime import datetime
 import hashlib
+import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import zlib
 from contextlib import suppress
@@ -748,10 +750,15 @@ class Client:
 
 
 def _text_font(size):
-    for path in ("/System/Library/Fonts/STHeiti Medium.ttc",
-                 "/System/Library/Fonts/PingFang.ttc",
-                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                 "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"):
+    if sys.platform == "win32":
+        fonts = Path(os.environ.get("WINDIR") or os.environ.get("SystemRoot") or r"C:\Windows") / "Fonts"
+        candidates = (fonts / name for name in ("msyh.ttc", "simhei.ttf", "simsun.ttc", "Deng.ttf"))
+    else:
+        candidates = ("/System/Library/Fonts/STHeiti Medium.ttc",
+                      "/System/Library/Fonts/PingFang.ttc",
+                      "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                      "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc")
+    for path in candidates:
         try:
             return ImageFont.truetype(path, size=size)
         except OSError:

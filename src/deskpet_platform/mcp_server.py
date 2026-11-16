@@ -51,7 +51,7 @@ from .usb_link import UsbLink, UsbPort, find_usb_devices, read_usb_identity
 from .weather import fetch_relay_weather, fetch_weather
 from .speech import SpeechTooLong, split_speech, synthesize_speech, validate_text
 from .transcription import configured_service, transcribe_to_device
-from .wifi_link import probe_board
+from .wifi_link import NO_DEVICE_REPLY_HELP, probe_board
 
 Manual = Literal["operations", "development", "roles"]
 LINK_ERRORS = (OSError, RuntimeError, ValueError, TimeoutError)
@@ -270,6 +270,8 @@ class BoardSession:
             next_step = '正在等待后台服务让出设备，请稍后重试。' if handoff else '设备正被其他程序使用，请关闭该程序后重试。'
         elif network_unreachable:
             next_step = '无法访问局域网，请检查网络连接、路由和系统的局域网权限。'
+        elif isinstance(error, OSError) and str(error) == 'wifi_device_absent':
+            next_step = NO_DEVICE_REPLY_HELP
         else:
             next_step = '检查供电、Wi-Fi 和配对，详见操作手册。'
         self.snapshot = {

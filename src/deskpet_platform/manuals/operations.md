@@ -38,6 +38,10 @@ tool_timeout_sec = 1200
 
 连接显示 `busy` 时，停止另一个控制同一设备的服务或 MCP 实例。连接显示 `offline` 时，先检查设备供电、Wi‑Fi 和配对。运行 MCP 时用工具查状态，终端的独立 `status` 也要临时占用连接。
 
+如果自动发现失败，在配对页填写搭搭屏幕显示的局域网 IP，并确认 VPN 或代理允许局域网流量。Windows 上检查防火墙是否允许安装目录下的 `.venv\Scripts\python.exe` 在当前受信任网络接收入站连接。macOS 上检查 Agent 或终端的局域网权限。
+
+Windows 显示中文需要系统里有微软雅黑、黑体、宋体或等线字体。如果系统尚未安装中文字体，可在 Windows 设置中添加简体中文语言功能，或先用 `DeskPet connected` 验证显示。
+
 ### 多台设备
 
 - 添加另一台时，在 `desk_pair_usb` 或 `desk_pair_begin` 中设置 `add_device=true`；原有设备的配对不会被替换。USB 操作仍需先确认串口对应的设备。

@@ -5,6 +5,7 @@ import threading
 import time
 from urllib.parse import parse_qs
 
+from .wifi_link import NO_DEVICE_REPLY_HELP
 
 PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>连接桌面屏</title>
@@ -84,9 +85,11 @@ class PairPortal:
                     portal.state = "checking"
                 try:
                     result = portal.pair(values["code"][0], address)
-                except (ValueError, RuntimeError, OSError, TimeoutError):
+                except (ValueError, RuntimeError, OSError) as error:
                     with portal.lock:
                         portal.state = "waiting"
+                    if isinstance(error, OSError) and str(error) == "wifi_device_absent":
+                        return self.page(400, NO_DEVICE_REPLY_HELP)
                     return self.page(400, "配对未成功。请确认配对码、Wi-Fi 和设备占用情况后重试。")
                 with portal.lock:
                     portal.state, portal.device = "paired", result["device"]

@@ -151,6 +151,9 @@ def main():
     except FileNotFoundError:
         parser.exit(2, "尚未配对，请运行 deskpet-platform pair。\n")
     except (OSError, RuntimeError, ValueError, TimeoutError) as error:
+        if isinstance(error, OSError) and str(error) == "wifi_device_absent":
+            from .wifi_link import NO_DEVICE_REPLY_HELP
+            parser.exit(2, NO_DEVICE_REPLY_HELP + "\n")
         parser.exit(2, f"设备操作失败：{error}\n")
 
 

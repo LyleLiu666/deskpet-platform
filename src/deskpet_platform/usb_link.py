@@ -107,11 +107,16 @@ def read_usb_identity(port, *, serial_factory=default_serial_factory):
     try:
         device.port, device.dtr, device.rts = registration.path, False, False
         device.open()
-        registration.verify()
-        device.write(b"DESK IDENTITY?\n")
-        deadline = time.monotonic() + 2
+        next_probe = time.monotonic()
+        deadline = next_probe + 4
         pending = bytearray()
         while time.monotonic() < deadline:
+            now = time.monotonic()
+            if now >= next_probe:
+                # Some adapters reset the board on open, dropping the first request.
+                registration.verify()
+                device.write(b"DESK IDENTITY?\n")
+                next_probe = now + 0.5
             pending.extend(device.read_until(size=128))
             if not pending.endswith(b"\n"):
                 if len(pending) >= 128:
