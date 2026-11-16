@@ -28,7 +28,7 @@ deskpet-platform = "deskpet_platform.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-deskpet_platform = ["manuals/*.md", "assets/agent_icons/*.png", "assets/agent_icons/LICENSE", "assets/agent_icons/README.md", "opencode_plugin.js"]
+deskpet_platform = ["manuals/*.md", "assets/agent_icons/*.png", "assets/agent_icons/LICENSE", "assets/agent_icons/README.md", "assets/fonts/*", "opencode_plugin.js"]
 
 [tool.uv]
 cache-keys = [
@@ -38,5 +38,6 @@ cache-keys = [
     { file = "src/deskpet_platform/**/*.py" },
     { file = "src/deskpet_platform/manuals/*.md" },
     { file = "src/deskpet_platform/assets/agent_icons/*" },
+    { file = "src/deskpet_platform/assets/fonts/*" },
     { file = "src/deskpet_platform/opencode_plugin.js" },
 ]

@@ -758,7 +758,8 @@ def _text_font(size):
                       "/System/Library/Fonts/PingFang.ttc",
                       "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
                       "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc")
-    for path in candidates:
+    bundled = Path(__file__).with_name("assets") / "fonts" / "NotoSansCJKsc-Regular.otf"
+    for path in (*candidates, bundled):
         try:
             return ImageFont.truetype(path, size=size)
         except OSError:

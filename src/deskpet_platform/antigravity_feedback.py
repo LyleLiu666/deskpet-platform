@@ -17,16 +17,21 @@ def settings_path():
     return Path.home() / ".gemini/config/hooks.json"
 
 
+def hook_entry(command):
+    entry = {"Stop": [{"type": "command", "command": command, "timeout": 2}]}
+    for event, phase in (("PreToolUse", "before"), ("PostToolUse", "after")):
+        entry[event] = [{"matcher": QUESTION_TOOL, "hooks": [
+            {"type": "command", "command": f"{command} --phase {phase}", "timeout": 2}]}]
+    return entry
+
+
 def configure(path, command, *, enabled):
     if not enabled and not path.exists() and not path.is_symlink():
         return False
     settings, original = _load(path, private=False)
     name = "deskpet-" + hashlib.sha256(command.encode()).hexdigest()[:16]
-    stop_only = {"Stop": [{"type": "command", "command": command, "timeout": 2}]}
-    entry = {**stop_only}
-    for event, phase in (("PreToolUse", "before"), ("PostToolUse", "after")):
-        entry[event] = [{"matcher": QUESTION_TOOL, "hooks": [
-            {"type": "command", "command": f"{command} --phase {phase}", "timeout": 2}]}]
+    entry = hook_entry(command)
+    stop_only = {"Stop": entry["Stop"]}
     previous = settings.get(name)
     if name in settings and previous not in (entry, stop_only, {**entry, "enabled": False},
                                              {**stop_only, "enabled": False}):

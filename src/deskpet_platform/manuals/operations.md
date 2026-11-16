@@ -36,11 +36,13 @@ tool_timeout_sec = 1200
 2. 调用 `desk_pair_begin` 打开电脑本机配对页。完整显示固件从应用菜单进入 **桌面设置 → 电脑配对**。参考固件尚未校准触屏时，轻触已联网的小板显示配对码。用手机扫描配对码，将内容粘贴到本机页面。自动发现失败时，填写小板显示的局域网地址。也可在本机终端运行 `deskpet-platform pair`，将码粘贴到隐藏输入框。
 3. 用 `desk_pair_status` 查看配对页结果，再用 `desk_status` 检查连接。
 
+运行 `deskpet-platform doctor --client codex` 可查看本机已配对设备、钩子文件、最近触发的事件和该设备保存的显示回执。多个设备时加 `--device-id`。独立接收端使用 `deskpet-platform --config <接收端配置> doctor --client codex --shared-config <原设备配置>`。其他客户端使用 `claude_code`、`antigravity`、`opencode`、`workbuddy` 或 `workbuddy_ai`。`doctor` 可在 MCP 使用搭搭时运行。写入配置后，仍要在 Agent 界面完成适用的信任步骤，并在新会话触发一次提醒。用 `desk_status` 验证当前连接，用 `desk_token_status` 验证实际测速读数。
+
 连接显示 `busy` 时，停止另一个控制同一设备的服务或 MCP 实例。连接显示 `offline` 时，先检查设备供电、Wi‑Fi 和配对。运行 MCP 时用工具查状态，终端的独立 `status` 也要临时占用连接。
 
 如果搭搭显示已联网但电脑自动发现失败，在配对页填写搭搭屏幕显示的局域网 IP，并确认两台设备互相可达。访客 Wi-Fi、路由器的客户端隔离、VPN 或代理都可能阻断设备间流量。手动填 IP 时，仍由搭搭回连电脑。Windows 上检查防火墙是否允许安装目录下的 `.venv\Scripts\python.exe` 在当前受信任网络接收入站连接。macOS 上检查 Agent 或终端的局域网权限。
 
-Windows 显示中文需要系统里有微软雅黑、黑体、宋体或等线字体。如果系统尚未安装中文字体，可在 Windows 设置中添加简体中文语言功能，或先用 `DeskPet connected` 验证显示。
+搭搭电脑端自带思源黑体的同源字体 Noto Sans CJK SC。系统没有常用中文字体时，文字和提醒使用随包字体。验收提醒时，请在屏幕上确认中文清晰可读。
 
 ### 多台设备
 

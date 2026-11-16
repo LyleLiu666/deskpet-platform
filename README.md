@@ -27,7 +27,8 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 
 1. 核对 Release 的 SHA256SUMS.txt，在独立目录安装。macOS 用 install-macos.command，Windows 用
    install-windows.ps1，Linux 按「手动安装」使用 Python 虚拟环境。
-   用 --help 确认安装入口能运行。把 deskpet-platform 的绝对路径
+   用 --version 确认安装版本。带入旧版时可用 --help 检查入口。
+   把 deskpet-platform 的绝对路径
    （Windows 带 .exe）和 mcp 参数加入当前 Agent 的
    stdio MCP 配置，首次启动前按第 5 步准备好测速参数。按操作手册设置
    Codex 的写卡等待时间。如果当前会话
@@ -50,9 +51,12 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
    Codex 请明确告诉我进入 /hooks 或设置中的 Hooks，审核并信任刚写入的
    搭搭条目。若系统或客户端不支持钩子，告诉我具体原因。
 4. 用新会话完成一个短任务，让真实钩子触发一次。用 desk_list_notifications
-   查目标搭搭的新完成事件及显示回执，请我确认屏幕上的提醒可见、中文正常。
+   查目标搭搭的新完成事件。新版可用 doctor 核对设备显示回执。
+   请我确认屏幕上的提醒可见、中文正常。
    手动发文字只能验证连接。待答复提醒有实际触发时再验收。
    若旧会话占用搭搭，请我关闭对应会话。
+   新会话可以先运行 deskpet-platform doctor --client <当前客户端> 查看安装
+   进度。按实际配置传入 --config（放在 doctor 前）、--device-id 或 --shared-config。
 5. 测速可选。按 README 使用当前发行版与系统、架构匹配的独立采集器，
    或复用本机已有的兼容采集器。启动 MCP 时用 --token-probe 指定采集器的
    绝对路径，再用 desk_token_status 验证。无现成采集器时，加

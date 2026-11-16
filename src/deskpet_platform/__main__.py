@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 from getpass import getpass
+from importlib.metadata import version
 import json
 import os
 from pathlib import Path
@@ -54,6 +55,7 @@ def main():
             if hasattr(stream, "reconfigure"):
                 stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="deskpet-platform")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {version('deskpet-platform')}")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     commands = parser.add_subparsers(dest="command", required=True)
     pair = commands.add_parser("pair", help="Authenticate and save a board on this computer")
@@ -61,6 +63,14 @@ def main():
     pair.add_argument("--add-device", action="store_true", help="Add another board without replacing an existing one")
     status = commands.add_parser("status", help="Check a paired board; run without an MCP owner")
     status.add_argument("--device-id", help="Device ID from desk_list_devices")
+    from .doctor import CLIENTS
+    doctor = commands.add_parser("doctor", help="Check local pairing, reminder receipts, and probe setup")
+    doctor.add_argument("--client", required=True, choices=CLIENTS)
+    doctor.add_argument("--device-id", help="Device ID from desk_list_devices")
+    doctor.add_argument("--shared-config", type=Path, help="Configuration that owns notification hooks")
+    probe = doctor.add_mutually_exclusive_group()
+    probe.add_argument("--token-probe", type=Path)
+    probe.add_argument("--no-token-probe", action="store_true")
     find_usb = commands.add_parser("find-usb", help="Read UUID and MAC from explicitly selected USB ports")
     find_usb.add_argument("ports", nargs="+", metavar="PORT")
     find_usb.add_argument("--device-id", help="Only report a board with this persistent UUID")
@@ -72,7 +82,7 @@ def main():
     mcp.add_argument(
         "--role-dir", type=Path, help="Optional absolute path to local role resources")
     token = mcp.add_mutually_exclusive_group()
-    token.add_argument("--token-sessions", type=Path, help="Optional Codex session directory for quota history")
+    mcp.add_argument("--token-sessions", type=Path, help="Optional Codex session directory for quota history")
     token.add_argument("--token-collector", type=Path, help="Original desk display checkout for its multi-source collector")
     token.add_argument("--token-probe", type=Path, help="AgentSpeedProbe executable used by the original display")
     token.add_argument("--no-token-probe", action="store_true", help="Disable live Token collection, including an installed AgentSpeedProbe")
@@ -137,7 +147,13 @@ def main():
                       shared_config_path=args.shared_config).run(transport="stdio")
         return
     try:
-        if args.command == "find-usb":
+        if args.command == "doctor":
+            from .doctor import diagnose
+            shared = args.shared_config.expanduser().resolve() if args.shared_config else None
+            probe_path = args.token_probe.expanduser().resolve() if args.token_probe else None
+            result = diagnose(args.config, client=args.client, device_id=args.device_id, shared_config=shared,
+                              token_probe=probe_path, no_token_probe=args.no_token_probe)
+        elif args.command == "find-usb":
             from .usb_link import find_usb_devices
             result = find_usb_devices(args.ports, args.device_id)
         elif args.command == "receiver-add-usb":
@@ -148,6 +164,8 @@ def main():
                 parser.exit(2, "请在本机交互式终端输入配对码。\n")
             result = asyncio.run(interact(args))
         print(json.dumps(result, ensure_ascii=False))
+    except KeyError:
+        parser.exit(2, "找不到所选搭搭，请用 doctor 查看已配对设备。\n")
     except FileNotFoundError:
         parser.exit(2, "尚未配对，请运行 deskpet-platform pair。\n")
     except (OSError, RuntimeError, ValueError, TimeoutError) as error:

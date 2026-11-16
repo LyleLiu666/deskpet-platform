@@ -15,6 +15,22 @@ class TextDisplayTests(unittest.TestCase):
             self.assertIs(_text_font(16), sentinel.simhei)
         self.assertEqual(truetype.call_args.args, (root / "Fonts" / "simhei.ttf",))
 
+    def test_windows_renders_chinese_with_bundled_font_when_system_fonts_are_missing(self):
+        from PIL import ImageFont
+
+        original = ImageFont.truetype
+
+        def bundled_only(path, *args, **kwargs):
+            if Path(path).name != "NotoSansCJKsc-Regular.otf":
+                raise OSError("system font absent")
+            return original(path, *args, **kwargs)
+
+        with patch("deskpet_platform.client.sys.platform", "win32"), patch(
+                "deskpet_platform.client.ImageFont.truetype", side_effect=bundled_only):
+            bitmap = _bitmap("搭搭测试：任务完成 7391")
+            self.assertTrue(any(bitmap))
+            self.assertNotEqual(bitmap, _bitmap("搭搭测试：需要应答 7391"))
+
     def test_chinese_and_two_lines_are_rendered(self):
         chinese = _bitmap("你好，桌宠！")
         self.assertEqual(len(chinese), 288 * 48 // 8)

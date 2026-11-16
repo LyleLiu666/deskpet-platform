@@ -79,7 +79,7 @@ class NotificationStore:
         try:
             db.execute("""CREATE TABLE IF NOT EXISTS notifications (
                 id INTEGER PRIMARY KEY, source TEXT NOT NULL, session TEXT NOT NULL, turn TEXT NOT NULL,
-                title TEXT NOT NULL, created REAL NOT NULL, shown REAL, seen REAL, action_pending INTEGER,
+                title TEXT NOT NULL, created REAL NOT NULL, shown REAL, displayed REAL, seen REAL, action_pending INTEGER,
                 UNIQUE(source, session, turn))""")
             schema = "SELECT 1 FROM pragma_table_info('notifications') WHERE name='action_pending'"
             if db.execute(schema).fetchone() is None:
@@ -87,6 +87,12 @@ class NotificationStore:
                     db.execute("BEGIN IMMEDIATE")
                     if db.execute(schema).fetchone() is None:
                         db.execute("ALTER TABLE notifications ADD COLUMN action_pending INTEGER")
+            receipt_schema = "SELECT 1 FROM pragma_table_info('notifications') WHERE name='displayed'"
+            if db.execute(receipt_schema).fetchone() is None:
+                with db:
+                    db.execute("BEGIN IMMEDIATE")
+                    if db.execute(receipt_schema).fetchone() is None:
+                        db.execute("ALTER TABLE notifications ADD COLUMN displayed REAL")
             category_schema = "SELECT 1 FROM pragma_table_info('notifications') WHERE name='category'"
             if db.execute(category_schema).fetchone() is None:
                 with db:
@@ -376,8 +382,8 @@ class NotificationStore:
     def mark_home_shown(self, identities):
         with closing(self._connect()) as db, db:
             now = time.time()
-            db.executemany("UPDATE notifications SET shown=COALESCE(shown,?) WHERE id=?",
-                           ((now, identity) for identity in identities))
+            db.executemany("UPDATE notifications SET shown=COALESCE(shown,?), displayed=COALESCE(displayed,?) WHERE id=?",
+                           ((now, now, identity) for identity in identities))
 
     def seen_notifications(self, identities, *, include_resolved=False):
         if not identities:
@@ -435,7 +441,9 @@ class NotificationStore:
 
     def mark_shown(self, identity):
         with closing(self._connect()) as db, db:
-            db.execute("UPDATE notifications SET shown=COALESCE(shown,?) WHERE id=?", (time.time(), identity))
+            now = time.time()
+            db.execute("UPDATE notifications SET shown=COALESCE(shown,?), displayed=COALESCE(displayed,?) WHERE id=?",
+                       (now, now, identity))
 
     def mark_seen(self, identity):
         with closing(self._connect()) as db, db:
