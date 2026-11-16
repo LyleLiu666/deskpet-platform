@@ -658,6 +658,17 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await notifications.run_live_receiver(other, shared, max_seconds=.1)
 
+    async def test_live_receiver_has_no_implicit_daily_expiry(self):
+        from deskpet_platform.device_registry import DeviceRegistry
+        from unittest.mock import AsyncMock
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory) / 'device.json'
+            DeviceConfig('02:00:00:00:00:01', bytes(range(32))).save(shared)
+            receiver = DeviceRegistry(shared).add_receiver(DeviceConfig('02:00:00:00:00:02', bytes(range(32))))
+            with patch('deskpet_platform.notifications._run_device_worker',new_callable=AsyncMock) as run:
+                await notifications.run_live_receiver(receiver,shared)
+            self.assertEqual(run.await_args.kwargs['deadline'],float('inf'))
+
     async def test_live_receiver_surfaces_failed_data_task_and_closes_session(self):
         from deskpet_platform.device_registry import DeviceRegistry
         closed = []

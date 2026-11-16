@@ -555,7 +555,7 @@ async def run_receiver_worker(config_path, *, client_factory=None, max_seconds=8
                               receivers_only=True)
 
 
-async def run_live_receiver(config_path, shared_config, *, client_factory=None, token_probe=None, max_seconds=86400,
+async def run_live_receiver(config_path, shared_config, *, client_factory=None, token_probe=None, max_seconds=None,
                             poll_interval=0.5, handoff_delay=7):
     """Keep one registered receiver's data and notifications up to date."""
     from .device_registry import DeviceRegistry
@@ -566,8 +566,9 @@ async def run_live_receiver(config_path, shared_config, *, client_factory=None, 
     probe = Path(token_probe).expanduser() if token_probe is not None else shared_config.parent / 'bin/AgentSpeedProbe'
     if token_probe is not None and not probe.is_file():
         raise ValueError('找不到指定的速度采集程序。')
+    deadline=float('inf') if max_seconds is None else time.monotonic()+max_seconds
     await _run_device_worker(config_path, source=NotificationStore(shared_config.parent / 'notifications.sqlite3'),
-                             client_factory=client_factory, deadline=time.monotonic() + max_seconds,
+                             client_factory=client_factory, deadline=deadline,
                              poll_interval=poll_interval, handoff_delay=handoff_delay,
                              live_options={'token_probe': probe if probe.is_file() else None,
                                            'quota_store': QuotaStore(shared_config.parent / 'agent-quota.sqlite3')})
