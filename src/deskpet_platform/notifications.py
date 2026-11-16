@@ -157,8 +157,8 @@ class NotificationStore:
                     db.execute("INSERT OR REPLACE INTO notification_attention VALUES (1,(SELECT COALESCE(MAX(id),0) FROM notifications))")
                 else:
                     db.execute("""INSERT OR IGNORE INTO main.notifications
-                        (source,session,turn,title,created,category,parent_turn,resolved,response_group)
-                        SELECT source,session,turn,title,created,category,parent_turn,resolved,response_group
+                        (source,session,turn,title,created,category,parent_turn,resolved,response_group,dismissed)
+                        SELECT source,session,turn,title,created,category,parent_turn,resolved,response_group,dismissed
                         FROM inbox.notifications WHERE id>? AND id<=? ORDER BY id""", (after, through))
                 db.execute("INSERT OR REPLACE INTO notification_sync VALUES (1,?)", (through,))
             # Keep old inboxes compatible with acknowledgements that arrive
@@ -169,6 +169,12 @@ class NotificationStore:
                     (SELECT resolved FROM inbox.notifications AS source
                      WHERE (source.source,source.session,source.turn)=(target.source,target.session,target.turn)))
                     WHERE target.category='response' AND target.resolved IS NULL""")
+            db.execute("""UPDATE main.notifications AS target SET dismissed=(
+                    SELECT source.dismissed FROM inbox.notifications AS source
+                    WHERE (source.source,source.session,source.turn)=(target.source,target.session,target.turn))
+                    WHERE target.category='response' AND target.dismissed IS NULL
+                      AND EXISTS (SELECT 1 FROM inbox.notifications AS source WHERE source.dismissed IS NOT NULL
+                        AND (source.source,source.session,source.turn)=(target.source,target.session,target.turn))""")
 
     def add_codex_event(self, event):
         session, turn = event.get("session_id"), event.get("turn_id")
@@ -231,12 +237,13 @@ class NotificationStore:
                  "shown": row[3] is not None, "seen": row[4] is not None,
                  "source": row[5], "category": row[6], "resolved": row[7] is not None} for row in rows]
 
-    def list(self, limit=30):
+    def list(self, limit=30, *, for_device=False):
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("通知数量须为 1 至 100。")
         with closing(self._connect()) as db:
-            rows = db.execute("SELECT id,title,created,shown,seen,source,category,resolved FROM notifications ORDER BY id DESC LIMIT ?",
-                              (limit,)).fetchall()
+            rows = db.execute("""SELECT id,title,created,shown,seen,source,category,resolved FROM notifications
+                WHERE NOT ? OR category!='response' OR (resolved IS NULL AND dismissed IS NULL)
+                ORDER BY id DESC LIMIT ?""", (for_device, limit)).fetchall()
         return self._items(rows)
 
     def get(self, identity):
@@ -246,7 +253,7 @@ class NotificationStore:
                            (identity,)).fetchone()
         return self._items([row])[0] if row else None
 
-    def list_page(self, page, *, page_size=4, anchor=None, pending_first=False):
+    def list_page(self, page, *, page_size=4, anchor=None, pending_first=False, clamp=False):
         if (type(page) is not int or page < 1 or type(page_size) is not int or not 1 <= page_size <= 100 or
                 (anchor is not None and (type(anchor) is not int or anchor < 0))):
             raise ValueError("invalid_notification_page")
@@ -254,12 +261,15 @@ class NotificationStore:
             db.execute("BEGIN")
             if anchor is None:
                 anchor = db.execute("SELECT COALESCE(MAX(id),0) FROM notifications").fetchone()[0]
-            total = db.execute("SELECT COUNT(*) FROM notifications WHERE id<=?", (anchor,)).fetchone()[0]
+            total = db.execute("SELECT COUNT(*) FROM notifications WHERE id<=? AND dismissed IS NULL", (anchor,)).fetchone()[0]
             pages = max(1, (total + page_size - 1) // page_size)
+            if clamp:
+                page = min(page, pages)
             if page > pages:
                 raise ValueError("invalid_notification_page")
             rows = db.execute("""SELECT id,title,created,shown,seen,source,category,resolved FROM notifications
-                WHERE id<=? ORDER BY CASE WHEN ? AND category='response' AND resolved IS NULL THEN 0 ELSE 1 END,
+                WHERE id<=? AND dismissed IS NULL
+                ORDER BY CASE WHEN ? AND category='response' AND resolved IS NULL THEN 0 ELSE 1 END,
                          id DESC LIMIT ? OFFSET ?""", (anchor, pending_first, page_size, (page - 1) * page_size)).fetchall()
         return {"items": self._items(rows), "page": page, "pages": pages, "total": total, "anchor": anchor}
 
@@ -286,7 +296,7 @@ class NotificationStore:
             # recent request supersedes older turns, including after answer.
             rows = db.execute(f"""SELECT id,title,created,shown,seen,source,category,resolved,session,turn
                 FROM notifications AS n
-                WHERE NOT ? OR (category='completed' AND id IN (
+                WHERE dismissed IS NULL AND (NOT ? OR (category='completed' AND id IN (
                     SELECT MAX(id) FROM notifications WHERE category='completed' AND seen IS NULL
                     GROUP BY source,session))
                     OR (category='response' AND resolved IS NULL AND dismissed IS NULL AND NOT ({SUPERSEDED_QUESTION}) AND NOT EXISTS (
@@ -294,7 +304,7 @@ class NotificationStore:
                         WHERE newer.source=n.source AND newer.session=n.session
                           AND newer.category='response' AND newer.id>n.id
                           AND (newer.resolved IS NULL OR n.parent_turn IS NULL
-                               OR newer.parent_turn IS NOT n.parent_turn)))
+                               OR newer.parent_turn IS NOT n.parent_turn))))
                 ORDER BY CASE WHEN ? AND category='response' AND resolved IS NULL THEN 0 ELSE 1 END,
                          id DESC LIMIT 100""", (active_only, pending_first)).fetchall()
         records = self._items(rows)
@@ -340,12 +350,21 @@ class NotificationStore:
                 db.execute("UPDATE notifications SET seen=COALESCE(seen,?) WHERE id=?", (time.time(), identity))
 
     def dismiss_cached_response(self, cache_id):
-        """Dismiss one board's reminder without asserting that it was answered."""
+        """Persist the dismissal in the shared inbox before acknowledging the device."""
         with closing(self._connect()) as db, db:
             identity = self._matching_cache_record(db, cache_id)
             if identity is None:
                 return False
+            event = db.execute("""SELECT source,session,turn FROM notifications
+                WHERE id=? AND category='response'""", (identity,)).fetchone()
+            if event is None:
+                return False
             now = time.time()
+            if self.source is not None:
+                # The cache ID is board-local. The adapter's event identity is shared.
+                with closing(self.source._connect()) as inbox, inbox:
+                    inbox.execute("""UPDATE notifications SET dismissed=COALESCE(dismissed,?)
+                        WHERE (source,session,turn)=(?,?,?) AND category='response'""", (now, *event))
             return db.execute("""UPDATE notifications SET dismissed=COALESCE(dismissed,?),
                 seen=COALESCE(seen,?) WHERE id=? AND category='response'""",
                 (now, now, identity)).rowcount > 0
@@ -396,7 +415,7 @@ class NotificationStore:
             return {identity for (identity,) in db.execute(
                 f"""SELECT id FROM notifications n WHERE id IN ({placeholders}) AND
                     (seen IS NOT NULL OR (? AND category='response' AND
-                    (resolved IS NOT NULL OR ({SUPERSEDED_QUESTION}))))""",
+                    (resolved IS NOT NULL OR dismissed IS NOT NULL OR ({SUPERSEDED_QUESTION}))))""",
                 (*identities, include_resolved))}
 
     def cached_home_receipts(self, identities):
@@ -416,7 +435,7 @@ class NotificationStore:
         # Shown legacy records have no action flag. Only an explicit retry keeps a shown record pending.
         with closing(self._connect()) as db:
             row = db.execute("""SELECT id,title,shown,action_pending,source,category FROM notifications
-                WHERE seen IS NULL AND (category!='response' OR resolved IS NULL)
+                WHERE seen IS NULL AND (category!='response' OR (resolved IS NULL AND dismissed IS NULL))
                   AND (shown IS NULL OR (? AND action_pending=1))
                 ORDER BY id LIMIT 1""", (not text_only,)).fetchone()
         return {"id": row[0], "title": row[1], "shown": row[2] is not None, "action_pending": row[3],
@@ -439,7 +458,9 @@ class NotificationStore:
 
     def latest_unseen(self):
         with closing(self._connect()) as db:
-            row = db.execute("SELECT id,title,source,category FROM notifications WHERE seen IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+            row = db.execute("""SELECT id,title,source,category FROM notifications WHERE seen IS NULL
+                AND (category!='response' OR (resolved IS NULL AND dismissed IS NULL))
+                ORDER BY id DESC LIMIT 1""").fetchone()
         return {"id": row[0], "title": row[1], "source": row[2], "category": row[3]} if row else None
 
     def mark_shown(self, identity):
@@ -488,7 +509,8 @@ class NotificationStore:
 
     def unseen_count(self):
         with closing(self._connect()) as db:
-            return db.execute("SELECT COUNT(*) FROM notifications WHERE seen IS NULL").fetchone()[0]
+            return db.execute("""SELECT COUNT(*) FROM notifications WHERE seen IS NULL
+                AND (category!='response' OR (resolved IS NULL AND dismissed IS NULL))""").fetchone()[0]
 
     def has_active_notifications(self):
         with closing(self._connect()) as db:

@@ -1,6 +1,5 @@
 """Inspect setup from a new Agent session without taking the device connection."""
 from contextlib import closing
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,7 +8,9 @@ import shutil
 import sqlite3
 
 from .agent_speed_probe import find_installed_probe, host_platform
-from .codex_hook import EVENT_MATCHERS, CLI_EVENT_MATCHERS, _load, _matches, _validate_groups, hook_command
+from .codex_hook import (
+    EVENT_MATCHERS, CLI_EVENT_MATCHERS, _load, _matches, _previous_installations, _validate_groups, hook_command,
+)
 from .device_registry import DeviceRegistry
 from .notifications import NotificationStore, codex_home
 
@@ -37,20 +38,23 @@ def _hook_state(client, config):
     if os.name == "nt" and not shutil.which("powershell.exe"):
         return {"status": "unavailable", "reason": "powershell_missing"}
     path = None
+    previous = False
     try:
         if client == "opencode":
-            from .opencode_feedback import _read_plugin, plugin_path
+            from .opencode_feedback import _previous_plugins, _read_plugin, plugin_path
             command = hook_command(config, "opencode-hook")
             path = plugin_path(command)
             plugin = _read_plugin(path)
             expected = b"const command = " + json.dumps(shlex.split(command)).encode() + b";"
             state = "missing" if plugin is None else "written" if expected in plugin.splitlines() else "invalid"
+            previous = next(_previous_plugins(command), None) is not None
         elif client == "antigravity":
-            from .antigravity_feedback import hook_entry, settings_path
+            from .antigravity_feedback import _entry_name, _previous_entries, hook_entry, settings_path
             path = settings_path()
             command = hook_command(config, "antigravity-hook")
             data = _load(path, private=False)[0] if path.exists() or path.is_symlink() else {}
-            entry = data.get("deskpet-" + hashlib.sha256(command.encode()).hexdigest()[:16])
+            entry = data.get(_entry_name(command))
+            previous = any(data[name].get("enabled") is not False for name in _previous_entries(data, command))
             if entry is None:
                 state = "missing"
             elif not isinstance(entry, dict):
@@ -71,8 +75,11 @@ def _hook_state(client, config):
                 installed += any(group.get("matcher") == matcher and any(_matches(h, command) for h in group["hooks"])
                                  for group in groups)
             state = "written" if installed == len(matchers) else "partial" if installed else "missing"
+            previous = bool(_previous_installations(data, command, (), (event for event, _ in matchers)))
     except (OSError, ValueError):
         return {"status": "invalid", "settings": str(path) if path is not None else None}
+    if previous and state != "invalid":
+        return {"status": "needs_reinstall", "settings": str(path)}
     return {"status": state, "settings": str(path)}
 
 

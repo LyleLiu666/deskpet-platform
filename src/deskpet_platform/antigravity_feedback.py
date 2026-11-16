@@ -25,6 +25,10 @@ def hook_entry(command):
     return entry
 
 
+def _entry_name(command):
+    return "deskpet-" + hashlib.sha256(command.encode()).hexdigest()[:16]
+
+
 def _entry_variants(entry):
     stop_only = {"Stop": entry["Stop"]}
     return (entry, stop_only, {**entry, "enabled": False}, {**stop_only, "enabled": False})
@@ -37,30 +41,34 @@ def _entry_command(name, entry):
         return None
     if not isinstance(command, str):
         return None
-    expected_name = "deskpet-" + hashlib.sha256(command.encode()).hexdigest()[:16]
-    if name == expected_name and entry in _entry_variants(hook_entry(command)):
+    if name == _entry_name(command) and entry in _entry_variants(hook_entry(command)):
         return command
     return None
+
+
+def _previous_entries(settings, command, previous_commands=()):
+    previous_commands = tuple(previous_commands)
+    targets = {generated_hook_target(item) for item in (command, *previous_commands)} - {None}
+    name = _entry_name(command)
+    for old_name, old_entry in settings.items():
+        if old_name == name or not old_name.startswith("deskpet-"):
+            continue
+        old_command = _entry_command(old_name, old_entry)
+        if old_command in previous_commands or generated_hook_target(old_command) in targets:
+            yield old_name
 
 
 def configure(path, command, *, enabled, previous_commands=()):
     if not enabled and not path.exists() and not path.is_symlink():
         return False
     settings, original = _load(path, private=False)
-    name = "deskpet-" + hashlib.sha256(command.encode()).hexdigest()[:16]
+    name = _entry_name(command)
     entry = hook_entry(command)
     previous = settings.get(name)
     if name in settings and previous not in _entry_variants(entry):
         raise ValueError("已有同名 Antigravity hook。请在 Antigravity 设置中检查该条目。")
 
-    targets = {generated_hook_target(item) for item in (command, *previous_commands)} - {None}
-    obsolete = []
-    for old_name, old_entry in settings.items():
-        if old_name == name or not old_name.startswith("deskpet-"):
-            continue
-        old_command = _entry_command(old_name, old_entry)
-        if old_command in previous_commands or generated_hook_target(old_command) in targets:
-            obsolete.append(old_name)
+    obsolete = list(_previous_entries(settings, command, previous_commands))
     for old_name in obsolete:
         del settings[old_name]
 

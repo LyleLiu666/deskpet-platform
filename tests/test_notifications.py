@@ -67,25 +67,50 @@ class NotificationTests(unittest.TestCase):
             self.assertEqual(spawn.call_count,2)
             self.assertEqual([call.args[0][-1] for call in spawn.call_args_list],['notification-worker','receiver-worker'])
 
-    def test_explicit_dismissal_is_per_board_and_does_not_claim_answered(self):
+    def test_dismissal_and_answer_clear_the_shared_reminder_without_syncing_read_receipts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = notifications.NotificationStore(root / "source.sqlite3")
             first = notifications.NotificationStore(root / "first.sqlite3", source=source)
             second = notifications.NotificationStore(root / "second.sqlite3", source=source)
-            source.add_agent_event("codex", "session", "question", "response", "Project")
-            first.sync(); second.sync()
-            record = first.cache_records(active_only=True)[0]
+            # Receiver row numbers need not match the shared or other board's numbers.
+            first.add_agent_event("codex", "other", "local", "completed", "Local")
+            first.mark_seen(1)
+            question = source.add_agent_event("codex", "session", "question", "response", "Project")
+            other = source.add_agent_event("codex", "other", "question", "response", "Another project")
+            first.sync()
+            second.sync()
+            record = next(row for row in first.cache_records(active_only=True) if row["title"] == "Project")
+            first.mark_cached_seen(record["cache_id"])
+            second.sync()
+            self.assertEqual(second.home_summary()["response_count"], 2)
+            self.assertFalse(second.get(question)["seen"])
             self.assertFalse(first.dismiss_cached_response(record["cache_id"] + "bad"))
             self.assertTrue(first.dismiss_cached_response(record["cache_id"]))
-            first.sync(); second.sync()
-            self.assertEqual(first.cache_records(active_only=True), [])
-            self.assertFalse(first.has_active_notifications())
-            self.assertEqual(first.home_summary()["response_count"], 0)
-            self.assertEqual(first.pending_attention(), 0)
-            self.assertFalse(first.list()[0]["resolved"])
-            self.assertEqual(len(second.cache_records(active_only=True)), 1)
-            self.assertFalse(source.list()[0]["resolved"])
+            # Replayed receipt after reconnect is safe.
+            self.assertTrue(first.dismiss_cached_response(record["cache_id"]))
+            self.assertEqual(source.home_summary()["response_count"], 1)
+            second.sync()
+            for inbox in (first, second, source):
+                self.assertEqual([item["title"] for item in inbox.cache_records(active_only=True)], ["Another project"])
+                self.assertNotIn("Project", [item["title"] for item in inbox.cache_records()])
+            self.assertFalse(second.get(question)["resolved"])
+            self.assertFalse(second.get(question)["seen"])
+            self.assertNotIn(question, [item["id"] for item in second.list_page(1)["items"]])
+            self.assertEqual(second.next_pending()["id"], other)
+
+            late = notifications.NotificationStore(root / "late.sqlite3", source=source)
+            late.sync()
+            self.assertEqual(late.home_summary()["response_count"], 1)
+            source.resolve_agent_event("codex", "other", "question")
+            for inbox in (first, second, late):
+                inbox.sync()
+                self.assertEqual(inbox.home_summary()["response_count"], 0)
+                self.assertFalse(inbox.has_active_notifications())
+            source.resolve_agent_event("codex", "session", "question")
+            second.sync()
+            self.assertTrue(second.get(question)["resolved"])
+            self.assertFalse(second.get(question)["seen"])
 
     def test_multiple_sources_have_explicit_categories_and_bounded_home_summary(self):
         with tempfile.TemporaryDirectory() as directory:

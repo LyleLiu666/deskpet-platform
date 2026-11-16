@@ -73,6 +73,21 @@ def _installed_command(path, template):
     return None
 
 
+def _previous_plugins(command, previous_commands=()):
+    previous_commands = tuple(previous_commands)
+    targets = {generated_hook_target(item) for item in (command, *previous_commands)} - {None}
+    if not targets:
+        return
+    path = plugin_path(command)
+    template = Path(__file__).with_name("opencode_plugin.js").read_bytes()
+    for existing in path.parent.glob("deskpet-*.js"):
+        if existing == path:
+            continue
+        installed = _installed_command(existing, template)
+        if generated_hook_target(installed) in targets:
+            yield installed
+
+
 def configure_registry(command, previous_commands, *, enabled):
     path = plugin_path(command)
     if not enabled and not path.parent.exists():
@@ -81,15 +96,8 @@ def configure_registry(command, previous_commands, *, enabled):
     lock = os.open(path.parent / ".deskpet-plugins.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         acquire(lock)
-        targets = {generated_hook_target(item) for item in (command, *previous_commands)} - {None}
-        obsolete = set(previous_commands)
-        template = Path(__file__).with_name("opencode_plugin.js").read_bytes()
-        for existing in path.parent.glob("deskpet-*.js"):
-            if existing == path:
-                continue
-            installed = _installed_command(existing, template)
-            if generated_hook_target(installed) in targets:
-                obsolete.add(installed)
+        previous_commands = tuple(previous_commands)
+        obsolete = set(previous_commands).union(_previous_plugins(command, previous_commands))
         changed = configure(path, command, enabled=enabled)
         for old in sorted(obsolete - {command}):
             changed = configure(plugin_path(old), old, enabled=False) or changed

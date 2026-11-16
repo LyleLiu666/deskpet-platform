@@ -200,7 +200,8 @@ class NotificationView:
             if cache_first and anchor is None:
                 anchor = max((item["id"] for item in cached_records), default=0)
             page = self.store.list_page(self.page, page_size=4, anchor=anchor,
-                                        pending_first=channel.capabilities.get("agent_inbox_read") == 1)
+                                        pending_first=channel.capabilities.get("agent_inbox_read") == 1, clamp=True)
+            self.page = page["page"]
             if cache_first and self.anchor is None:
                 # The first live page can replace the TF page only if they
                 # have the same identities and layout. Later live pages can

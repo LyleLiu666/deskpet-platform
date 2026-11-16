@@ -448,7 +448,7 @@ class BoardSession:
         if ids:
             await asyncio.to_thread(self.notifications.mark_seen_many, ids)
             await self.client.acknowledge_notice_reads(ids)
-        records = await asyncio.to_thread(self.notifications.list, 10)
+        records = await asyncio.to_thread(self.notifications.list, 10, for_device=True)
         fingerprint = [(item["id"], item["seen"], item["title"]) for item in records]
         if fingerprint != self.last_message_cache:
             await self.client.sync_messages(records)

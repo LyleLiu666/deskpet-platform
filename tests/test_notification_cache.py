@@ -106,6 +106,39 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list()[0]["id"], question)
         self.assertIn(("cache_receipt_begin", {"feedback_dismissal": True}), self.channel.commands)
 
+    async def test_dismissal_on_one_board_removes_the_question_from_the_peer_cache_on_reconnect(self):
+        root = self.store.path.parent
+        shared = NotificationStore(root / "shared.sqlite3")
+        first = NotificationStore(root / "first.sqlite3", source=shared)
+        self.store.source = shared
+        shared.add_agent_event("codex", "session", "question", "response", "Question")
+        shared.add_agent_event("codex", "another", "question", "response", "Keep this question")
+        caps = dict(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
+        self.channel.capabilities.update(caps)
+        self.store.sync()
+        await self.sync()
+        self.assertEqual(len(self.channel.rows), 2)
+
+        first.sync()
+        first_cache = NotificationCache(first)
+        first_channel = CacheBoard()
+        first_channel.capabilities.update(caps)
+        first_client = type("Client", (), {"channel": first_channel, "_operation": asyncio.Lock()})()
+        item = next(row for row in first.cache_records(active_only=True) if row["title"] == "Question")
+        fields, _, _, _ = _prepare(item, feedback_dismissal=True)
+        first_channel.receipts = [{"has_receipt": True, "id": fields["id"],
+                                   "content_revision": fields["content_revision"], "feedback_dismissal": True}]
+        await first_cache.step(first_client)
+        self.assertTrue(any(command == "cache_receipt_ack" for command, _ in first_channel.commands))
+
+        # The peer was offline and retains the old TF snapshot until it reconnects.
+        self.assertEqual(len(self.channel.rows), 2)
+        self.store.sync()
+        self.channel.epoch = "f" * 32
+        await self.sync()
+        self.assertEqual(len(self.channel.rows), 1)
+        self.assertEqual([row["title"] for row in self.cache.committed_records(self.channel)], ["Keep this question"])
+
     async def test_feedback_card_uses_local_confirmation_without_detail_transfer(self):
         self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
         self.store.add_agent_event("claude_code", "1234567890", "question", "response", "repository")
