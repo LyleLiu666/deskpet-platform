@@ -50,6 +50,7 @@ from .usb_setup import probe_usb
 from .usb_link import UsbLink, UsbPort, find_usb_devices, read_usb_identity
 from .weather import fetch_relay_weather, fetch_weather
 from .speech import SpeechTooLong, split_speech, synthesize_speech, validate_text
+from .transcription import configured_service, transcribe_to_device
 from .wifi_link import probe_board
 
 Manual = Literal["operations", "development", "roles"]
@@ -96,6 +97,8 @@ class BoardSession:
         self.lock = asyncio.Lock()
         self.speech_lock = asyncio.Lock()
         self.screen_speech_task = None
+        self.capture_task = None
+        self.capture_service = configured_service(os.environ)
         self.storage_lock = asyncio.Lock()
         self.loop = None
         self.touches = asyncio.Queue(maxsize=32)
@@ -134,6 +137,8 @@ class BoardSession:
         self.computer_preference_client = None
 
     async def drop(self):
+        if self.capture_task and not self.capture_task.done():self.capture_task.cancel()
+        self.capture_task=None
         if self.screen_speech_task and not self.screen_speech_task.done():self.screen_speech_task.cancel()
         self.screen_speech_task=None
         self.token_snapshot = None
@@ -323,6 +328,7 @@ class BoardSession:
                     sampled_client = self.client
                     if self.client.channel.capabilities.get('message_read_aloud')==1:
                         await self.refresh_read_request(self.client)
+                    await self.refresh_capture(self.client)
                     await self.sync_computer_preferences(sampled_client, heartbeat)
                     self.record_status(heartbeat)
                     notification_sync_ok = True
@@ -477,6 +483,39 @@ class BoardSession:
         item=await asyncio.to_thread(self.notifications.get,identity)
         if item is None:return {"status":"not_found"}
         return await self.speak(item['title'])
+
+    async def refresh_capture(self, client):
+        capabilities = client.channel.capabilities
+        if not self.capture_service or capabilities.get('capture_pull') != 1 or capabilities.get('transcript_display') != 1:
+            return
+        if self.capture_task and not self.capture_task.done():
+            return
+        metadata = await client.poll_capture()
+        ticket = metadata.get('ticket') if isinstance(metadata, dict) else None
+        if type(ticket) is not int or not 0 < ticket <= 0xffffffff:
+            return
+        self.capture_task = asyncio.create_task(self._screen_capture(client, metadata))
+
+    async def _screen_capture(self, client, metadata):
+        ticket = metadata['ticket']
+        received = False
+        success = False
+        try:
+            pcm = await client.receive_capture(metadata)
+            received = True
+            if self.client is not client:
+                return
+            key, model = self.capture_service
+            await transcribe_to_device(client, pcm, api_key=key, model=model)
+            success = True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass  # Never log credentials, recorded audio or remote response bodies.
+        finally:
+            if received and self.client is client:
+                with suppress(OSError, DeviceError, asyncio.TimeoutError):
+                    await client.capture_result(ticket, success)
 
     async def refresh_read_request(self,client):
         request=await client.read_request_take()

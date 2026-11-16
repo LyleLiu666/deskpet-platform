@@ -56,6 +56,7 @@ class Client:
         self.link = link_factory(config.identity, config.key, peer_hint=config.address)
         self.channel = Channel(self.link, config.identity)
         self._operation = asyncio.Lock()
+        self._capture = asyncio.Lock()
         self._upload = asyncio.Lock()
         self.device_id = None
 
@@ -187,12 +188,13 @@ class Client:
             type(size) is not int or not 0 < size <= 24000 * 2 * 120 or size % 2 or
             type(crc) is not int or not 0 <= crc <= 0xffffffff):
             raise DeviceError("invalid_capture_metadata")
-        async with self._operation:
+        async with self._capture:
             data = bytearray()
             finished = False
             try:
                 for offset in range(0, size, 384):
-                    reply = await self.channel.send("capture_chunk", ticket=ticket, offset=offset)
+                    async with self._operation:
+                        reply = await self.channel.send("capture_chunk", ticket=ticket, offset=offset)
                     chunk = reply.get("data") if isinstance(reply, dict) else None
                     expected = min(384, size - offset)
                     if (not isinstance(chunk, str) or len(chunk) != expected * 2 or
@@ -201,14 +203,23 @@ class Client:
                     data.extend(bytes.fromhex(chunk))
                 if zlib.crc32(data) != crc:
                     raise DeviceError("invalid_capture_data")
-                await self.channel.send("capture_finish", ticket=ticket)
+                async with self._operation:
+                    await self.channel.send("capture_finish", ticket=ticket)
                 finished = True
                 return bytes(data)
             finally:
                 data[:] = b"\0" * len(data)
                 if not finished:
                     with suppress(Exception):
-                        await self.channel.send("capture_finish", ticket=ticket)
+                        async with self._operation:
+                            await self.channel.send("capture_finish", ticket=ticket)
+                            await self.channel.send("capture_result", ticket=ticket, success=False)
+
+    async def capture_result(self, ticket, success):
+        if type(ticket) is not int or not 0 < ticket <= 0xffffffff or type(success) is not bool:
+            raise ValueError("录音结果参数无效。")
+        async with self._operation:
+            return await self.channel.send("capture_result", ticket=ticket, success=success)
 
     async def queue_transcript(self, text):
         """Queue recognized text for the device; acceptance does not prove display."""

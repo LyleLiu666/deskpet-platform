@@ -18,6 +18,23 @@ _ENDPOINT = "https://api.siliconflow.cn/v1/audio/transcriptions"
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
+def _valid_key(key):
+    return (isinstance(key, str) and bool(key.strip()) and len(key) <= 128
+            and all(33 <= ord(c) <= 126 for c in key))
+
+
+def _valid_model(model):
+    return isinstance(model, str) and len(model) <= 128 and bool(_MODEL.fullmatch(model))
+
+
+def configured_service(environ):
+    """Explicit opt-in only; invalid or missing settings disable recording."""
+    if environ.get("DESKPET_ENABLE_ONLINE_TRANSCRIPTION") != "1":
+        return None
+    key, model = environ.get("DESKPET_ASR_API_KEY"), environ.get("DESKPET_ASR_MODEL")
+    return (key, model) if _valid_key(key) and _valid_model(model) else None
+
+
 class TranscriptionError(RuntimeError):
     """A sanitized service failure, without audio, credentials or server text."""
 
@@ -27,10 +44,9 @@ async def transcribe_pcm(pcm: bytes, *, api_key: str, model: str,
     """Send 24 kHz mono signed 16-bit PCM and return bounded recognized text."""
     if not isinstance(pcm, bytes) or not pcm or len(pcm) > MAX_PCM_BYTES or len(pcm) % 2:
         raise ValueError("invalid PCM")
-    if (not isinstance(api_key, str) or not api_key.strip() or len(api_key) > 128
-            or any(ord(c) < 33 or ord(c) > 126 for c in api_key)):
+    if not _valid_key(api_key):
         raise ValueError("invalid API key")
-    if not isinstance(model, str) or len(model) > 128 or not _MODEL.fullmatch(model):
+    if not _valid_model(model):
         raise ValueError("invalid model")
 
     wav = io.BytesIO()

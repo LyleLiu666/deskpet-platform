@@ -11,10 +11,17 @@ from email.policy import default
 import httpx
 
 from deskpet_platform.channel import DeviceError
-from deskpet_platform.transcription import MAX_PCM_BYTES, TranscriptionError, transcribe_pcm, transcribe_to_device
+from deskpet_platform.transcription import MAX_PCM_BYTES, TranscriptionError, transcribe_pcm, transcribe_to_device, configured_service
 
 
 class TranscriptionTests(unittest.IsolatedAsyncioTestCase):
+    def test_online_recognition_requires_complete_explicit_configuration(self):
+        self.assertIsNone(configured_service({}))
+        base = {'DESKPET_ENABLE_ONLINE_TRANSCRIPTION': '1', 'DESKPET_ASR_API_KEY': 'test-key', 'DESKPET_ASR_MODEL': 'model/name'}
+        self.assertEqual(configured_service(base), ('test-key', 'model/name'))
+        for patch in ({'DESKPET_ENABLE_ONLINE_TRANSCRIPTION': '0'}, {'DESKPET_ASR_API_KEY': 'bad\nkey'}, {'DESKPET_ASR_MODEL': '../x'}):
+            self.assertIsNone(configured_service({**base, **patch}))
+
     async def test_synthetic_pcm_uses_expected_multipart_without_local_files(self):
         pcm=b'\x01\x00\xfe\xff'*8
         async def handler(request):

@@ -9,6 +9,7 @@ class CapturePullTests(unittest.IsolatedAsyncioTestCase):
     def client(self, send, supported=True):
         client = Client.__new__(Client)
         client._operation = asyncio.Lock()
+        client._capture = asyncio.Lock()
         client.channel = type('Channel', (), {'capabilities': {'capture_pull': int(supported)}, 'send': send})()
         return client
 
@@ -33,7 +34,29 @@ class CapturePullTests(unittest.IsolatedAsyncioTestCase):
                 send = AsyncMock(side_effect=reply)
                 with self.assertRaises(DeviceError):
                     await self.client(send).receive_capture({'ticket': 1, 'bytes': 2, 'crc32': crc})
-                self.assertEqual(send.await_args.args[0], 'capture_finish')
+                self.assertEqual([call.args[0] for call in send.await_args_list[-2:]], ['capture_finish', 'capture_result'])
+                self.assertFalse(send.await_args.kwargs['success'])
+
+    async def test_other_commands_can_run_between_chunks(self):
+        pcm = b'x' * 768
+        first, release = asyncio.Event(), asyncio.Event()
+        async def reply(kind, **fields):
+            if kind == 'capture_chunk':
+                if fields['offset'] == 0:
+                    first.set()
+                    await release.wait()
+                return {'data': pcm[fields['offset']:fields['offset'] + 384].hex()}
+            return {}
+        send = AsyncMock(side_effect=reply)
+        client = self.client(send)
+        task = asyncio.create_task(client.receive_capture({'ticket': 1, 'bytes': len(pcm), 'crc32': zlib.crc32(pcm)}))
+        await first.wait()
+        other = asyncio.create_task(client.poll_capture())
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(task, other), 2)
+        self.assertEqual([call.args[0] for call in send.await_args_list],
+                         ['capture_chunk', 'capture_poll', 'capture_chunk', 'capture_finish'])
 
     async def test_cancellation_clears_device_recording(self):
         entered = asyncio.Event()
@@ -48,7 +71,8 @@ class CapturePullTests(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
-        self.assertEqual(send.await_args.args[0], 'capture_finish')
+        self.assertEqual([call.args[0] for call in send.await_args_list[-2:]], ['capture_finish', 'capture_result'])
+        self.assertFalse(send.await_args.kwargs['success'])
 
     async def test_invalid_metadata_and_unsupported_device_never_fetch(self):
         send = AsyncMock()
