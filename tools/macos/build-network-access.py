@@ -28,6 +28,9 @@ try:
                        'NSHighResolutionCapable': True}, stream)
     source = Path(__file__).with_name('DeskPetNetworkAccess.swift')
     subprocess.run(['xcrun', 'swiftc', str(source), '-o', str(binary / 'DeskPetNetworkAccess')], check=True)
+    launcher = Path(__file__).with_name('DeskPetReceiverLauncher.swift')
+    subprocess.run(['xcrun', 'swiftc', str(launcher), '-o', str(binary / 'DeskPetReceiverLauncher')], check=True)
+    subprocess.run(['codesign', '--force', '--sign', '-', str(binary / 'DeskPetReceiverLauncher')], check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(app)], check=True)
 except BaseException:
     shutil.rmtree(app)
