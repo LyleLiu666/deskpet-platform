@@ -16,7 +16,7 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
     $previousEnvironment = $env:UV_PROJECT_ENVIRONMENT
     try {
         $env:UV_PROJECT_ENVIRONMENT = Join-Path $PSScriptRoot '.venv'
-        & uv sync --locked --python ">=3.11,<3.15"
+        & uv sync --locked --no-editable --python ">=3.11,<3.15"
         if ($LASTEXITCODE -ne 0) { throw 'Installation failed. Check the error above and retry.' }
     } finally {
         $env:UV_PROJECT_ENVIRONMENT = $previousEnvironment

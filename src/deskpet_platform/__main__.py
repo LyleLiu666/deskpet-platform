@@ -163,7 +163,10 @@ def main():
             if args.command == "pair" and not sys.stdin.isatty():
                 parser.exit(2, "请在本机交互式终端输入配对码。\n")
             result = asyncio.run(interact(args))
-        print(json.dumps(result, ensure_ascii=False))
+        # Redirected output can use a Windows code page that cannot represent
+        # paths to the installed app or to the client's hook configuration.
+        encoding = sys.stdout.encoding or "utf-8"
+        print(json.dumps(result, ensure_ascii=encoding.lower() not in ("utf-8", "utf8")))
     except KeyError:
         parser.exit(2, "找不到所选搭搭，请用 doctor 查看已配对设备。\n")
     except FileNotFoundError:

@@ -6,7 +6,7 @@ if [[ "$(uname -s)" != Darwin ]]; then
   exit 2
 fi
 if command -v uv >/dev/null; then
-  UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --locked --python ">=3.11,<3.15"
+  UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --locked --no-editable --python ">=3.11,<3.15"
 elif python_cmd="$(command -v python3)" &&
      { [[ "$python_cmd" != /usr/bin/python3 ]] || /usr/bin/xcode-select -p >/dev/null 2>&1; } &&
      "$python_cmd" -c 'import sys; raise SystemExit(not ((3, 11) <= sys.version_info < (3, 15)))' 2>/dev/null; then

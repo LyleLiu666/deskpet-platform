@@ -90,7 +90,7 @@ python3 -m venv .venv
 .venv/bin/deskpet-platform status
 ```
 
-已有本地 wheel 文件时，可将上面的 `pip install .` 改为 `pip install /绝对路径/deskpet_platform-0.1.0rc4-py3-none-any.whl`。
+已有本地 wheel 文件时，可将上面的 `pip install .` 改为 `pip install /绝对路径/deskpet_platform-0.1.0rc5-py3-none-any.whl`。
 
 用 MCP 的 `desk_pair_usb` 配对已登记的搭搭。提供本机私有 Wi-Fi 凭据文件时，同一步也可完成配网。需要手动设置时，可扫描搭搭上的配网二维码，再用 `desk_pair_begin` 打开本机配对页。一台搭搭同一时间由一套服务连接。
 
@@ -98,12 +98,12 @@ python3 -m venv .venv
 
 在 [搭搭 Release](https://github.com/LyleLiu666/deskpet-platform/releases) 选择对应系统的桌面包。桌面包自带 `AgentSpeedProbe`，安装后用 `mcp` 启动即可识别。安装方法与源码包相同。
 
-| 系统 | RC4 桌面包 |
+| 系统 | RC5 桌面包 |
 | --- | --- |
-| macOS 14 或更新，Apple 芯片 | `deskpet_platform-0.1.0rc4-macos-arm64.tar.gz` |
-| Windows x64 | `deskpet_platform-0.1.0rc4-windows-x64.zip` |
-| Linux x64（glibc） | `deskpet_platform-0.1.0rc4-linux-x64.tar.gz` |
-| Linux arm64（glibc） | `deskpet_platform-0.1.0rc4-linux-arm64.tar.gz` |
+| macOS 14 或更新，Apple 芯片 | `deskpet_platform-0.1.0rc5-macos-arm64.tar.gz` |
+| Windows x64 | `deskpet_platform-0.1.0rc5-windows-x64.zip` |
+| Linux x64（glibc） | `deskpet_platform-0.1.0rc5-linux-x64.tar.gz` |
+| Linux arm64（glibc） | `deskpet_platform-0.1.0rc5-linux-arm64.tar.gz` |
 
 测速可用 `mcp --no-token-probe` 关闭。使用通用包时，可以继续配对和接收提醒，也可用 `mcp --token-probe <独立采集器的绝对路径>` 启用测速。设备配置目录 `bin/` 内已装的采集器优先于随包版本。Windows 查找 `AgentSpeedProbe.exe` 和 `AgentSpeed.Probe.exe`，macOS 和 Linux 查找 `AgentSpeedProbe`。运行一个任务后用 `desk_token_status` 确认读数。采集器保留 [Agent Speed 源码链接](https://github.com/zoefix/agent-speed/tree/29dffc4e6fbe1da435071e40781b1571dd45ac22) 和许可证。
 
