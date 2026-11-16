@@ -4,7 +4,7 @@
 
 DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非商用使用、修改和分发。商用需要另行获得授权。随附的图标沿用[各自的许可证](src/deskpet_platform/assets/agent_icons/LICENSE)。
 
-本仓库提供电脑端源码。兼容的开发板是 **ESP32-2432S028 双 USB 版**（ST7789 屏幕、XPT2046 触摸、4 MiB Flash）。已预刷兼容固件的小板可直接配网和配对。空白板需要单独取得对应板型的固件首刷包，再按[刷机说明](docs/flash.md)操作。
+本仓库提供电脑端源码。兼容的开发板是 **ESP32-2432S028 双 USB 版**（ST7789 屏幕、XPT2046 触摸、4 MiB Flash）。已预刷兼容固件的搭搭可直接配网和配对。空白板需要单独取得对应板型的固件首刷包，再按[刷机说明](docs/flash.md)操作。
 
 [交给你的 Agent 安装](#交给你的-agent-安装) · [手动安装](#手动安装) · [开始使用二维码](#开始使用二维码)
 
@@ -26,8 +26,9 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 1. 在独立目录安装。macOS 用 install-macos.command，Windows 用
    install-windows.ps1，Linux 按「手动安装」使用 Python 虚拟环境。
    把安装好的 deskpet-platform 绝对路径和 mcp 参数加入当前 Agent 的
-   stdio MCP 配置。按操作手册设置 Codex 的写卡等待时间。如果当前会话
-   读不到新增 MCP，告诉我如何开启新会话，并继续余下步骤。
+   stdio MCP 配置，首次启动前按第 5 步准备好测速参数。按操作手册设置
+   Codex 的写卡等待时间。如果当前会话
+   读不到新增 MCP，告诉我如何开启新会话并续做配对和提醒。
 2. 用 desk_list_devices 查找已有配对。复用对应的 device_id，新增设备
    时使用 add_device=true。若走 USB，先用 find-usb 核对搭搭的 UUID 和 MAC，
    再用 desk_pair_usb。已有本机私有 Wi-Fi 凭据文件时，可同一步配网。
@@ -51,13 +52,13 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 5. 测速可选。按 README 使用当前发行版与系统、架构匹配的独立采集器，
    或复用本机已有的兼容采集器。启动 MCP 时用 --token-probe 指定采集器的
    绝对路径，再用 desk_token_status 验证。无现成采集器时，加
-   --no-token-probe 完成安装、配对和提醒。安装过程使用现成的发行包。
+   --no-token-probe 完成安装、配对和提醒。采集器安装只使用已发布的预编译包。
 6. 若我需要额度显示，按操作手册设置对应来源，并告诉我从搭搭的
    「监控设置」切换。最后告诉我连接、提醒和测速各自的验证结果，
    以及还需要我做的操作。
 ```
 
-## 给小板加一个角色
+## 给搭搭加一个角色
 
 接好 MCP 后，可以直接对 Agent 说「帮我装一个 Pocket Bot 示例角色」，体验储存卡安装和图鉴试播。想定制角色，可以从参考图和一段动作预览开始，例如「按这张图设计一只小猫，先让我看看它怎么跑」。定稿后按角色标准补齐素材，再打包安装。
 
@@ -78,7 +79,7 @@ python3 -m venv .venv
 
 已有本地 wheel 文件时，可将上面的 `pip install .` 改为 `pip install /绝对路径/deskpet_platform-0.1.0rc3-py3-none-any.whl`。
 
-用 MCP 的 `desk_pair_usb` 配对已登记的小板。提供本机私有 Wi-Fi 凭据文件时，同一步也可完成配网。需要手动设置时，可扫描小板上的配网二维码，再用 `desk_pair_begin` 打开本机配对页。一块小板同一时间由一套服务连接。
+用 MCP 的 `desk_pair_usb` 配对已登记的搭搭。提供本机私有 Wi-Fi 凭据文件时，同一步也可完成配网。需要手动设置时，可扫描搭搭上的配网二维码，再用 `desk_pair_begin` 打开本机配对页。一台搭搭同一时间由一套服务连接。
 
 在 MCP 客户端中以 stdio 注册 `.venv/bin/deskpet-platform mcp`，配置时使用绝对路径。设备支持时钟、相册、天气、Token 状态、Codex 消息和可插拔角色。操作与开发手册也可通过 MCP 读取。
 
@@ -105,7 +106,7 @@ python3 -m venv .venv
 
 ## 开始使用二维码
 
-手机扫码可打开本页的安装步骤。在电脑上打开同一链接并完成安装，再按小板上的提示配网和配对。[打开安装步骤](https://github.com/LyleLiu666/deskpet-platform#交给你的-agent-安装)
+手机扫码可打开本页的安装步骤。在电脑上打开同一链接并完成安装，再按搭搭上的提示配网和配对。[打开安装步骤](https://github.com/LyleLiu666/deskpet-platform#交给你的-agent-安装)
 
 <img src="docs/assets/start-qr.png" width="240" height="240" alt="DeskPet 安装步骤二维码">
 
