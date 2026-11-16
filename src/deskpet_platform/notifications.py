@@ -369,6 +369,24 @@ class NotificationStore:
                 seen=COALESCE(seen,?) WHERE id=? AND category='response'""",
                 (now, now, identity)).rowcount > 0
 
+    def withdrawn_response_count(self):
+        with closing(self._connect()) as db:
+            return db.execute("""SELECT COUNT(*) FROM notifications
+                WHERE category='response' AND (resolved IS NOT NULL OR dismissed IS NOT NULL)""").fetchone()[0]
+
+    def withdrawn_cache_responses(self, cache_ids):
+        with closing(self._connect()) as db:
+            mask = 0
+            for index, cache_id in enumerate(cache_ids):
+                if cache_id is None:
+                    continue
+                identity = self._matching_cache_record(db, cache_id)
+                if identity is not None and db.execute("""SELECT 1 FROM notifications WHERE id=?
+                        AND category='response' AND (resolved IS NOT NULL OR dismissed IS NOT NULL)""",
+                        (identity,)).fetchone() is not None:
+                    mask |= 1 << index
+            return mask
+
     def mark_list_seen_through_cache_record(self, cache_id, *, include_responses=False):
         """Record that the list presented the inbox through its exact TF snapshot."""
         with closing(self._connect()) as db, db:

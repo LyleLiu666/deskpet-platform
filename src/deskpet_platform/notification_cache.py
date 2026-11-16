@@ -69,6 +69,7 @@ class NotificationCache:
         self.retry_at = 0
         self.reuse_failed = False
         self.session_ids = False
+        self.browsing_feedback = None
 
     def committed_records(self, channel):
         if self.confirmed is not None and channel.epoch == self.confirmed_epoch and channel.boot == self.confirmed[0]:
@@ -90,12 +91,14 @@ class NotificationCache:
             self.poll_at = self.retry_at = 0
             self.reuse_failed = False
             self.session_ids = False
+            self.browsing_feedback = None
         if self.transfer is None:
             now = time.monotonic()
             if now < self.retry_at:
                 return
             committed = self.committed_records(channel)
-            if now < self.poll_at and (not cache_first or committed is None or committed == self._records(channel)):
+            if now < self.poll_at and (self.browsing_feedback is not None or not cache_first or
+                                       committed is None or committed == self._records(channel)):
                 return
             self.transfer = self._sync(channel)
         async with client._operation:
@@ -134,6 +137,8 @@ class NotificationCache:
         elif self.confirmed_epoch != channel.epoch:
             self.confirmed_epoch = None
         yield
+        async for _ in self._withdraw_open_feedback(channel, state):
+            yield
         if state.get("cache_busy"):
             return
         records = self._records(channel)
@@ -268,3 +273,35 @@ class NotificationCache:
         self.confirmed_epoch = channel.epoch
         self.reuse_failed = False
         yield
+
+    async def _withdraw_open_feedback(self, channel, state):
+        generation = state.get("cache_browsing_generation")
+        if generation is None:
+            self.browsing_feedback = None
+            return
+        count = state.get("cache_browsing_count")
+        if type(generation) is not int or not 0 < generation <= 0xffffffff or type(count) is not int or not 0 <= count <= 1000:
+            raise RuntimeError("invalid_cached_inbox")
+        withdrawn = self.store.withdrawn_response_count()
+        stamp = (generation, withdrawn)
+        if self.browsing_feedback == stamp:
+            return
+        if withdrawn:
+            for start in range(0, count, CACHE_RANGE):
+                size = min(CACHE_RANGE, count - start)
+                fields = dict(generation=generation, start=start, count=size)
+                reply = await channel.send("cache_feedback", **fields)
+                yield
+                if reply.get("cache_changed") or reply.get("cache_feedback_retry"):
+                    return
+                rows = reply.get("rows")
+                if not isinstance(rows, list) or len(rows) != size or any(
+                        item is not None and (not isinstance(item, str) or not 0 < len(item) <= 35) for item in rows):
+                    raise RuntimeError("invalid_cached_feedback")
+                mask = self.store.withdrawn_cache_responses(rows) if any(rows) else 0
+                if mask:
+                    reply = await channel.send("cache_feedback", **fields, hide=mask)
+                    yield
+                    if reply.get("cache_changed") or reply.get("cache_feedback_retry"):
+                        return
+        self.browsing_feedback = stamp
