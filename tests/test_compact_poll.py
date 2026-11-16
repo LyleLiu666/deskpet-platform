@@ -1,12 +1,15 @@
 import asyncio
 from pathlib import Path
 import tempfile
+import time
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+from deskpet_platform.channel import AckTimeout
 from deskpet_platform.client import Client
 from deskpet_platform.mcp_server import BoardSession
 from deskpet_platform.pairing import DeviceConfig
+from deskpet_platform.notifications import NotificationStore
 
 CONFIG = DeviceConfig('02:00:00:00:00:01', bytes(range(32)))
 
@@ -33,6 +36,87 @@ class CompactPollTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(asyncio.CancelledError):
                         await session.poll()
                 self.assertEqual(deliver.await_count, int(expected))
+
+    async def test_local_notice_storage_error_keeps_link_online_but_link_failure_drops_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "device.json"
+            CONFIG.save(path)
+            session = BoardSession(path)
+            blocked = path.parent / "blocked"
+            blocked.write_text("not a directory")
+            session.notifications = NotificationStore(blocked / "notifications.sqlite3")
+            board = AsyncMock()
+            board.device_id = None
+            board.link.wireless = True
+            board.channel.capabilities = {"notices": 1}
+            board.status.return_value = {"boot": 1}
+            session.connect = AsyncMock(return_value=board)
+            session.recover_wifi = AsyncMock()
+            with patch("deskpet_platform.mcp_server.asyncio.sleep",
+                       AsyncMock(side_effect=asyncio.CancelledError)):
+                with self.assertRaises(asyncio.CancelledError):
+                    await session.poll()
+                self.assertIs(session.client, board)
+                self.assertEqual(session.snapshot["connection"], "connected")
+                self.assertIn("notification_error", session.snapshot)
+                board.close.assert_not_awaited()
+
+                board.status.side_effect = FileNotFoundError("USB adapter disconnected")
+                with self.assertRaises(asyncio.CancelledError):
+                    await session.poll()
+                self.assertEqual(session.snapshot["connection"], "offline")
+                board.close.assert_awaited_once()
+
+    async def test_disconnect_evidence_survives_failed_retries_and_records_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json")
+            board = AsyncMock()
+            board.link.wireless = True
+            board.channel.capabilities = {}
+            session.client = board
+            session.record_status({"boot": 1})
+            with patch("deskpet_platform.mcp_server.time.monotonic", return_value=10):
+                await session.record_link_error(AckTimeout("heartbeat did not reply"))
+            with patch("deskpet_platform.mcp_server.time.monotonic", return_value=12):
+                await session.record_link_error(OSError("wifi_device_absent"))
+            evidence = (await session.get_status())["last_link_loss"]
+            self.assertEqual(evidence["reason"], "ack_timeout")
+            self.assertNotIn("connection_recovery_ms", evidence)
+            session.client = board
+            board.status.return_value = {"boot": 1}
+            with patch("deskpet_platform.mcp_server.time.monotonic", return_value=13.25):
+                refreshed = await session.get_status()
+            self.assertEqual(refreshed["connection"], "connected")
+            self.assertEqual(refreshed["last_link_loss"]["observed_at"], evidence["observed_at"])
+            self.assertEqual(refreshed["last_link_loss"]["connection_recovery_ms"], 3250)
+
+    async def test_speed_recovery_requires_a_successful_device_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            probe = Mock(metric_version="fixture-output-v1", speed_state="L")
+            probe.sample = AsyncMock(return_value={"rate10": 120, "sessions": 1, "trend": [0] * 12, "quotas": []})
+            session = BoardSession(Path(directory) / "device.json", probe_collector=probe)
+            board = AsyncMock()
+            board.link.wireless = True
+            board.channel.capabilities = {"token_stats": 1}
+            session.client = board
+            session.record_status({"boot": 1})
+            session.token_snapshot = {"rate10": 120}
+            session.token_published_at = time.monotonic()
+            await session.record_link_error(OSError("wifi_disconnected"))
+            session.client = board
+            session.record_status({"boot": 1})
+
+            board.update_tokens.side_effect = [OSError("device did not accept the sample"), None]
+            with patch("deskpet_platform.mcp_server.asyncio.sleep",
+                       AsyncMock(side_effect=asyncio.CancelledError)):
+                with self.assertRaises(asyncio.CancelledError):
+                    await session.poll_tokens()
+                self.assertNotIn("speed_recovery_ms", session.snapshot["last_link_loss"])
+                with self.assertRaises(asyncio.CancelledError):
+                    await session.poll_tokens()
+            evidence = session.snapshot["last_link_loss"]
+            self.assertGreaterEqual(evidence["speed_recovery_ms"], evidence["connection_recovery_ms"])
+            self.assertEqual(board.update_tokens.await_count, 2)
 
     async def test_client_requests_compact_only_when_advertised(self):
         client = Client(CONFIG)

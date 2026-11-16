@@ -38,7 +38,7 @@ tool_timeout_sec = 1200
 
 运行 `deskpet-platform doctor --client codex` 可查看本机已配对设备、钩子文件、最近触发的事件和该设备保存的显示回执。多个设备时加 `--device-id`。独立接收端使用 `deskpet-platform --config <接收端配置> doctor --client codex --shared-config <原设备配置>`。其他客户端使用 `claude_code`、`antigravity`、`opencode`、`workbuddy` 或 `workbuddy_ai`。`doctor` 可在 MCP 使用搭搭时运行。写入配置后，仍要在 Agent 界面完成适用的信任步骤，并在新会话触发一次提醒。用 `desk_status` 验证当前连接，用 `desk_token_status` 验证实际测速读数。
 
-连接显示 `busy` 时，停止另一个控制同一设备的服务或 MCP 实例。连接显示 `offline` 时，先检查设备供电、Wi‑Fi 和配对。运行 MCP 时用工具查状态，终端的独立 `status` 也要临时占用连接。
+连接显示 `busy` 时，停止另一个控制同一设备的服务或 MCP 实例。连接显示 `offline` 时，先检查设备供电、Wi‑Fi 和配对。运行 MCP 时用工具查状态，终端的独立 `status` 也要临时占用连接。若当前 MCP 观察到连接中断，`desk_status` 的 `last_link_loss` 会保留首个错误、连接恢复时间，以及有新读数送达时的测速恢复时间。单位为毫秒，从该次中断起算。
 
 如果搭搭显示已联网但电脑自动发现失败，在配对页填写搭搭屏幕显示的局域网 IP，并确认两台设备互相可达。访客 Wi-Fi、路由器的客户端隔离、VPN 或代理都可能阻断设备间流量。手动填 IP 时，仍由搭搭回连电脑。Windows 上检查防火墙是否允许安装目录下的 `.venv\Scripts\python.exe` 在当前受信任网络接收入站连接。macOS 上检查 Agent 或终端的局域网权限。
 

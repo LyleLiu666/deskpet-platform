@@ -125,6 +125,8 @@ class BoardSession:
         self.no_token_probe = no_token_probe
         self.token_snapshot = None
         self.token_published_at = 0.0
+        self.last_link_loss = None
+        self.link_loss_started = None
         self.token_history_path = Path(path).parent / "token-speed.sqlite3"
         self.codex_allowance = {}
         self.codex_live_allowance = {}
@@ -256,9 +258,30 @@ class BoardSession:
             status["wifi_connection_direction"] = direction
         if self.snapshot.get("speed_windows") != status.get("speed_windows"):
             self.token_snapshot = None
+        if self.last_link_loss is not None:
+            if "connection_recovery_ms" not in self.last_link_loss:
+                self.last_link_loss["connection_recovery_ms"] = self._elapsed_since_link_loss()
+            status["last_link_loss"] = self.last_link_loss.copy()
         self.snapshot = status
 
+    def _elapsed_since_link_loss(self):
+        return round((time.monotonic() - self.link_loss_started) * 1000)
+
     async def record_link_error(self, error):
+        if self.client is not None and self.snapshot.get("connection") == "connected":
+            if isinstance(error, AckTimeout):
+                reason = "ack_timeout"
+            elif isinstance(error, CommandRejected) and error.code == "handshake_required":
+                reason = "handshake_required"
+            elif isinstance(error, OSError) and str(error).startswith("wifi_disconnected"):
+                reason = "wifi_stream_closed"
+            elif isinstance(error, OSError) and str(error).startswith("usb_disconnected"):
+                reason = "usb_stream_closed"
+            else:
+                reason = "link_error"
+            self.link_loss_started = time.monotonic()
+            had_speed = self.token_snapshot is not None and self.link_loss_started - self.token_published_at < 15
+            self.last_link_loss = {"observed_at": time.time(), "reason": reason, "speed_was_active": had_speed}
         await self.drop()
         busy = isinstance(error, RuntimeError) and str(error).startswith("device_busy:")
         handoff = False
@@ -283,6 +306,8 @@ class BoardSession:
         }
         if network_unreachable:
             self.snapshot['reason'] = 'local_network_unreachable'
+        if self.last_link_loss is not None:
+            self.snapshot["last_link_loss"] = self.last_link_loss.copy()
 
     async def record_status_rejection(self, error):
         if error.code == "handshake_required":
@@ -373,8 +398,11 @@ class BoardSession:
                             await deliver_next(self.client, self.notifications)
                         except (sqlite3.Error, ValueError):
                             self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
-                except FileNotFoundError:
-                    self.snapshot = {"connection": "not_paired", "next_step": "在本机运行 deskpet-platform pair。"}
+                except FileNotFoundError as error:
+                    if self.client is None and error.filename == os.fspath(self.path):
+                        self.snapshot = {"connection": "not_paired", "next_step": "在本机运行 deskpet-platform pair。"}
+                    else:
+                        await self.record_link_error(error)
                 except CommandRejected as error:
                     await self.record_status_rejection(error)
                 except LINK_ERRORS as error:
@@ -793,6 +821,11 @@ class BoardSession:
                                 await client.update_tokens(snapshot, windows=windows)
                                 self.token_snapshot = {**snapshot, "adaptive": runtime.status()}
                                 self.token_published_at = time.monotonic()
+                                loss = self.last_link_loss
+                                if (loss is not None and loss["speed_was_active"]
+                                        and "connection_recovery_ms" in loss and "speed_recovery_ms" not in loss):
+                                    loss["speed_recovery_ms"] = self._elapsed_since_link_loss()
+                                    self.snapshot["last_link_loss"] = loss.copy()
                     except (sqlite3.Error, *LINK_ERRORS):
                         pass
                 await asyncio.sleep(1)

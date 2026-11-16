@@ -61,21 +61,24 @@ class NotificationStore:
         self.source = source
 
     def _connect(self, *, timeout=2):
-        if os.name == "nt":
-            from .windows_private import ensure_private_directory
-            self.path.parent.parent.mkdir(parents=True, exist_ok=True)
-            ensure_private_directory(self.path.parent)
-        else:
-            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
-            descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            pass
-        else:
-            os.close(descriptor)
-        if self.path.is_symlink() or (os.name != "nt" and self.path.stat().st_mode & 0o077):
-            raise ValueError("notification_store_requires_private_permissions")
-        db = sqlite3.connect(self.path.resolve().as_uri(), uri=True, timeout=timeout)
+            if os.name == "nt":
+                from .windows_private import ensure_private_directory
+                self.path.parent.parent.mkdir(parents=True, exist_ok=True)
+                ensure_private_directory(self.path.parent)
+            else:
+                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                os.close(descriptor)
+            if self.path.is_symlink() or (os.name != "nt" and self.path.stat().st_mode & 0o077):
+                raise ValueError("notification_store_requires_private_permissions")
+            db = sqlite3.connect(self.path.resolve().as_uri(), uri=True, timeout=timeout)
+        except OSError as error:
+            raise sqlite3.OperationalError("notification_store_unavailable") from error
         try:
             db.execute("""CREATE TABLE IF NOT EXISTS notifications (
                 id INTEGER PRIMARY KEY, source TEXT NOT NULL, session TEXT NOT NULL, turn TEXT NOT NULL,
