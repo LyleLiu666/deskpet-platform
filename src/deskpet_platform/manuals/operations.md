@@ -33,7 +33,7 @@ tool_timeout_sec = 1200
 ### 手机扫码配网和配对
 
 1. 给小板供电。完整显示固件从应用菜单进入 **桌面设置 → Wi-Fi**。参考固件在屏幕未显示配网二维码时，长按屏幕 3 秒打开 Wi-Fi 设置。用手机扫描左侧二维码加入小板热点，再扫描右侧二维码打开设置页。选择 2.4 GHz Wi-Fi 并输入密码，列表中找不到网络时可手动输入名称。联网后，让手机和电脑回到与小板相同的网络。
-2. 调用 `desk_pair_begin` 打开电脑本机配对页。完整显示固件从应用菜单进入 **桌面设置 → 电脑配对**。参考固件尚未校准触屏时，轻触已联网的小板显示配对码。用手机扫描配对码，将内容粘贴到本机页面。自动发现失败时，填写小板显示的局域网地址。也可在本机终端运行 `deskpet-platform pair`，将码粘贴到隐藏输入框。
+2. 调用 `desk_pair_begin` 打开电脑本机配对页。完整显示固件从应用菜单进入 **桌面设置 → 电脑配对**。参考固件尚未校准触屏时，轻触已联网的搭搭显示配对码。用手机扫描配对码，将内容粘贴到本机页面。自动发现失败时，在原配对页面填写搭搭显示的局域网地址，重新输入配对码后重试。也可在本机终端运行 `deskpet-platform pair`，将码粘贴到隐藏输入框。
 3. 用 `desk_pair_status` 查看配对页结果，再用 `desk_status` 检查连接。
 
 运行 `deskpet-platform doctor --client codex` 可查看本机已配对设备、钩子文件、最近触发的事件和该设备保存的显示回执。多个设备时加 `--device-id`。独立接收端使用 `deskpet-platform --config <接收端配置> doctor --client codex --shared-config <原设备配置>`。其他客户端使用 `claude_code`、`antigravity`、`opencode`、`workbuddy` 或 `workbuddy_ai`。`doctor` 可在 MCP 使用搭搭时运行。写入配置后，仍要在 Agent 界面完成适用的信任步骤，并在新会话触发一次提醒。用 `desk_status` 验证当前连接，用 `desk_token_status` 验证实际测速读数。
