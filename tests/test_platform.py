@@ -761,6 +761,20 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await client.role_preview(mode, identity)
 
+    async def test_role_activation_reports_firmware_failure_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json")
+            client = AsyncMock()
+            client.link.wireless = True
+            client.channel.capabilities = {"compact_status": 1}
+            client.status.return_value = {"role_state": "failed", "role_failure_stage": "enter",
+                                          "role_rollback_ok": False}
+            session.client = client
+            self.assertEqual(await session.wait_role("sample-role"),
+                             {"status": "activation_failed", "role": "sample-role",
+                              "stage": "enter", "role_rollback_ok": False})
+            client.status.assert_awaited_once_with(compact=True)
+
     async def test_preview_use_reports_success_only_after_async_activation(self):
         with tempfile.TemporaryDirectory() as directory:
             session = BoardSession(Path(directory) / "device.json")

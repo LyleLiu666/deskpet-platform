@@ -1171,6 +1171,8 @@ class BoardSession:
                         "remembered_after_restart": status.get("role_persisted")}
             if status.get("role_state") == "failed":
                 result = {"status": "activation_failed", "role": identity}
+                if isinstance(stage := status.get("role_failure_stage"), str):
+                    result["stage"] = stage
                 if status.get("role_rollback_ok") is False:
                     result["role_rollback_ok"] = False
                 return result
@@ -1258,7 +1260,8 @@ class BoardSession:
                     try:
                         await client.prepare_role(bundle.identity, bundle.version, bundle.actions, bundle.finish_action)
                     except CommandRejected as error:
-                        result = {"status": "activation_failed", "role": bundle.identity, "reason": str(error)}
+                        result = {"status": "activation_failed", "role": bundle.identity,
+                                  "stage": "prepare", "reason": str(error)}
                     else:
                         result = await self.wait_role(bundle.identity)
                 except LINK_ERRORS as error:
@@ -1499,6 +1502,8 @@ def status_view(reply, capabilities):
     }
     if isinstance(reply.get("role_base_action"), str):
         status["role"]["base_action"] = reply["role_base_action"]
+    if isinstance(reply.get("role_failure_stage"), str):
+        status["role"]["failure_stage"] = reply["role_failure_stage"]
     if type(reply.get("weekly_reset")) is int and 1700000000 <= reply["weekly_reset"] <= 0xFFFFFFFF:
         status["weekly_reset_at"] = reply["weekly_reset"]
     quota_source = reply.get("quota_source")
