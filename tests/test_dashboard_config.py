@@ -49,3 +49,19 @@ class DashboardConfig(unittest.IsolatedAsyncioTestCase):
             client.channel.send.return_value={'metric':3,'quota_source':0}
             self.assertEqual((await session.dashboard_config(None,None))['metric'],'auto')
             self.assertEqual(await session.dashboard_config(None,None,['speed']),{'status':'unsupported'})
+
+    async def test_rotation_interval_and_legacy_device(self):
+        client=self.client();client.channel.capabilities.update({'dashboard_rotation':1,'dashboard_interval':1})
+        client.channel.send.return_value={'metric':3,'quota_source':0,'rotation':3,'interval':30}
+        with TemporaryDirectory() as directory:
+            session=BoardSession(Path(directory)/'device.json');session.client=client
+            result=await session.dashboard_config(None,None,interval=30)
+            self.assertEqual(result['interval_seconds'],30)
+            client.channel.send.assert_awaited_with('dashboard_config',mode='set',interval=30)
+            for invalid in (0,11,True,61):
+                with self.assertRaises(ValueError):await session.dashboard_config(None,None,interval=invalid)
+            with self.assertRaises(ValueError):await session.dashboard_config('auto',None,interval=10)
+            client.channel.send.return_value['interval']=11
+            with self.assertRaises(DeviceError):await session.dashboard_config(None,None)
+            client.channel.capabilities.pop('dashboard_interval')
+            self.assertEqual(await session.dashboard_config(None,None,interval=10),{'status':'unsupported'})

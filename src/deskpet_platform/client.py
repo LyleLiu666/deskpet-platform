@@ -24,6 +24,7 @@ SCREEN_PAGES = ("role", "home", "clock", "settings", "roles", "photos", "weather
 DEFAULT_SCREEN_PAGES = ("role", "home", "clock", "photos")
 DASHBOARD_METRICS = ("speed", "quota", "computer", "auto", "weather")
 DASHBOARD_ROTATION = ("speed", "quota", "computer", "weather")
+DASHBOARD_INTERVALS = (5, 10, 20, 30, 60)
 
 def _appearance_theme(value):
     if not isinstance(value,str):raise ValueError('主题须为名称或 JSON 文件名。')
@@ -238,13 +239,16 @@ class Client:
         async with self._operation:
             return await self.channel.send("quota_source", source=SOURCES.index(source))
 
-    async def dashboard_config(self, metric=None, *, rotation=None):
+    async def dashboard_config(self, metric=None, *, rotation=None, interval=None):
         if self.channel.capabilities.get('dashboard_config')!=1:
             raise DeviceError('dashboard_config_not_supported')
         if metric is not None and metric not in DASHBOARD_METRICS:
             raise ValueError('请选择有效的数据展示项目。')
-        if metric is not None and rotation is not None:
-            raise ValueError('请分别设置数据项目和轮播项目。')
+        if sum(value is not None for value in (metric,rotation,interval))>1:
+            raise ValueError('请分别设置数据项目、轮播项目和轮播间隔。')
+        if interval is not None:
+            if type(interval) is not int or interval not in DASHBOARD_INTERVALS:raise ValueError('轮播间隔请选择 5、10、20、30 或 60 秒。')
+            if self.channel.capabilities.get('dashboard_interval')!=1:raise DeviceError('dashboard_interval_not_supported')
         if rotation is not None:
             if (not isinstance(rotation,list) or not rotation or len(rotation)>len(DASHBOARD_ROTATION) or
                 any(not isinstance(item,str) or item not in DASHBOARD_ROTATION for item in rotation) or len(set(rotation))!=len(rotation)):
@@ -253,6 +257,7 @@ class Client:
                 raise DeviceError('dashboard_rotation_not_supported')
             mask=sum(1<<DASHBOARD_ROTATION.index(item) for item in rotation)
         async with self._operation:
+            if interval is not None:return await self.channel.send('dashboard_config',mode='set',interval=interval)
             if rotation is not None:return await self.channel.send('dashboard_config',mode='set',rotation=mask)
             if metric is None:return await self.channel.send('dashboard_config',mode='status')
             return await self.channel.send('dashboard_config',mode='set',metric=DASHBOARD_METRICS.index(metric))
