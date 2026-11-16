@@ -68,3 +68,17 @@ async def transcribe_pcm(pcm: bytes, *, api_key: str, model: str,
         return text
     except (ValueError, KeyError, TypeError, UnicodeError):
         raise TranscriptionError("invalid_response") from None
+
+
+async def transcribe_to_device(client, pcm: bytes, *, api_key: str, model: str,
+                               transport: httpx.AsyncBaseTransport | None = None) -> None:
+    """Explicitly send a recording for recognition and queue the result on the paired device.
+
+    The caller is responsible for obtaining consent and audio. Queued does not
+    imply that the device has already displayed the text.
+    """
+    from .channel import DeviceError
+    if client.channel.capabilities.get("transcript_display") != 1:
+        raise DeviceError("transcript_not_supported")
+    text = await transcribe_pcm(pcm, api_key=api_key, model=model, transport=transport)
+    await client.queue_transcript(text)

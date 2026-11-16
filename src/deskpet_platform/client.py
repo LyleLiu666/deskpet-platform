@@ -169,6 +169,32 @@ class Client:
         async with self._operation:
             return await self.channel.send("weather_relay", **snapshot)
 
+    async def queue_transcript(self, text):
+        """Queue recognized text for the device; acceptance does not prove display."""
+        if not isinstance(text, str):
+            raise ValueError("识别结果须为文字。")
+        try:
+            encoded = text.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("识别结果包含无效文字。") from None
+        if len(encoded) > 4096 or any((ord(c) < 32 and c not in "\n\r\t") or ord(c) == 127 for c in text):
+            raise ValueError("识别结果过长或包含无效字符。")
+        if self.channel.capabilities.get("transcript_display") != 1:
+            raise DeviceError("transcript_not_supported")
+        async with self._operation:
+            started = False
+            try:
+                await self.channel.send("transcript_begin", bytes=len(encoded), crc32=zlib.crc32(encoded))
+                started = True
+                for offset in range(0, len(encoded), 384):
+                    await self.channel.send("transcript_chunk", offset=offset, data=encoded[offset:offset+384].hex())
+                await self.channel.send("transcript_commit")
+            except BaseException:
+                if started:
+                    with suppress(Exception):
+                        await self.channel.send("transcript_cancel")
+                raise
+
     async def play_speech_pcm(self, pcm, *, poll_interval=.1):
         """Play 16 kHz mono PCM16, clearing the device buffer on failure."""
         if not isinstance(pcm,bytes) or not 0<len(pcm)<=160000 or len(pcm)%2:

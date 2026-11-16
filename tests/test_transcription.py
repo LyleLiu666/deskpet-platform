@@ -4,12 +4,14 @@ import gzip
 import json
 import unittest
 import wave
+from unittest.mock import AsyncMock
 from email.parser import BytesParser
 from email.policy import default
 
 import httpx
 
-from deskpet_platform.transcription import MAX_PCM_BYTES, TranscriptionError, transcribe_pcm
+from deskpet_platform.channel import DeviceError
+from deskpet_platform.transcription import MAX_PCM_BYTES, TranscriptionError, transcribe_pcm, transcribe_to_device
 
 
 class TranscriptionTests(unittest.IsolatedAsyncioTestCase):
@@ -82,6 +84,25 @@ class TranscriptionTests(unittest.IsolatedAsyncioTestCase):
             await transcribe_pcm(b"\0\0", api_key="secret-key", model="model/name",
                                  transport=httpx.MockTransport(fail))
         self.assertNotIn("secret-key", str(error.exception))
+
+    async def test_explicit_recording_is_transcribed_then_queued_on_device(self):
+        client = type("Client", (), {})()
+        client.queue_transcript = AsyncMock()
+        client.channel = type("Channel", (), {"capabilities": {"transcript_display": 1}})()
+        transport = httpx.MockTransport(lambda _request: httpx.Response(200, json={"text": "合成结果"}))
+        await transcribe_to_device(client, b"\0\0", api_key="test-key", model="model/name", transport=transport)
+        client.queue_transcript.assert_awaited_once_with("合成结果")
+        client.queue_transcript.reset_mock()
+        transport = httpx.MockTransport(lambda _request: httpx.Response(500))
+        with self.assertRaises(TranscriptionError):
+            await transcribe_to_device(client, b"\0\0", api_key="test-key", model="model/name", transport=transport)
+        client.queue_transcript.assert_not_awaited()
+        client.channel.capabilities = {}
+        def forbidden(_request):
+            raise AssertionError("unsupported device must not upload")
+        with self.assertRaises(DeviceError):
+            await transcribe_to_device(client, b"\0\0", api_key="test-key", model="model/name",
+                                       transport=httpx.MockTransport(forbidden))
 
     async def test_cancellation_stops_request(self):
         entered,closed=asyncio.Event(),asyncio.Event()
