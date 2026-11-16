@@ -616,10 +616,12 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_live_receiver_runs_data_sources_and_releases_them_on_handoff(self):
         from deskpet_platform.device_registry import DeviceRegistry
-        started, stopped = [], []
+        started, stopped, instances = [], [], []
         class Session:
             def __init__(self, path, **kwargs):
                 self.path, self.kwargs = path, kwargs
+                self.client = None
+                instances.append(self)
                 started.append(('session', kwargs))
             async def drop(self): stopped.append('drop')
         def make_poll(name):
@@ -637,9 +639,18 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             DeviceConfig('02:00:00:00:00:01', bytes(range(32))).save(config)
             receiver = DeviceRegistry(config).add_receiver(DeviceConfig('02:00:00:00:00:02', bytes(range(32))))
             with patch('deskpet_platform.mcp_server.BoardSession', Session):
-                task = asyncio.create_task(notifications.run_live_receiver(receiver, config, max_seconds=.35,
+                task = asyncio.create_task(notifications.run_live_receiver(receiver, config, max_seconds=.55,
                                                                           poll_interval=.02, handoff_delay=.03))
                 await asyncio.sleep(.08)
+                handoff = receiver.parent / "notification-handoff"
+                for _ in range(3):
+                    self.assertTrue(notifications.request_worker_yield(receiver))
+                    async with asyncio.timeout(.2):
+                        while handoff.exists():
+                            await asyncio.sleep(.01)
+                    self.assertEqual(len(instances), 1)
+                    self.assertEqual(stopped, [])
+                instances[0].client = object()
                 self.assertTrue(notifications.request_worker_yield(receiver))
                 await task
             sessions = [item[1] for item in started if isinstance(item, tuple)]

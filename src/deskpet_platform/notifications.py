@@ -748,10 +748,13 @@ async def _run_device_worker(config_path, *, source, client_factory, deadline, p
                         raise RuntimeError('独立设备的数据更新意外停止。')
             if handoff.exists():
                 handoff.unlink(missing_ok=True)
-                await stop_session()
-                session, tasks = None, []
-                await asyncio.sleep(handoff_delay)
-                session, tasks = start_session()
+                # The worker lock is also held while a different controller owns
+                # the device. Keep retrying in that case: there's no link to hand off.
+                if live_options is None or session.client is not None:
+                    await stop_session()
+                    session, tasks = None, []
+                    await asyncio.sleep(handoff_delay)
+                    session, tasks = start_session()
             await asyncio.sleep(poll_interval)
     finally:
         await stop_session()
