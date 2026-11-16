@@ -9,6 +9,7 @@ from unittest.mock import patch
 import fcntl
 import os
 import asyncio
+import time
 
 from deskpet_platform import notifications
 from deskpet_platform.codex_hook import install_hook, remove_hook, receive, receive_event
@@ -648,6 +649,64 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             for name in ('poll', 'poll_weather', 'poll_tokens', 'poll_quota', 'poll_quota_display', 'poll_computer_metrics'):
                 self.assertGreaterEqual(started.count(name), 2)
                 self.assertEqual(started.count(name), stopped.count(name))
+
+    async def test_live_receiver_takes_over_from_notification_only_worker(self):
+        from deskpet_platform.device_registry import DeviceRegistry
+        started = []
+        class Session:
+            def __init__(self, path, **kwargs):
+                self.live = 'quota_store' in kwargs
+            async def poll(self):
+                started.append('live' if self.live else 'fallback')
+                await asyncio.Future()
+            async def wait(self): await asyncio.Future()
+            poll_weather = poll_tokens = poll_quota = poll_quota_display = poll_computer_metrics = wait
+            async def drop(self): started.append('live closed' if self.live else 'fallback closed')
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'device.json'
+            DeviceConfig('02:00:00:00:00:01', bytes(range(32))).save(config)
+            receiver = DeviceRegistry(config).add_receiver(DeviceConfig('02:00:00:00:00:02', bytes(range(32))))
+            with patch('deskpet_platform.mcp_server.BoardSession', Session):
+                fallback = asyncio.create_task(notifications._run_device_worker(
+                    receiver, source=notifications.NotificationStore(config.parent/'notifications.sqlite3'),
+                    client_factory=None, deadline=time.monotonic()+2, poll_interval=.02, handoff_delay=.01))
+                await asyncio.sleep(.08)
+                self.assertIn('fallback', started)
+                live = asyncio.create_task(notifications.run_live_receiver(receiver, config, max_seconds=1.5,
+                                                                           poll_interval=.02))
+                await asyncio.gather(fallback, live)
+            self.assertIn('fallback closed', started)
+            self.assertIn('live', started)
+            self.assertLess(started.index('fallback closed'), started.index('live'))
+
+    async def test_notification_worker_resumes_after_live_receiver_stops(self):
+        from deskpet_platform.device_registry import DeviceRegistry
+        started = []
+        class Session:
+            def __init__(self, path, **kwargs): self.live = 'quota_store' in kwargs
+            async def poll(self):
+                started.append('live' if self.live else 'fallback')
+                await asyncio.Future()
+            async def wait(self): await asyncio.Future()
+            poll_weather = poll_tokens = poll_quota = poll_quota_display = poll_computer_metrics = wait
+            async def drop(self): pass
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'device.json'
+            DeviceConfig('02:00:00:00:00:01', bytes(range(32))).save(config)
+            receiver = DeviceRegistry(config).add_receiver(DeviceConfig('02:00:00:00:00:02', bytes(range(32))))
+            source = notifications.NotificationStore(config.parent/'notifications.sqlite3')
+            with patch('deskpet_platform.mcp_server.BoardSession', Session):
+                live = asyncio.create_task(notifications.run_live_receiver(receiver, config, max_seconds=.25,
+                                                                           poll_interval=.02))
+                await asyncio.sleep(.08)
+                await notifications._run_device_worker(receiver, source=source, client_factory=None,
+                    deadline=time.monotonic()+.1, poll_interval=.02, handoff_delay=.01)
+                self.assertNotIn('fallback', started)
+                await live
+                await notifications._run_device_worker(receiver, source=source, client_factory=None,
+                    deadline=time.monotonic()+.1, poll_interval=.02, handoff_delay=.01)
+            self.assertIn('live', started)
+            self.assertIn('fallback', started)
 
     async def test_live_receiver_rejects_unregistered_device(self):
         with tempfile.TemporaryDirectory() as directory:

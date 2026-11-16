@@ -567,11 +567,39 @@ async def run_live_receiver(config_path, shared_config, *, client_factory=None, 
     if token_probe is not None and not probe.is_file():
         raise ValueError('找不到指定的速度采集程序。')
     deadline=float('inf') if max_seconds is None else time.monotonic()+max_seconds
-    await _run_device_worker(config_path, source=NotificationStore(shared_config.parent / 'notifications.sqlite3'),
-                             client_factory=client_factory, deadline=deadline,
-                             poll_interval=poll_interval, handoff_delay=handoff_delay,
-                             live_options={'token_probe': probe if probe.is_file() else None,
-                                           'quota_store': QuotaStore(shared_config.parent / 'agent-quota.sqlite3')})
+    # Announce ownership for the entire service lifetime, including while it
+    # waits for an existing notification-only receiver to release the board.
+    # A lock, unlike a marker file, cannot remain stale after a crash.
+    intent = os.open(config_path.parent / 'live-receiver.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        while time.monotonic() < deadline:
+            try:
+                acquire(intent, blocking=False)
+                break
+            except BlockingIOError:
+                await asyncio.sleep(1)
+        else:
+            return
+        await _run_device_worker(config_path, source=NotificationStore(shared_config.parent / 'notifications.sqlite3'),
+                                 client_factory=client_factory, deadline=deadline,
+                                 poll_interval=poll_interval, handoff_delay=handoff_delay,
+                                 live_options={'token_probe': probe if probe.is_file() else None,
+                                               'quota_store': QuotaStore(shared_config.parent / 'agent-quota.sqlite3')})
+    finally:
+        os.close(intent)
+
+
+def _live_receiver_requested(config_path):
+    descriptor = os.open(config_path.parent / 'live-receiver.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            acquire(descriptor, blocking=False)
+        except BlockingIOError:
+            return True
+        release(descriptor)
+        return False
+    finally:
+        os.close(descriptor)
 
 
 async def _run_workers(config_path, *, client_factory, max_seconds, poll_interval, handoff_delay, idle_seconds, receivers_only):
@@ -695,6 +723,8 @@ async def _run_device_worker(config_path, *, source, client_factory, deadline, p
 
     try:
         while time.monotonic() < deadline:
+            if source is not None and live_options is None and _live_receiver_requested(config_path):
+                return
             try:
                 acquire(descriptor, blocking=False)
                 break
@@ -705,6 +735,8 @@ async def _run_device_worker(config_path, *, source, client_factory, deadline, p
         handoff = config_path.parent / "notification-handoff"
         session, tasks = start_session()
         while time.monotonic() < deadline:
+            if source is not None and live_options is None and _live_receiver_requested(config_path):
+                return
             if live_options is not None:
                 for task in tasks:
                     if task.done():
