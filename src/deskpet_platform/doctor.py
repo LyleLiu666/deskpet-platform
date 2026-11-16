@@ -32,7 +32,7 @@ def _hook_settings(client, config):
     raise ValueError("unknown JSON hook client")
 
 
-def _hook_state(client, config):
+def hook_state(client, config):
     if os.name == "nt" and client not in ("codex", "claude_code"):
         return {"status": "unsupported"}
     if os.name == "nt" and not shutil.which("powershell.exe"):
@@ -139,6 +139,6 @@ def diagnose(config, *, client, device_id=None, shared_config=None, token_probe=
     return {
         "host": host_platform(),
         "pairing": {"devices": devices, "selected_device_id": device_id, "connection": "not_checked"},
-        "reminders": {"client": client, "hook": _hook_state(client, shared), "latest_events": events},
+        "reminders": {"client": client, "hook": hook_state(client, shared), "latest_events": events},
         "speed": {"status": probe_status, "path": str(probe) if probe else None, "reading": "not_checked"},
     }

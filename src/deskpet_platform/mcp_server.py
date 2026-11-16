@@ -57,6 +57,14 @@ Manual = Literal["operations", "development", "roles"]
 LINK_ERRORS = (OSError, RuntimeError, ValueError, TimeoutError)
 WIFI_FALLBACK_TIMEOUT = 5
 MAX_CODEX_ALLOWANCE_AGE = 600
+NOTIFICATION_SETUP = {
+    "codex": ("Codex", "desk_enable_codex_notifications", {}),
+    "claude_code": ("Claude Code", "desk_set_claude_notifications", {"enabled": True}),
+    "antigravity": ("Antigravity", "desk_set_antigravity_notifications", {"enabled": True}),
+    "opencode": ("OpenCode", "desk_set_opencode_notifications", {"enabled": True}),
+    "workbuddy": ("WorkBuddy", "desk_set_workbuddy_notifications", {"enabled": True, "edition": "workbuddy"}),
+    "workbuddy_ai": ("WorkBuddy AI", "desk_set_workbuddy_notifications", {"enabled": True, "edition": "workbuddy_ai"}),
+}
 
 
 def require_notification_hooks(enabled, platform, hook=None):
@@ -1647,7 +1655,11 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     server = FastMCP(
         "DeskPet Platform", lifespan=lifespan,
-        instructions="用户想给小板添加、制作或安装角色时，先读 desk_read_manual(topic=roles)。"
+        instructions="首次设置搭搭时，调用 desk_notification_setup 查看 Codex、Claude Code、Antigravity、"
+                     "OpenCode、WorkBuddy 和 WorkBuddy AI 的提醒支持、配置状态和启用工具。"
+                     "向用户说明可以为日常使用的客户端启用提醒，按用户选择配置。"
+                     "配置 Agent 额度后，按工具返回的 notification_setup 提示说明对应的提醒接入。"
+                     "用户想给小板添加、制作或安装角色时，先读 desk_read_manual(topic=roles)。"
                      "制作完整角色时按指南的角色交付标准准备素材和验收。"
                      "可以在电脑上生成体验角色包，或将已有的角色包安装到指定小板的储存卡。",
     )
@@ -2009,6 +2021,30 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         session = sessions.resolve(device_id)
         return await session.calibrate_touch(cancel=True)
 
+    def notification_setup(client):
+        from .doctor import hook_state
+
+        name, tool, arguments = NOTIFICATION_SETUP[client]
+        state = hook_state(client, shared_config)
+        result = {"client": client, "name": name, "status": state["status"]}
+        if state["status"] in ("missing", "partial", "needs_reinstall", "disabled"):
+            result["enable"] = {"tool": tool, "arguments": arguments}
+        if state["status"] == "written":
+            result["next_step"] = ("在 Codex 的 Hooks 里检查是否已信任该钩子，再用新会话验证屏幕提醒。"
+                                   if client == "codex" else "用新会话验证实际屏幕提醒。")
+        elif state["status"] == "unsupported":
+            result["next_step"] = "当前系统尚不支持这个客户端的提醒接入。"
+        elif state["status"] == "unavailable":
+            result["next_step"] = "找不到 Windows PowerShell，请检查本机安装。"
+        elif state["status"] == "invalid":
+            result["next_step"] = "检查客户端的钩子配置后再重试。"
+        return result
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def desk_notification_setup() -> dict[str, Any]:
+        """首次设置或新增 Agent 时，查看每个客户端的提醒支持、配置状态和启用工具。"""
+        return {"clients": await asyncio.to_thread(lambda: [notification_setup(client) for client in NOTIFICATION_SETUP])}
+
     @server.tool()
     async def desk_enable_codex_notifications(device_id: str | None = None) -> dict[str, Any]:
         """安装一个 Codex 钩子，为所有已配对设备启用完成和待应答提醒。"""
@@ -2051,20 +2087,28 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         path = settings_path()
         changed = await configure_notifications(enabled, device_id, "antigravity-hook",
             lambda command, previous, *, enabled: configure(path, command, enabled=enabled, previous_commands=previous))
-        return {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path)}
+        result = {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path)}
+        if enabled:
+            result["next_step"] = "重启 Antigravity，打开新会话并确认搭搭收到真实提醒。"
+        return result
 
     @server.tool()
     async def desk_set_agent_quota(source: Literal["claude_code", "antigravity"], enabled: bool) -> dict[str, Any]:
-        """在电脑上启用或移除指定 Agent 的额度采集；保留已有状态栏命令。"""
+        """启用或移除指定 Agent 的额度采集。启用后返回对应提醒钩子的配置建议。"""
         from .quota_statusline import configure, settings_path
 
         path = settings_path(source)
         async with hook_configuration_lock:
             changed = await asyncio.to_thread(configure, path, source, shared_quota_store.path, enabled=enabled)
-        return {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path),
-                "next_step": ("在小板的监控设置中选择对应来源，打开该 Agent 会话并检查额度；"
-                              "账号未提供额度或状态栏被覆盖时显示 --。" if enabled else
-                              "已移除本程序的额度采集设置。")}
+        result = {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path),
+                  "next_step": ("在搭搭的监控设置中选择对应来源，打开该 Agent 会话并检查额度；"
+                                "账号未提供额度或状态栏被覆盖时显示 --。" if enabled else
+                                "已移除本程序的额度采集设置。")}
+        if enabled:
+            result["notification_setup"] = await asyncio.to_thread(notification_setup, source)
+            if "enable" in result["notification_setup"]:
+                result["next_step"] += " 该客户端也支持完成和待应答提醒，可按 notification_setup 启用。"
+        return result
 
     @server.tool()
     async def desk_set_opencode_notifications(enabled: bool, device_id: str | None = None) -> dict[str, Any]:

@@ -1096,6 +1096,7 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                     async with ClientSession(reader, writer) as session:
                         initialized = await session.initialize()
                         self.assertIn("topic=roles", initialized.instructions)
+                        self.assertIn("desk_notification_setup", initialized.instructions)
                         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
                         self.assertEqual(set(tools), {"desk_read_manual", "desk_list_devices", "desk_find_usb_device", "desk_set_usb_fallback", "desk_show_text", "desk_status", "desk_render_metrics", "desk_computer_metrics",
                                                  "desk_sync_clock", "desk_clock_edit", "desk_set_view", "desk_add_photo", "desk_photo_album", "desk_set_weather_location",
@@ -1107,10 +1108,10 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                                                  "desk_set_brightness", "desk_calibrate_touch", "desk_cancel_touch_calibration",
                                                  "desk_enable_codex_notifications", "desk_disable_codex_notifications",
                                                  "desk_set_claude_notifications", "desk_set_antigravity_notifications",
-                                                 "desk_set_agent_quota",
+                                                 "desk_set_agent_quota", "desk_notification_setup",
                                                  "desk_set_opencode_notifications", "desk_set_workbuddy_notifications",
                                      "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view", "desk_speak", "desk_read_notification", "desk_dashboard_config", "desk_appearance_config", "desk_add_theme", "desk_add_wallpaper", "desk_delete_wallpaper", "desk_list_wallpapers"})
-                        for name in ("desk_list_devices", "desk_read_manual", "desk_list_wallpapers"):
+                        for name in ("desk_list_devices", "desk_notification_setup", "desk_read_manual", "desk_list_wallpapers"):
                             self.assertIs(tools[name].annotations.readOnlyHint, True)
                             self.assertIs(tools[name].annotations.openWorldHint, False)
                         for name in ("desk_status", "desk_show_text", "desk_pair_usb"):

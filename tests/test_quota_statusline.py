@@ -149,6 +149,28 @@ if __name__ == "__main__":
     unittest.main()
 
 class QuotaStatuslineMcpTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipIf(os.name == "nt", "Antigravity hooks and quota capture are verified on POSIX")
+    async def test_antigravity_quota_offers_hooks_and_reports_when_configured(self):
+        from deskpet_platform.mcp_server import create_server
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(Path, "home", return_value=Path(directory)):
+            root = Path(directory)
+            server = create_server(root / "device.json", no_token_probe=True)
+            _, catalogue = await server.call_tool("desk_notification_setup", {})
+            self.assertEqual({item["client"] for item in catalogue["clients"]},
+                             {"codex", "claude_code", "antigravity", "opencode", "workbuddy", "workbuddy_ai"})
+            self.assertFalse((root / ".gemini").exists())
+            arguments = {"source": "antigravity", "enabled": True}
+            _, quota = await server.call_tool("desk_set_agent_quota", arguments)
+            self.assertEqual(quota["notification_setup"]["enable"], {
+                "tool": "desk_set_antigravity_notifications", "arguments": {"enabled": True},
+            })
+            self.assertFalse((root / ".gemini/config/hooks.json").exists())
+            await server.call_tool("desk_set_antigravity_notifications", {"enabled": True})
+            _, already = await server.call_tool("desk_set_agent_quota", arguments)
+            self.assertEqual(already["notification_setup"]["status"], "written")
+            self.assertNotIn("enable", already["notification_setup"])
+
     async def test_mcp_configures_and_removes_claude_capture_without_a_board(self):
         import asyncio
         from mcp import ClientSession, StdioServerParameters

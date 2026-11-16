@@ -44,12 +44,16 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
    如果搭搭显示已联网但 Windows 未连上，先核对两端在同一可互访的局域网，
    再按手册检查旧版回连所需的防火墙设置。
    涉及密码、配对码和密钥时，只在对应的本机界面使用。
-3. 配对后，直接调用当前 Agent 对应的提醒工具。Codex 调用
+3. 配对后，用 desk_notification_setup 查看这台电脑支持哪些提醒、配置状态
+   和启用工具。告诉我还可以为哪些日常使用的 Agent 启用提醒，按我的选择配置。
+   先直接调用当前 Agent 对应的提醒工具。Codex 调用
    desk_enable_codex_notifications；Claude Code 调用
    desk_set_claude_notifications(enabled=true)；Antigravity 调用
    desk_set_antigravity_notifications(enabled=true)；OpenCode 调用
    desk_set_opencode_notifications(enabled=true)；WorkBuddy 调用
-   desk_set_workbuddy_notifications(enabled=true)，按客户端选 edition。
+   desk_set_workbuddy_notifications(enabled=true)，按客户端选 edition
+   workbuddy 或 workbuddy_ai。设置 Claude Code 或 Antigravity 额度时，
+   查看工具返回的 notification_setup，并提醒我对应的完成和待应答提醒。
    工具会为这套配置内的已配对设备启用提醒。按工具结果完成审核或重启。
    Codex 请明确告诉我进入 /hooks 或设置中的 Hooks，审核并信任刚写入的
    搭搭条目。若系统或客户端不支持钩子，告诉我具体原因。
