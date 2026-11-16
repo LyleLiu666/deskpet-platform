@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -13,7 +14,7 @@ class AgentSpeedProbeTests(unittest.IsolatedAsyncioTestCase):
     async def test_server_uses_the_installed_probe_even_with_a_custom_quota_history(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            probe = root / "bin/AgentSpeedProbe"
+            probe = root / "bin" / ("AgentSpeedProbe.exe" if sys.platform == "win32" else "AgentSpeedProbe")
             probe.parent.mkdir()
             probe.write_bytes(b"fixture")
             with patch("deskpet_platform.mcp_server.AgentSpeedProbe") as factory:
@@ -27,6 +28,34 @@ class AgentSpeedProbeTests(unittest.IsolatedAsyncioTestCase):
                 result = await server.call_tool("desk_token_status", {})
                 self.assertEqual(result[1], {"status": "unavailable", "reason": "token_collection_disabled"})
                 factory.assert_not_called()
+
+    async def test_server_discovers_windows_probe_but_preserves_explicit_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "device.json"
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gui = bin_dir / "AgentSpeed.exe"
+            upstream = bin_dir / "AgentSpeed.Probe.exe"
+            installed = bin_dir / "AgentSpeedProbe.exe"
+            explicit = root / "custom.exe"
+            gui.touch()
+            explicit.touch()
+            with patch("deskpet_platform.agent_speed_probe.platform", "win32"):
+                with patch("deskpet_platform.mcp_server.AgentSpeedProbe") as factory:
+                    create_server(config)
+                    factory.assert_not_called()
+                upstream.touch()
+                with patch("deskpet_platform.mcp_server.AgentSpeedProbe") as factory:
+                    create_server(config)
+                    factory.assert_called_once_with(upstream)
+                installed.touch()
+                with patch("deskpet_platform.mcp_server.AgentSpeedProbe") as factory:
+                    create_server(config)
+                    factory.assert_called_once_with(installed)
+                with patch("deskpet_platform.mcp_server.AgentSpeedProbe") as factory:
+                    create_server(config, token_probe=explicit)
+                    factory.assert_called_once_with(explicit)
 
     async def test_missing_probe_is_reported_and_never_falls_back_to_a_simplified_rate(self):
         class Channel:

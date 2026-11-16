@@ -558,14 +558,18 @@ async def run_receiver_worker(config_path, *, client_factory=None, max_seconds=8
 async def run_live_receiver(config_path, shared_config, *, client_factory=None, token_probe=None, max_seconds=None,
                             poll_interval=0.5, handoff_delay=7):
     """Keep one registered receiver's data and notifications up to date."""
+    from .agent_speed_probe import find_installed_probe
     from .device_registry import DeviceRegistry
     from .quota_capture import QuotaStore
     config_path, shared_config = Path(config_path), Path(shared_config)
     if config_path.resolve() not in {path.resolve() for path in DeviceRegistry(shared_config).receiver_paths()}:
         raise ValueError('设备不是已登记的独立接收端。')
-    probe = Path(token_probe).expanduser() if token_probe is not None else shared_config.parent / 'bin/AgentSpeedProbe'
-    if token_probe is not None and not probe.is_file():
-        raise ValueError('找不到指定的速度采集程序。')
+    if token_probe is None:
+        probe = find_installed_probe(shared_config)
+    else:
+        probe = Path(token_probe).expanduser()
+        if not probe.is_file():
+            raise ValueError('找不到指定的速度采集程序。')
     deadline=float('inf') if max_seconds is None else time.monotonic()+max_seconds
     # Announce ownership for the entire service lifetime, including while it
     # waits for an existing notification-only receiver to release the board.
@@ -583,7 +587,7 @@ async def run_live_receiver(config_path, shared_config, *, client_factory=None, 
         await _run_device_worker(config_path, source=NotificationStore(shared_config.parent / 'notifications.sqlite3'),
                                  client_factory=client_factory, deadline=deadline,
                                  poll_interval=poll_interval, handoff_delay=handoff_delay,
-                                 live_options={'token_probe': probe if probe.is_file() else None,
+                                 live_options={'token_probe': probe,
                                                'quota_store': QuotaStore(shared_config.parent / 'agent-quota.sqlite3')})
     finally:
         os.close(intent)

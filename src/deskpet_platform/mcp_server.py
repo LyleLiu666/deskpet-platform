@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict
 from .adaptive_speed.config import Config as SpeedConfig
 from .adaptive_speed.history import Frame, History
 from .adaptive_speed.runtime import AdaptiveRuntime
-from .agent_speed_probe import AgentSpeedProbe
+from .agent_speed_probe import AgentSpeedProbe, find_installed_probe
 from .card_upload import MAX_FILE_BYTES, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
 from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS, DASHBOARD_ROTATION, DASHBOARD_INTERVALS, _appearance_theme, _appearance_wallpaper
@@ -1531,9 +1531,8 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     shared_config = Path(shared_config_path).expanduser() if shared_config_path is not None else Path(config_path)
     if shared_config_path is not None:
         DeviceConfig.load(shared_config)
-    installed_probe = shared_config.parent / "bin/AgentSpeedProbe"
-    if not no_token_probe and token_probe is None and token_collector is None and installed_probe.is_file():
-        token_probe = installed_probe
+    if not no_token_probe and token_probe is None and token_collector is None:
+        token_probe = find_installed_probe(shared_config)
     shared_probe = AgentSpeedProbe(token_probe) if token_probe is not None else None
     shared_quota_store = QuotaStore(shared_config.parent / "agent-quota.sqlite3")
     notification_inbox = NotificationStore(shared_config.parent / "notifications.sqlite3")

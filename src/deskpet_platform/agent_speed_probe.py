@@ -6,7 +6,18 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from sys import platform
 import time
+
+
+def find_installed_probe(config_path):
+    bin_dir = Path(config_path).parent / "bin"
+    names = ("AgentSpeedProbe.exe", "AgentSpeed.Probe.exe") if platform == "win32" else ("AgentSpeedProbe",)
+    for name in names:
+        candidate = bin_dir / name
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 class AgentSpeedProbe:

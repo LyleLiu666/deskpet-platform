@@ -17,39 +17,44 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 打开 [DeskPet Platform 的 GitHub 页面](https://github.com/LyleLiu666/deskpet-platform)，把下面这段复制给你平时使用的 Agent。首次使用不需要预先下载仓库。
 
 ```text
-请帮我在这台电脑上安装和配置 DeskPet，并只操作我选中的小板。
+请帮我在这台电脑上安装搭搭，连上我选中的搭搭，并启用当前 Agent 的提醒。
 
-先阅读 https://github.com/LyleLiu666/deskpet-platform 的 README 和操作手册。
-使用我收到的电脑端 Release 源码包或指定版本链接。若我没有指定版本，
-优先使用已发布的稳定版；仅有预览版时，告诉我将使用哪个版本。
-如果我的小板还未刷固件，先按刷机说明确认板型和对应的首刷包。
-保留我的现有项目、Agent 配置和其他设备的配对。
+先读 https://github.com/LyleLiu666/deskpet-platform 的 README 和操作手册。
+用我收到的 Release 链接或版本。若未指定，选最新的稳定版；只有预览版时，
+告诉我正在使用哪个预览版。保留已有 Agent 设置、其他设备的配对和储存卡数据。
 
-1. 在独立目录按 README 安装。macOS 使用 install-macos.command；
-   Windows 使用 install-windows.ps1。把安装后的 deskpet-platform 绝对路径注册为
-   本机 stdio MCP，参数为 mcp，保留我已有的 MCP 配置。使用 Codex 时，
-   按操作手册设置 DeskPet 的写卡等待时间。
-2. 先用 desk_list_devices 查看已配对设备。已有这台小板时复用配对；
-   添加另一台时使用 add_device=true。通过 USB 配对前，用已安装的
-   deskpet-platform find-usb 查询明确指定的候选串口，核对小板的 UUID
-   和 MAC。已有本机私有 Wi-Fi 凭据文件时可用 desk_pair_usb 同时配网。
-   如果这台小板已经配对，传入列表里对应的 device_id。
-   需要手动配网时，请让我用手机扫小板上的两个配网码，在手机上输入
-   Wi-Fi 密码。小板联网后，用 desk_pair_begin 打开电脑配对页，请我
-   将小板上的配对码填入本机页面。
-3. 如果我已安装 Agent Speed，优先复用现有可执行的 AgentSpeedProbe，
-   用 --token-probe 指定其绝对路径。如果我希望跳过测速，给 MCP 加
-   --no-token-probe，继续完成 DeskPet 安装和配对。找不到采集程序时先告诉我，
-   由我决定是否安装。请勿在聊天中显示 Wi-Fi 密码、配对码或密钥。
-   需要重开 Agent 会话时提醒我先关闭占用搭搭的旧会话，再在新会话验证。
-4. 用 desk_list_devices 确认目标设备 ID，再用 desk_status 验证连接。
-   配置了 Agent Speed 时，用 desk_token_status 检查是否收到有效读数。
-   告诉我已验证的结果，以及还需要我在小板或手机上完成的步骤。
-5. 如果我希望接收提醒，按操作手册为这台小板启用我指定的 Agent。
-   需要在 Agent 界面里审核钩子时，请告诉我到哪里操作。用一个新会话
-   验证小板收到提醒。
-6. 如果我想在小屏看额度，请按操作手册配置对应的 Agent，并告诉我在
-   小屏「监控设置」中切换来源。没有可靠读数时显示未知，不要猜测额度。
+1. 在独立目录安装。macOS 用 install-macos.command，Windows 用
+   install-windows.ps1，Linux 按「手动安装」使用 Python 虚拟环境。
+   把安装好的 deskpet-platform 绝对路径和 mcp 参数加入当前 Agent 的
+   stdio MCP 配置。按操作手册设置 Codex 的写卡等待时间。如果当前会话
+   读不到新增 MCP，告诉我如何开启新会话，并继续余下步骤。
+2. 用 desk_list_devices 查找已有配对。复用对应的 device_id，新增设备
+   时使用 add_device=true。若走 USB，先用 find-usb 核对搭搭的 UUID 和 MAC，
+   再用 desk_pair_usb。已有本机私有 Wi-Fi 凭据文件时，可同一步配网。
+   手动配网时，请我用手机扫搭搭的两个配网码，在手机上填 Wi-Fi 密码。
+   搭搭联网后，用 desk_pair_begin 打开配对页，请我在页面填搭搭显示的
+   配对码。空白设备先按刷机说明核对板型与首刷包。用 desk_status 核实
+   选中的搭搭已连接。涉及密码、配对码和密钥时，只在对应的本机界面使用。
+3. 配对后，直接调用当前 Agent 对应的提醒工具。Codex 调用
+   desk_enable_codex_notifications；Claude Code 调用
+   desk_set_claude_notifications(enabled=true)；Antigravity 调用
+   desk_set_antigravity_notifications(enabled=true)；OpenCode 调用
+   desk_set_opencode_notifications(enabled=true)；WorkBuddy 调用
+   desk_set_workbuddy_notifications(enabled=true)，按客户端选 edition。
+   工具会为这套配置内的已配对设备启用提醒。按工具结果完成审核或重启。
+   Codex 请明确告诉我进入 /hooks 或设置中的 Hooks，审核并信任刚写入的
+   搭搭条目。若系统或客户端不支持钩子，告诉我具体原因。
+4. 用新会话完成一个短任务，验证一次真实完成提醒。用
+   desk_list_notifications 检查目标搭搭的新事件，并请我确认屏幕收到提醒。
+   有条件时再验证 Agent 提问、我答复后待应答提醒清除。只有写入了钩子文件
+   或只在电脑端看到记录时，请说明还缺哪一步。若旧会话占用搭搭，先关闭它。
+5. 测速可选。按 README 使用当前发行版与系统、架构匹配的独立采集器，
+   或复用本机已有的兼容采集器。启动 MCP 时用 --token-probe 指定采集器的
+   绝对路径，再用 desk_token_status 验证。无现成采集器时，加
+   --no-token-probe 完成安装、配对和提醒。安装过程使用现成的发行包。
+6. 若我需要额度显示，按操作手册设置对应来源，并告诉我从搭搭的
+   「监控设置」切换。最后告诉我连接、提醒和测速各自的验证结果，
+   以及还需要我做的操作。
 ```
 
 ## 给小板加一个角色
@@ -60,9 +65,9 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 
 ## 手动安装
 
-在仓库目录或解压后的源码包目录中，macOS 在终端运行 `bash ./install-macos.command`，Windows 在 PowerShell 中运行 `powershell -ExecutionPolicy Bypass -File .\install-windows.ps1`。安装使用已有的 uv 或 Python 3.11 至 3.14。[macOS 下载](https://www.python.org/downloads/macos/) · [Windows 下载](https://www.python.org/downloads/windows/)
+在仓库目录或解压后的源码包目录中，macOS 在终端运行 `bash ./install-macos.command`，Windows 在 PowerShell 中运行 `powershell -ExecutionPolicy Bypass -File .\install-windows.ps1`。安装使用已有的 uv 或 Python 3.11 至 3.14。Linux 使用下面的 Python 虚拟环境命令，USB 配对和实机连接仍待验证。[macOS 下载](https://www.python.org/downloads/macos/) · [Windows 下载](https://www.python.org/downloads/windows/)
 
-Windows 安装完成后，程序位于 `.venv\Scripts\deskpet-platform.exe`；MCP 使用该程序的绝对路径和 `mcp` 参数。下列命令展示 macOS 路径。
+Windows 安装完成后，程序位于 `.venv\Scripts\deskpet-platform.exe`；MCP 使用该程序的绝对路径和 `mcp` 参数。下列命令适用于 macOS 和 Linux。Linux 若缺少 venv，请按发行版说明安装 Python 的 venv 组件。
 
 ```sh
 python3 -m venv .venv
@@ -77,7 +82,18 @@ python3 -m venv .venv
 
 在 MCP 客户端中以 stdio 注册 `.venv/bin/deskpet-platform mcp`，配置时使用绝对路径。设备支持时钟、相册、天气、Token 状态、Codex 消息和可插拔角色。操作与开发手册也可通过 MCP 读取。
 
-Token 速度使用原版 `AgentSpeedProbe`。在设备配置目录的 `bin/AgentSpeedProbe` 放入采集程序，或启动 MCP 时指定 `--token-probe <程序绝对路径>`。使用 `mcp --no-token-probe` 可跳过测速，即使配置目录中已有采集程序。采集程序的源码、许可证和构建说明见 [Agent Speed](https://github.com/zoefix/agent-speed/tree/29dffc4e6fbe1da435071e40781b1571dd45ac22)。支持的设备还可分别开启电脑 CPU 和内存使用率，默认关闭。
+测速需要独立的 `AgentSpeedProbe`。在所用的 [搭搭 Release](https://github.com/LyleLiu666/deskpet-platform/releases) 附件里选择对应的预编译包：
+
+| 系统 | 采集器包 |
+| --- | --- |
+| macOS 14 或更新，Apple 芯片 | `AgentSpeedProbe-macos-arm64.tar.gz` |
+| Windows x64 | `AgentSpeedProbe-windows-x64.zip` |
+| Linux x64（glibc） | `AgentSpeedProbe-linux-x64.tar.gz` |
+| Linux arm64（glibc） | `AgentSpeedProbe-linux-arm64.tar.gz` |
+
+核对该 Release 的 `SHA256SUMS.txt` 后，解压到固定目录。将 MCP 的启动参数设为 `mcp --token-probe <解压后采集器的绝对路径>`，在新会话中运行一个任务并检查 `desk_token_status`。安装预编译包无需 Swift、.NET SDK 或 Agent Speed 桌面应用。也可将程序放入设备配置目录的 `bin/`。Windows 依次查找 `AgentSpeedProbe.exe` 和 `AgentSpeed.Probe.exe`，macOS 和 Linux 查找 `AgentSpeedProbe`。旧版 Release 或当前架构缺少采集器时，用 `mcp --no-token-probe` 跳过测速。各包中的 `SOURCE.txt` 和 `licenses/` 记录对应的 [Agent Speed 源码](https://github.com/zoefix/agent-speed/tree/29dffc4e6fbe1da435071e40781b1571dd45ac22) 与许可证。
+
+支持的设备还可分别开启电脑 CPU 和内存使用率，默认关闭。
 
 固件不预装角色。可将自制角色包存放在本机目录。用 `desk_list_role_sources` 查找素材，用 `desk_check_role` 检查，再用 `desk_install_role` 传到储存卡。设备校验完整后启用。
 

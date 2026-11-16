@@ -717,6 +717,22 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await notifications.run_live_receiver(other, shared, max_seconds=.1)
 
+    async def test_live_receiver_discovers_windows_probe_from_shared_config(self):
+        from deskpet_platform.device_registry import DeviceRegistry
+        from unittest.mock import AsyncMock
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shared = root / 'device.json'
+            DeviceConfig('02:00:00:00:00:01', bytes(range(32))).save(shared)
+            receiver = DeviceRegistry(shared).add_receiver(DeviceConfig('02:00:00:00:00:02', bytes(range(32))))
+            probe = root / 'bin' / 'AgentSpeedProbe.exe'
+            probe.parent.mkdir()
+            probe.touch()
+            with patch('deskpet_platform.agent_speed_probe.platform', 'win32'):
+                with patch('deskpet_platform.notifications._run_device_worker', new_callable=AsyncMock) as run:
+                    await notifications.run_live_receiver(receiver, shared)
+            self.assertEqual(run.await_args.kwargs['live_options']['token_probe'], probe)
+
     async def test_live_receiver_has_no_implicit_daily_expiry(self):
         from deskpet_platform.device_registry import DeviceRegistry
         from unittest.mock import AsyncMock
