@@ -604,6 +604,7 @@ class BoardSession:
                 if path=='':relative=''
                 elif isinstance(path,str) and path.startswith('/sdcard/Photos/'):relative='photos/'+path[15:]
                 elif isinstance(path,str) and path.startswith('/sdcard/Media/'):relative='media/'+path[14:]
+                elif isinstance(path,str) and path.startswith('/sdcard/Wallpapers/'):relative='wallpapers/'+path[19:]
                 else:raise ValueError('invalid path')
                 if _appearance_wallpaper(relative)!=path:raise ValueError('invalid path')
             except (TypeError,ValueError,UnicodeError):raise DeviceError('invalid_appearance_config_reply') from None
@@ -1038,9 +1039,10 @@ class BoardSession:
             if client.channel.capabilities.get('card_restricted_paths')==1:
                 def supported(path):
                     return (client.channel.capabilities.get('photo_jpeg_upload')==1 and re.fullmatch(r'photos/p-[0-9a-f]{16}\.jpg',path) or
+                            client.channel.capabilities.get('wallpaper_jpeg_upload')==1 and re.fullmatch(r'wallpapers/[A-Za-z0-9][A-Za-z0-9_-]{0,23}-[0-9a-f]{16}\.jpg',path) or
                             client.channel.capabilities.get('theme_json_upload')==1 and re.fullmatch(r'themes/[A-Za-z0-9][A-Za-z0-9_-]{0,23}-[0-9a-f]{16}\.json',path))
                 if any(not supported(path) for _,path in checked):
-                    raise ValueError('此设备请用 desk_add_photo 导入图片、desk_add_theme 导入主题，或用 desk_install_role 安装角色。')
+                    raise ValueError('此设备请用 desk_add_photo 导入图片、desk_add_wallpaper 导入壁纸、desk_add_theme 导入主题，或用 desk_install_role 安装角色。')
             completed = []
             for source, path in checked:
                 try:
@@ -1322,6 +1324,21 @@ class BoardSession:
             staged=Path(directory)/'theme.json';staged.write_bytes(payload)
             item=CardFile(source=str(staged),path=f'themes/{filename}')
             return {'theme':filename,**await self.upload_files([item],expected_client=client)}
+
+    async def add_wallpaper(self, source, name):
+        path=Path(source).expanduser()
+        if not path.is_absolute() or not path.is_file():raise ValueError('请提供本机图片的绝对路径。')
+        if not isinstance(name,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,23}',name):
+            raise ValueError('壁纸名称须为 1 至 24 位英文字母、数字、下划线或连字符。')
+        client=self.client
+        if client is None:return {'status':'not_connected','connection':self.snapshot}
+        if client.channel.capabilities.get('wallpaper_jpeg_upload')!=1:return {'status':'unsupported'}
+        payload=await asyncio.to_thread(prepare_jpeg_photo,path)
+        filename=f'{name}-{hashlib.sha256(payload).hexdigest()[:16]}.jpg'
+        with tempfile.TemporaryDirectory(prefix='deskpet-wallpaper-') as directory:
+            staged=Path(directory)/'wallpaper.jpg';staged.write_bytes(payload)
+            relative=f'wallpapers/{filename}'
+            return {'wallpaper':relative,**await self.upload_files([CardFile(source=str(staged),path=relative)],expected_client=client)}
 
     async def add_photo(self, source):
         path = Path(source).expanduser()
@@ -1639,8 +1656,13 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     @server.tool()
     async def desk_appearance_config(theme: str | None = None, wallpaper: str | None = None,
                                      device_id: str | None = None) -> dict[str, Any]:
-        """查看或单独设置主题、壁纸；壁纸可用照片标识、photos/ 或 media/ 路径，空字符串清除。"""
+        """查看或单独设置主题、壁纸；壁纸可用照片标识或 photos/、media/、wallpapers/ 路径，空字符串清除。"""
         return await sessions.resolve(device_id).appearance_config(theme,wallpaper)
+
+    @server.tool()
+    async def desk_add_wallpaper(source: str, name: str = 'wallpaper', device_id: str | None = None) -> dict[str, Any]:
+        """导入独立壁纸，不加入照片相框；名称可用英文字母、数字、下划线或连字符。"""
+        return await sessions.resolve(device_id).add_wallpaper(source,name)
 
     @server.tool()
     async def desk_add_theme(source: str, name: str = 'theme', device_id: str | None = None) -> dict[str, Any]:

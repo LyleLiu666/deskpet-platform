@@ -23,6 +23,8 @@ class AppearanceConfigTests(unittest.IsolatedAsyncioTestCase):
         client.channel.send.assert_awaited_with('appearance_config',mode='theme',value='night')
         await client.appearance_config(wallpaper='photos/p-123.jpg')
         client.channel.send.assert_awaited_with('appearance_config',mode='wallpaper',value='/sdcard/Photos/p-123.jpg')
+        await client.appearance_config(wallpaper='wallpapers/paper-0123456789abcdef.jpg')
+        client.channel.send.assert_awaited_with('appearance_config',mode='wallpaper',value='/sdcard/Wallpapers/paper-0123456789abcdef.jpg')
         await client.appearance_config(wallpaper='')
         client.channel.send.assert_awaited_with('appearance_config',mode='wallpaper',value='')
         await client.appearance_config(wallpaper='p-1234567890abcdef')
@@ -34,6 +36,7 @@ class AppearanceConfigTests(unittest.IsolatedAsyncioTestCase):
         client=self.client()
         for kwargs in ({'theme':'night','wallpaper':''},{'theme':'../night.json'},
                        {'wallpaper':'photos/../secret.jpg'},{'wallpaper':'media/.hidden.jpg'},
+                       {'wallpaper':'wallpapers/../secret.jpg'},
                        {'wallpaper':'other/p.jpg'}):
             with self.subTest(kwargs=kwargs),self.assertRaises(ValueError):await client.appearance_config(**kwargs)
         client.channel.send.assert_not_awaited()
@@ -43,6 +46,8 @@ class AppearanceConfigTests(unittest.IsolatedAsyncioTestCase):
             session=BoardSession(Path(folder)/'device.json',no_token_probe=True);session.client=self.client()
             result=await session.appearance_config('night',None)
             self.assertEqual(result,{'status':'ok','theme':'night','wallpaper':'photos/p-123.jpg'})
+            session.client.channel.send.return_value={'theme':'night','wallpaper':'/sdcard/Wallpapers/paper-0123456789abcdef.jpg'}
+            self.assertEqual((await session.appearance_config(None,None))['wallpaper'],'wallpapers/paper-0123456789abcdef.jpg')
             session.client.channel.send.return_value={'theme':'night','wallpaper':'/sdcard/Photos/../secret.jpg'}
             with self.assertRaises(DeviceError):await session.appearance_config(None,None)
 

@@ -28,7 +28,7 @@ def transfer_timeout(size, *, background):
 
 
 def validate_path(path):
-    if not isinstance(path, str) or len(path) > 110 or not path.startswith(("roles/", "desk/", "photos/", "themes/")):
+    if not isinstance(path, str) or len(path) > 110 or not path.startswith(("roles/", "desk/", "photos/", "themes/", "wallpapers/")):
         raise ValueError("储存卡路径无效。")
     if any(not part or part.startswith(".") or part.lower().endswith((".upload", ".previous", ".removing")) or
            not re.fullmatch(r"[A-Za-z0-9_.-]+", part)

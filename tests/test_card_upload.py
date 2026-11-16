@@ -385,6 +385,23 @@ class CardUploadTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError,'desk_add_photo'):await session.upload_files(items)
             client.upload_file.assert_not_awaited()
 
+    async def test_wallpaper_upload_is_separate_immutable_and_requires_capability(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'art.png';Image.new('RGB',(30,20),'red').save(source)
+            written={}
+            async def upload(path,source):
+                written[path]=Path(source).read_bytes();return {'path':path,'bytes':len(written[path])}
+            client=SimpleNamespace(channel=SimpleNamespace(capabilities={'wallpaper_jpeg_upload':1,'card_restricted_paths':1}),upload_file=upload)
+            session=BoardSession(root/'device.json',no_token_probe=True);session.client=client
+            first=await session.add_wallpaper(str(source),'paper');second=await session.add_wallpaper(str(source),'paper')
+            self.assertEqual(first,second);self.assertEqual(first['status'],'completed')
+            self.assertRegex(first['wallpaper'],r'^wallpapers/paper-[0-9a-f]{16}\.jpg$')
+            self.assertEqual(set(written),{first['wallpaper']})
+            for invalid in ('../x','x/y','','a'*25,'名字'):
+                with self.assertRaises(ValueError):await session.add_wallpaper(str(source),invalid)
+            client.channel.capabilities={}
+            self.assertEqual(await session.add_wallpaper(str(source),'paper'),{'status':'unsupported'})
+
     async def test_named_theme_upload_is_stable_and_restricted(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source=root/'theme.json';content=b'{"paper":"#ffffff"}';source.write_bytes(content)

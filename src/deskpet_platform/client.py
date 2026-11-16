@@ -38,11 +38,11 @@ def _appearance_wallpaper(value):
     if not value:return ''
     if re.fullmatch(r'p-[0-9a-f]{16}',value):value=f'photos/{value}.jpg'
     folder,separator,name=value.partition('/')
-    if (not separator or folder not in ('photos','media') or not name or name.startswith('.') or
+    if (not separator or folder not in ('photos','media','wallpapers') or not name or name.startswith('.') or
         any(c in '/\\' or ord(c)<32 or ord(c)==127 for c in name) or
         not name.lower().endswith(('.jpg','.jpeg'))):
-        raise ValueError('壁纸须为 photos/ 或 media/ 下的 JPG 文件。')
-    result=f'/sdcard/{"Photos" if folder=="photos" else "Media"}/{name}'
+        raise ValueError('壁纸须为 photos/、media/ 或 wallpapers/ 下的 JPG 文件。')
+    result=f'/sdcard/{dict(photos="Photos",media="Media",wallpapers="Wallpapers")[folder]}/{name}'
     if len(result.encode('utf-8'))>=280:raise ValueError('壁纸路径过长。')
     return result
 
