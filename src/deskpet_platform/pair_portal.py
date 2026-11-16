@@ -1,6 +1,7 @@
 """A short-lived localhost page for entering board credentials outside the chat."""
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from math import ceil
 import secrets
 import threading
 import time
@@ -102,7 +103,7 @@ class PairPortal:
                     result = portal.pair(values["code"][0], address)
                 except (ValueError, RuntimeError, OSError) as error:
                     with portal.lock:
-                        portal.state = "waiting"
+                        portal.state = "waiting" if portal.server is not None and portal.remaining_seconds() else "expired"
                     if isinstance(error, OSError) and str(error) in ("wifi_device_absent", "wifi_discovery_unreachable"):
                         return self.form(400, NO_DEVICE_REPLY_HELP)
                     return self.form(400, "配对未成功。请确认配对码、Wi-Fi 和设备占用情况后重试。")
@@ -124,8 +125,13 @@ class PairPortal:
         with self.lock:
             return {"state": self.state, "device": self.device}
 
-    def close(self):
+    def remaining_seconds(self):
+        return max(0, ceil(self.lifetime - (time.monotonic() - self.created)))
+
+    def close(self, *, only_if_idle=False):
         with self.lock:
+            if only_if_idle and self.state == "checking":
+                return False
             server, self.server = self.server, None
             if self.state == "waiting":
                 self.state = "expired"
@@ -136,3 +142,4 @@ class PairPortal:
             server.server_close()
         if self.thread and self.thread is not threading.current_thread():
             self.thread.join(timeout=2)
+        return True

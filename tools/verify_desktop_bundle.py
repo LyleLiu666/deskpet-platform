@@ -15,9 +15,26 @@ MCP_SMOKE = """
 import asyncio
 import os
 import sys
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
+from urllib.request import ProxyHandler, Request, build_opener
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+
+def verify_pairing_form(url):
+    address = urlsplit(url)
+    assert (address.scheme, address.hostname) == ("http", "127.0.0.1")
+    request = Request(url, data=b"code=fixture-invalid-code",
+                      headers={"Origin": f"{address.scheme}://{address.netloc}"})
+    try:
+        with build_opener(ProxyHandler({})).open(request, timeout=5) as response:
+            raise RuntimeError(f"Invalid code returned HTTP {response.status}")
+    except HTTPError as error:
+        with error:
+            body = error.read()
+            assert error.code == 400 and b'<form method="post">' in body and b'fixture-invalid-code' not in body
 
 
 async def verify():
@@ -29,6 +46,11 @@ async def verify():
             await session.initialize()
             names = {tool.name for tool in (await session.list_tools()).tools}
             assert {"desk_list_devices", "desk_pair_begin", "desk_enable_codex_notifications"} <= names, names
+            portal = await session.call_tool("desk_pair_begin", {"open_browser": False})
+            assert not portal.isError and portal.structuredContent
+            await asyncio.to_thread(verify_pairing_form, portal.structuredContent["url"])
+            status = await session.call_tool("desk_pair_status")
+            assert not status.isError and status.structuredContent["state"] == "waiting"
 
 
 asyncio.run(verify())

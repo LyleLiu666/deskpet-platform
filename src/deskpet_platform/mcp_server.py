@@ -1619,6 +1619,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     sessions = DeviceSessions(registry, session, make_session, start_session)
     portal = None
     portal_mode = None
+    portal_lock = asyncio.Lock()
 
     @asynccontextmanager
     async def lifespan(_server):
@@ -1845,15 +1846,18 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     async def desk_pair_begin(open_browser: bool = True, add_device: bool = False) -> dict[str, Any]:
         """打开本机配对页面。添加另一台设备时设置 add_device；配对码只输入网页。"""
         nonlocal portal, portal_mode
-        if not add_device and len(registry.list()) > 1:
-            raise ValueError("已有多台设备，请使用添加设备配对。")
-        if portal is None or portal_mode != add_device or portal.status()["state"] not in ("waiting", "checking"):
-            if portal is not None:
-                await asyncio.to_thread(portal.close)
-            portal = PairPortal(add_pairing_from_portal if add_device else session.pair_from_portal).start()
-            portal_mode = add_device
-        opened = await asyncio.to_thread(webbrowser.open, portal.url) if open_browser else False
-        return {"url": portal.url, "browser_opened": opened, "expires_in_seconds": portal.lifetime}
+        async with portal_lock:
+            if not add_device and len(registry.list()) > 1:
+                raise ValueError("已有多台设备，请使用添加设备配对。")
+            reusable = (portal is not None and portal_mode == add_device and portal.remaining_seconds() > 0
+                        and portal.status()["state"] in ("waiting", "checking"))
+            if not reusable:
+                if portal is not None and not await asyncio.to_thread(portal.close, only_if_idle=True):
+                    raise ValueError("正在验证搭搭，请等待本次配对结束，再打开新的配对页面。")
+                portal = PairPortal(add_pairing_from_portal if add_device else session.pair_from_portal).start()
+                portal_mode = add_device
+            opened = await asyncio.to_thread(webbrowser.open, portal.url) if open_browser else False
+            return {"url": portal.url, "browser_opened": opened, "expires_in_seconds": portal.remaining_seconds()}
 
     @server.tool()
     async def desk_pair_usb(port: str, expected_identity: str, credentials_file: str | None = None,

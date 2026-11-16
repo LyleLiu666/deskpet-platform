@@ -3,19 +3,76 @@ import asyncio
 import base64
 from pathlib import Path
 import tempfile
+from threading import Event
 import urllib.error
 import urllib.parse
 import urllib.request
 import unittest
+from unittest.mock import patch
+
+from mcp.server.fastmcp.exceptions import ToolError
 
 from deskpet_platform.client import Client
-from deskpet_platform.mcp_server import BoardSession
+from deskpet_platform.mcp_server import BoardSession, create_server
 from deskpet_platform.pairing import DeviceConfig
 from deskpet_platform.pair_portal import PairPortal
 from test_multi_device_flow import FIRST, SyntheticBoard
 
 
 class PairingRehearsalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pairing_modes_cannot_replace_an_inflight_page(self):
+        entered = Event()
+        release = Event()
+        opened = []
+
+        class TrackedPortal(PairPortal):
+            def start(self):
+                opened.append(self)
+                return super().start()
+
+        def verify(code, address):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return {"device": "synthetic"}
+
+        def submit(url):
+            origin = urllib.parse.urljoin(url, "/").rstrip("/")
+            request = urllib.request.Request(url, data=b"code=synthetic", headers={"Origin": origin})
+            with urllib.request.urlopen(request, timeout=6) as response:
+                return response.status
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch("deskpet_platform.mcp_server.PairPortal", TrackedPortal), \
+             patch.object(BoardSession, "pair_from_portal", side_effect=verify):
+            server = create_server(Path(directory) / "device.json", no_token_probe=True)
+            options = {"open_browser": False}
+            _, initial = await server.call_tool("desk_pair_begin", options)
+            inflight = asyncio.create_task(asyncio.to_thread(submit, initial["url"]))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                _, same = await server.call_tool("desk_pair_begin", options)
+                self.assertEqual(same["url"], initial["url"])
+                with self.assertRaisesRegex(ToolError, "正在验证"):
+                    await server.call_tool("desk_pair_begin", {**options, "add_device": True})
+                self.assertEqual(len(opened), 1)
+                _, status = await server.call_tool("desk_pair_status", {})
+                self.assertEqual(status["state"], "checking")
+                release.set()
+                self.assertEqual(await inflight, 200)
+                results = await asyncio.gather(*(
+                    server.call_tool("desk_pair_begin", {**options, "add_device": True}) for _ in range(2)))
+                self.assertEqual(len(opened), 2)
+                self.assertEqual(results[0][1]["url"], results[1][1]["url"])
+                opened[-1].created -= 120
+                _, reused = await server.call_tool("desk_pair_begin", {**options, "add_device": True})
+                self.assertEqual(reused["url"], results[0][1]["url"])
+                self.assertLessEqual(reused["expires_in_seconds"], 180)
+            finally:
+                release.set()
+                await asyncio.gather(inflight, return_exceptions=True)
+                for portal in opened:
+                    await asyncio.to_thread(portal.close)
+
     async def test_local_page_authenticates_then_saves_and_retries(self):
         with tempfile.TemporaryDirectory(prefix="deskpet pair rehearsal ") as root:
             path = Path(root) / "device.json"
