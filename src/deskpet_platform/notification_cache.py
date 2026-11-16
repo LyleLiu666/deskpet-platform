@@ -70,6 +70,7 @@ class NotificationCache:
         self.reuse_failed = False
         self.session_ids = False
         self.browsing_feedback = None
+        self.mount = None
 
     def committed_records(self, channel):
         if self.confirmed is not None and channel.epoch == self.confirmed_epoch and channel.boot == self.confirmed[0]:
@@ -127,9 +128,14 @@ class NotificationCache:
     async def _sync(self, channel):
         state = await channel.send("cache_state")
         self.session_ids = state.get("cache_sessions") == 1
-        if not state.get("cache_available"):
+        mount = state.get("cache_mount")
+        if mount != self.mount or not state.get("cache_available"):
+            self.mount = mount
             self.confirmed_epoch = None
             self.confirmed = None
+            self.browsing_feedback = None
+            self.reuse_failed = False
+        if not state.get("cache_available"):
             return
         generation = state["cache_generation"]
         if self.confirmed is not None and (channel.boot, generation) == self.confirmed[:2]:

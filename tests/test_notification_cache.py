@@ -21,6 +21,7 @@ class CacheBoard:
         self.events = asyncio.Queue()
         self.commands = []
         self.generation = 4
+        self.mount = None
         self.receipts = []
         self.cache_available = True
         self.failure = None
@@ -40,8 +41,11 @@ class CacheBoard:
         if command == self.failure:
             raise CommandRejected("card_busy")
         if command == "cache_state":
-            return {"cache_available": self.cache_available, "cache_generation": self.generation,
-                    "cache_count": len(self.rows)}
+            state = {"cache_available": self.cache_available, "cache_generation": self.generation,
+                     "cache_count": len(self.rows)}
+            if self.mount is not None:
+                state["cache_mount"] = self.mount
+            return state
         if command == "cache_receipt_next":
             return self.receipts.pop(0) if self.receipts else {"has_receipt": False}
         if command == "cache_detail_begin":
@@ -93,6 +97,22 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
             if self.cache.transfer is None:
                 return
         self.fail("cache transfer did not finish")
+
+    async def test_replacement_card_with_same_generation_is_not_treated_as_confirmed(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
+        self.channel.mount = 1
+        self.store.add_agent_event("codex", "session", "q", "response", "Question")
+        await self.sync()
+        expected = self.channel.rows[:]
+        generation = self.channel.generation
+
+        # A swap can finish before the next poll observes the card missing.
+        self.channel.mount = 2
+        self.channel.rows = ["00000000"]
+        self.cache.poll_at = 0
+        await self.sync()
+        self.assertEqual(self.channel.generation, generation + 1)
+        self.assertEqual(self.channel.rows, expected)
 
     async def test_explicit_dismissal_receipt_removes_only_that_reminder(self):
         self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
