@@ -63,14 +63,14 @@ def verify(archive, fixture):
                    APPDATA=str(root), LOCALAPPDATA=str(root), XDG_CONFIG_HOME=str(root), XDG_DATA_HOME=str(root),
                    DOTNET_BUNDLE_EXTRACT_BASE_DIR=str(root / "runtime"))
         json_env = dict(env, PYTHONIOENCODING="cp1252")
-        report = json.loads(subprocess.check_output(invocation, cwd=root, env=json_env, encoding="ascii", timeout=15))
+        report = json.loads(subprocess.check_output(invocation, cwd=root, env=json_env, timeout=15))
         if report["speed"]["status"] != "present":
             raise RuntimeError(f"Bundle probe is not discoverable: {report['speed']}")
         probe = Path(report["speed"]["path"])
         if not probe.is_relative_to(environment) or config.parent.exists():
             raise RuntimeError("Discovery touched device configuration or selected an external probe")
         if json.loads(subprocess.check_output(
-                [*invocation, "--no-token-probe"], cwd=root, env=json_env, encoding="ascii", timeout=15))["speed"]["status"] != "disabled":
+                [*invocation, "--no-token-probe"], cwd=root, env=json_env, timeout=15))["speed"]["status"] != "disabled":
             raise RuntimeError("Could not disable the bundled probe")
         subprocess.run([str(python), "-c", MCP_SMOKE, str(desktop), str(config)], cwd=root, env=env,
                        check=True, timeout=30)
