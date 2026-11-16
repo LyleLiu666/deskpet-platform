@@ -1,7 +1,7 @@
 """Capture only quota fields while passing a status-line input through unchanged."""
 
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
@@ -15,6 +15,7 @@ from . import antigravity_quota, claude_quota
 
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_AGE_SECONDS = 300
+ANTIGRAVITY_REFRESH_SECONDS = 120
 READERS = {"claude_code": claude_quota.read_statusline_quota,
            "antigravity": antigravity_quota.read_statusline_quota}
 
@@ -28,8 +29,8 @@ class QuotaStore:
             path = state_path(path)
         self.path = Path(path)
 
-    def record(self, source, payload, observed_at):
-        reading = READERS[source](payload, observed_at)
+    @contextmanager
+    def _write_connection(self):
         if os.name == "nt":
             from .windows_private import ensure_private_directory
             self.path.parent.parent.mkdir(parents=True, exist_ok=True)
@@ -46,6 +47,11 @@ class QuotaStore:
         else:
             os.close(fd)
         with closing(sqlite3.connect(self.path, timeout=0.1)) as db, db:
+            yield db
+
+    def record(self, source, payload, observed_at):
+        reading = READERS[source](payload, observed_at)
+        with self._write_connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS snapshots "
                        "(source TEXT PRIMARY KEY, observed REAL NOT NULL, reading TEXT NOT NULL)")
             db.execute("INSERT INTO snapshots VALUES (?, ?, ?) ON CONFLICT(source) DO UPDATE SET "
@@ -53,13 +59,44 @@ class QuotaStore:
                        "WHERE excluded.observed >= snapshots.observed",
                        (source, observed_at, json.dumps(reading, ensure_ascii=True, separators=(",", ":"))))
 
-    def read(self, source, now):
+    def set_antigravity_refresh(self, enabled):
+        with self._write_connection() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS antigravity_refresh "
+                       "(id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL)")
+            return bool(db.execute("""INSERT INTO antigravity_refresh VALUES (1, ?)
+                ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled WHERE enabled!=excluded.enabled""",
+                                   (enabled,)).rowcount)
+
+    def refresh_antigravity(self):
+        """Coalesce CLI attempts across all processes using this quota store."""
+        source = "antigravity"
+        now = time.time()
+        if self.read(source, now, max_age=ANTIGRAVITY_REFRESH_SECONDS):
+            return
+        with self._write_connection() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS antigravity_refresh "
+                       "(id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS refresh_attempts "
+                       "(source TEXT PRIMARY KEY, started REAL NOT NULL)")
+            claimed = db.execute("""INSERT INTO refresh_attempts
+                SELECT ?, ? FROM antigravity_refresh WHERE id=1 AND enabled=1
+                ON CONFLICT(source) DO UPDATE SET started=excluded.started
+                WHERE excluded.started - refresh_attempts.started >= ?
+                   OR refresh_attempts.started - excluded.started >= ?""",
+                                 (source, now, ANTIGRAVITY_REFRESH_SECONDS, ANTIGRAVITY_REFRESH_SECONDS)).rowcount
+        if not claimed:
+            return
+        payload = {"quota": antigravity_quota.fetch_usage_buckets()}
+        if antigravity_quota.read_statusline_quota(payload, now):
+            self.record(source, payload, now)
+
+    def read(self, source, now, *, max_age=MAX_AGE_SECONDS):
         if source not in READERS or not self.path.is_file() or self.path.is_symlink():
             return None
         try:
             with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1)) as db:
                 row = db.execute("SELECT observed, reading FROM snapshots WHERE source = ?", (source,)).fetchone()
-            if row is None or not 0 <= now - row[0] <= MAX_AGE_SECONDS:
+            if row is None or not 0 <= now - row[0] <= max_age:
                 return None
             reading = json.loads(row[1])
             if not isinstance(reading, dict):

@@ -1,6 +1,8 @@
 import asyncio
+from contextlib import closing
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 import zlib
@@ -50,6 +52,30 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.store = NotificationStore(Path(self.temp.name) / "notifications.sqlite3")
         self.client = FakeClient()
         self.view = NotificationView(self.store)
+
+    async def test_home_receipt_waits_for_the_matching_displayed_version(self):
+        identity = self.store.add_agent_event("codex", "s", "done", "completed", "完成")
+
+        def displayed_at():
+            with closing(sqlite3.connect(self.store.path)) as db:
+                return db.execute("SELECT displayed FROM notifications WHERE id=?", (identity,)).fetchone()[0]
+
+        await self.view.refresh(self.client, device_page=0, displayed_version=0)
+        self.assertTrue(self.store.get(identity)["shown"])
+        self.assertIsNone(displayed_at())
+
+        await self.view.refresh(self.client, device_page=0, displayed_version=0)
+        self.assertIsNone(displayed_at())
+        self.assertEqual(len(self.client.channel.messages), 3)
+
+        # A reconnection must reattach the pending reminder to the new epoch.
+        self.client.channel.epoch = "f" * 32
+        await self.view.refresh(self.client, device_page=0, displayed_version=1)
+        self.assertIsNone(displayed_at())
+        self.assertEqual(len(self.client.channel.messages), 6)
+
+        await self.view.refresh(self.client, device_page=0, displayed_version=self.view.version)
+        self.assertIsNotNone(displayed_at())
 
     async def test_home_summarizes_many_sources_in_two_rows_without_repeated_sends(self):
         sources = ("codex", "claude_code", "workbuddy", "antigravity", "opencode")

@@ -5,6 +5,23 @@ from deskpet_platform.antigravity_quota import read_statusline_quota
 
 
 class AntigravityQuotaTests(unittest.TestCase):
+    def test_native_usage_result_keeps_exact_ids_for_both_model_groups(self):
+        from deskpet_platform.antigravity_quota import read_usage_buckets
+        from deskpet_platform.quota_projection import project_quota
+
+        now = 1_800_000_000
+        fixture = {"status": "SUCCESS", "num_turns": 0, "command": {"name": "usage", "data": {
+            "groups": [{"buckets": [{"id": "gemini-weekly", "remaining_fraction": .98, "reset_in_seconds": 3600}]},
+                       {"buckets": [{"id": "3p-5h", "remaining_fraction": 1, "reset_in_seconds": 300}]}]}}}
+        reading = read_statusline_quota({"quota": read_usage_buckets(fixture)}, now)
+        self.assertEqual(project_quota("antigravity_gemini", antigravity=reading, now=now)["quotas"],
+                         [[98, 10080, now + 3600]])
+        self.assertEqual(project_quota("antigravity_third_party", antigravity=reading, now=now)["quotas"],
+                         [[100, 300, now + 300]])
+        fixture["num_turns"] = 1
+        self.assertEqual(read_usage_buckets(fixture), {})
+
+
     def test_preserves_native_bucket_identity_and_remaining_percentage(self):
         now = 1_800_000_000
         reset = datetime.fromtimestamp(now + 3600, timezone.utc).isoformat().replace("+00:00", "Z")

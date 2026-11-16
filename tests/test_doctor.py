@@ -95,6 +95,9 @@ class DoctorTests(unittest.TestCase):
                 new = device.list()[0]["id"]
                 device.mark_home_shown([new])
                 report = diagnose(receiver, client="codex", shared_config=shared)
+                self.assertIsNone(report["reminders"]["latest_events"]["completed"]["device_displayed_at"])
+                device.mark_home_displayed([new])
+                report = diagnose(receiver, client="codex", shared_config=shared)
             evidence = report["reminders"]["latest_events"]["completed"]
             self.assertGreaterEqual(evidence["device_displayed_at"], evidence["hook_triggered_at"])
             self.assertNotIn("Private title", str(report))

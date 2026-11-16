@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from deskpet_platform.mcp_server import BoardSession, status_view
 from deskpet_platform.quota_capture import QuotaStore
@@ -42,6 +43,60 @@ class QuotaDisplayTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+
+    async def test_antigravity_refresh_is_shared_even_if_the_cli_returns_no_reading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "quota.sqlite3"
+            first, second = QuotaStore(cache), QuotaStore(cache)
+            first.set_antigravity_refresh(True)
+            with patch("deskpet_platform.antigravity_quota.fetch_usage_buckets", return_value={}) as fetch:
+                await asyncio.gather(asyncio.to_thread(first.refresh_antigravity),
+                                     asyncio.to_thread(second.refresh_antigravity))
+                second.refresh_antigravity()
+                fetch.assert_called_once()
+
+    def test_antigravity_claim_rejects_an_earlier_timestamp_from_a_concurrent_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = QuotaStore(Path(directory) / "quota.sqlite3")
+            store.set_antigravity_refresh(True)
+            with patch("deskpet_platform.quota_capture.time.time", side_effect=[1000, 999.99, 1120]), patch(
+                    "deskpet_platform.antigravity_quota.fetch_usage_buckets", return_value={}) as fetch:
+                store.refresh_antigravity()
+                store.refresh_antigravity()
+                fetch.assert_called_once()
+                store.refresh_antigravity()
+                self.assertEqual(fetch.call_count, 2)
+
+    async def test_disabling_antigravity_refresh_stops_the_cli_in_other_workers(self):
+        from deskpet_platform.mcp_server import create_server
+        with tempfile.TemporaryDirectory() as directory, patch.object(Path, "home", return_value=Path(directory)):
+            root = Path(directory)
+            server = create_server(root / "device.json", no_token_probe=True)
+            worker = QuotaStore(root / "agent-quota.sqlite3")
+            with patch("deskpet_platform.antigravity_quota.fetch_usage_buckets", return_value={}) as fetch:
+                worker.refresh_antigravity()
+                fetch.assert_not_called()
+                await server.call_tool("desk_set_agent_quota", {"source": "antigravity", "enabled": True})
+                worker.refresh_antigravity()
+                fetch.assert_called_once()
+                await server.call_tool("desk_set_agent_quota", {"source": "antigravity", "enabled": False})
+                with patch("deskpet_platform.quota_capture.time.time", return_value=time.time() + 180):
+                    worker.refresh_antigravity()
+                fetch.assert_called_once()
+
+    async def test_idle_background_session_does_not_start_antigravity_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = BoardSession(root / "device.json", background=True, no_token_probe=True)
+            session.snapshot["quota_source"] = "antigravity_gemini"
+            with patch.object(session.quota_store, "refresh_antigravity") as refresh:
+                task = asyncio.create_task(session.poll_antigravity_quota())
+                try:
+                    await asyncio.sleep(0)
+                    refresh.assert_not_called()
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
 
     async def test_missing_agent_reading_publishes_empty_selection(self):
         class Channel:

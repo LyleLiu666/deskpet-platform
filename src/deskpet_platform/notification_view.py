@@ -71,6 +71,7 @@ class NotificationView:
         self.selected = None
         self.detail_sent = self.detail_seen = False
         self.detail_crc = None
+        self.pending_home_display = None
 
     def _reset(self, epoch, boot, device_page):
         # A new connection resets protocol versions. On the same boot the
@@ -88,6 +89,7 @@ class NotificationView:
         self.selected = selected
         self.detail_sent = self.detail_seen = False
         self.detail_crc = None
+        self.pending_home_display = None
 
     def touch(self, event, *, channel=None):
         action = event.get("action")
@@ -138,12 +140,17 @@ class NotificationView:
         self.signature = None
         return True
 
-    async def refresh(self, client, *, device_page=None, role_ready=True, cached_records=None):
+    async def refresh(self, client, *, device_page=None, displayed_version=None, role_ready=True, cached_records=None):
         channel = client.channel
         if channel.capabilities.get("agent_home") != 1:
             return False
         if self.epoch != channel.epoch:
             self._reset(channel.epoch, channel.boot, device_page)
+        if self.pending_home_display is not None and device_page == 0:
+            version, identities = self.pending_home_display
+            if displayed_version == version:
+                self.store.mark_home_displayed(identities)
+                self.pending_home_display = None
         cache_first = channel.capabilities.get("agent_cache_first") == 1
         if channel.capabilities.get("agent_local_inbox") == 1:
             if device_page in (1, 2, 3):
@@ -179,7 +186,8 @@ class NotificationView:
                 attention = 0
             elif not cache_first:
                 attention = self.store.pending_attention()
-            if self.signature == signature and not attention and not receipts:
+            queued = self.pending_home_display[1] if self.pending_home_display is not None else ()
+            if self.signature == signature and not attention and receipts == queued:
                 return True
             entries = home_lines(summary)
             rows = []
@@ -237,6 +245,7 @@ class NotificationView:
             self.anchor, self.pages = page["anchor"], page["pages"]
         if receipts:
             self.store.mark_home_shown(receipts)
+        self.pending_home_display = (version, receipts) if receipts else None
         if attention:
             self.store.acknowledge_attention(attention)
         if self.mode == "detail":

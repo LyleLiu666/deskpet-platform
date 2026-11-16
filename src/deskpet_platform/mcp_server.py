@@ -452,16 +452,17 @@ class BoardSession:
             self.attention_due = now + 5
 
     async def refresh_messages(self):
-        ids = await self.client.pending_notice_reads()
+        client = self.client
+        ids = await client.pending_notice_reads()
         if ids:
             await asyncio.to_thread(self.notifications.mark_seen_many, ids)
-            await self.client.acknowledge_notice_reads(ids)
+            await client.acknowledge_notice_reads(ids)
         records = await asyncio.to_thread(self.notifications.list, 10, for_device=True)
         fingerprint = [(item["id"], item["seen"], item["title"]) for item in records]
         if fingerprint != self.last_message_cache:
             responses = [item["id"] for item in records if item["category"] == "response"]
             await asyncio.to_thread(self.notifications.record_response_projection, "legacy", responses)
-            await self.client.sync_messages(records)
+            await client.sync_messages(records)
             await asyncio.to_thread(self.notifications.record_response_projection, "legacy", responses, confirmed=True)
             self.last_message_cache = fingerprint
 
@@ -472,6 +473,7 @@ class BoardSession:
             if cache_first:
                 await self.notification_cache.step(self.client)
             await self.notification_view.refresh(self.client, device_page=heartbeat.get("pet_page"),
+                                                 displayed_version=heartbeat.get("displayed_version"),
                                                  role_ready=heartbeat.get("role_state") == "ready",
                                                  cached_records=self.notification_cache.committed_records(channel))
             if not cache_first:
@@ -878,6 +880,17 @@ class BoardSession:
                 continue
             updated = await self.refresh_quota()
             await asyncio.sleep(300 if updated else 10)
+
+    async def poll_antigravity_quota(self):
+        """Refresh the shared quota cache without delaying writes to the board."""
+        while True:
+            client = self.client
+            eligible = (client is not None and client.channel.capabilities.get("quota_sources") == 1 and
+                        self.snapshot.get("quota_source") in ANTIGRAVITY_WINDOWS)
+            if eligible:
+                with suppress(OSError, sqlite3.Error, ValueError):
+                    await asyncio.to_thread(self.quota_store.refresh_antigravity)
+            await asyncio.sleep(60 if eligible else 5)
 
     async def poll_quota_display(self):
         """Send the selected allowance independently of the live speed probe."""
@@ -1598,7 +1611,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
             board.loop = asyncio.get_running_loop()
             tasks.extend(asyncio.create_task(run()) for run in
                          (board.poll, board.poll_weather, board.poll_tokens, board.poll_quota,
-                          board.poll_quota_display, board.poll_computer_metrics))
+                          board.poll_quota_display, board.poll_antigravity_quota, board.poll_computer_metrics))
 
     def make_session(path):
         board = BoardSession(path, token_root=token_root, token_collector=token_collector, probe_collector=shared_probe,
@@ -2100,6 +2113,9 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         path = settings_path(source)
         async with hook_configuration_lock:
             changed = await asyncio.to_thread(configure, path, source, shared_quota_store.path, enabled=enabled)
+            if source == "antigravity":
+                refresh_changed = await asyncio.to_thread(shared_quota_store.set_antigravity_refresh, enabled)
+                changed = changed or refresh_changed
         result = {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path),
                   "next_step": ("在搭搭的监控设置中选择对应来源，打开该 Agent 会话并检查额度；"
                                 "账号未提供额度或状态栏被覆盖时显示 --。" if enabled else

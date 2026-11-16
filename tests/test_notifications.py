@@ -409,6 +409,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                     {"hook_event_name": "Stop", "session_id": "two", "turn_id": "turn"})
 
             class Device:
+                channel = type("Channel", (), {"capabilities": {}})()
                 pending = [first]
                 commits = 0
                 reject_first_ack = True
@@ -674,7 +675,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     stopped.append(name)
             return run
-        for name in ('poll', 'poll_weather', 'poll_tokens', 'poll_quota', 'poll_quota_display', 'poll_computer_metrics'):
+        for name in ('poll', 'poll_weather', 'poll_tokens', 'poll_quota', 'poll_quota_display', 'poll_antigravity_quota', 'poll_computer_metrics'):
             setattr(Session, name, make_poll(name))
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / 'device.json'
@@ -699,7 +700,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(len(sessions), 2)
             self.assertEqual(sessions[0]['notification_source'].path, config.parent / 'notifications.sqlite3')
             self.assertEqual(sessions[0]['quota_store'].path, config.parent / 'agent-quota.sqlite3')
-            for name in ('poll', 'poll_weather', 'poll_tokens', 'poll_quota', 'poll_quota_display', 'poll_computer_metrics'):
+            for name in ('poll', 'poll_weather', 'poll_tokens', 'poll_quota', 'poll_quota_display', 'poll_antigravity_quota', 'poll_computer_metrics'):
                 self.assertGreaterEqual(started.count(name), 2)
                 self.assertEqual(started.count(name), stopped.count(name))
 
@@ -713,7 +714,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 started.append('live' if self.live else 'fallback')
                 await asyncio.Future()
             async def wait(self): await asyncio.Future()
-            poll_weather = poll_tokens = poll_quota = poll_quota_display = poll_computer_metrics = wait
+            poll_weather = poll_tokens = poll_quota = poll_quota_display = poll_antigravity_quota = poll_computer_metrics = wait
             async def drop(self): started.append('live closed' if self.live else 'fallback closed')
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / 'device.json'
@@ -741,7 +742,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 started.append('live' if self.live else 'fallback')
                 await asyncio.Future()
             async def wait(self): await asyncio.Future()
-            poll_weather = poll_tokens = poll_quota = poll_quota_display = poll_computer_metrics = wait
+            poll_weather = poll_tokens = poll_quota = poll_quota_display = poll_antigravity_quota = poll_computer_metrics = wait
             async def drop(self): pass
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / 'device.json'
@@ -806,7 +807,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(.01)
                 raise RuntimeError('data task failed')
             async def wait(self): await asyncio.Future()
-            poll_weather = poll_tokens = poll_quota = poll_quota_display = poll_computer_metrics = wait
+            poll_weather = poll_tokens = poll_quota = poll_quota_display = poll_antigravity_quota = poll_computer_metrics = wait
             async def drop(self): closed.append(True)
         with tempfile.TemporaryDirectory() as directory:
             shared = Path(directory) / 'device.json'

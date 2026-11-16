@@ -1,6 +1,12 @@
 """Read quota buckets from Antigravity CLI's documented status-line data."""
 
 from datetime import datetime
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 
 
 def _reset_time(bucket, now):
@@ -52,3 +58,52 @@ def read_statusline_quota(payload, now):
             continue
         result[identity] = {**value, "reset_at": reset}
     return result
+
+
+def read_usage_buckets(payload):
+    """Extract the quota bucket IDs from agy's own noninteractive /usage result."""
+    if (not isinstance(payload, dict) or payload.get("status") != "SUCCESS" or
+            type(payload.get("num_turns")) is not int or payload["num_turns"] != 0):
+        return {}
+    command = payload.get("command")
+    if not isinstance(command, dict) or command.get("name") != "usage":
+        return {}
+    data = command.get("data")
+    groups = data.get("groups") if isinstance(data, dict) else None
+    if not isinstance(groups, list):
+        return {}
+
+    buckets = {}
+    for group in groups:
+        rows = group.get("buckets") if isinstance(group, dict) else None
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            identity = row.get("id") if isinstance(row, dict) else None
+            if isinstance(identity, str):
+                if identity in buckets:
+                    return {}
+                buckets[identity] = row
+    return buckets
+
+
+def fetch_usage_buckets():
+    """Ask the installed official CLI to read quota using its existing sign-in."""
+    executable = shutil.which("agy")
+    if executable is None:
+        default = Path.home() / ".local/bin/agy"
+        if not default.is_file():
+            return {}
+        executable = str(default)
+    try:
+        with tempfile.TemporaryDirectory(prefix="deskpet-agy-quota-") as directory:
+            result = subprocess.run(
+                [executable, "--print", "/usage", "--output-format", "json",
+                 "--print-timeout", "15s", "--log-file", os.devnull],
+                cwd=directory, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, timeout=25, check=True,
+                env={**os.environ, "AGY_CLI_DISABLE_AUTO_UPDATE": "true"},
+            )
+        return read_usage_buckets(json.loads(result.stdout))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}

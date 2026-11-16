@@ -25,6 +25,16 @@ SUPERSEDED_QUESTION = """n.response_group IS NOT NULL AND EXISTS (
       AND replacement.id>n.id AND replacement.response_group IS NOT NULL
       AND replacement.response_group!=n.response_group)"""
 
+OPEN_QUESTION = f"""n.category='response' AND n.resolved IS NULL AND n.dismissed IS NULL
+    AND NOT ({SUPERSEDED_QUESTION})"""
+# A newer request takes over the attention for its session.
+ACTIVE_QUESTION = f"""{OPEN_QUESTION} AND NOT EXISTS (
+        SELECT 1 FROM notifications AS newer
+        WHERE newer.source=n.source AND newer.session=n.session
+          AND newer.category='response' AND newer.id>n.id
+          AND (newer.resolved IS NULL OR n.parent_turn IS NULL
+               OR newer.parent_turn IS NOT n.parent_turn))"""
+
 
 def notification_text(item, *, detail=True):
     source = SOURCE_NAMES.get(item["source"], item["source"])
@@ -139,10 +149,11 @@ class NotificationStore:
                         db.execute("""CREATE TABLE notification_response_projections (
                             projection TEXT NOT NULL, notification_id INTEGER NOT NULL,
                             PRIMARY KEY(projection, notification_id))""")
-                        # A board can already be offline when its controller is upgraded.
+                        # Older versions only tracked projection with shown.
+                        # Keep those rows eligible for withdrawal after an offline upgrade.
                         db.execute("""INSERT INTO notification_response_projections
                             SELECT 'screen',id FROM notifications WHERE category='response'
-                              AND displayed IS NOT NULL AND resolved IS NULL AND dismissed IS NULL""")
+                              AND shown IS NOT NULL AND resolved IS NULL AND dismissed IS NULL""")
         except sqlite3.Error:
             db.close()
             raise
@@ -311,12 +322,7 @@ class NotificationStore:
                 WHERE dismissed IS NULL AND (NOT ? OR (category='completed' AND id IN (
                     SELECT MAX(id) FROM notifications WHERE category='completed' AND seen IS NULL
                     GROUP BY source,session))
-                    OR (category='response' AND resolved IS NULL AND dismissed IS NULL AND NOT ({SUPERSEDED_QUESTION}) AND NOT EXISTS (
-                        SELECT 1 FROM notifications AS newer
-                        WHERE newer.source=n.source AND newer.session=n.session
-                          AND newer.category='response' AND newer.id>n.id
-                          AND (newer.resolved IS NULL OR n.parent_turn IS NULL
-                               OR newer.parent_turn IS NOT n.parent_turn))))
+                    OR ({ACTIVE_QUESTION}))
                 ORDER BY CASE WHEN ? AND category='response' AND resolved IS NULL THEN 0 ELSE 1 END,
                          id DESC LIMIT 100""", (active_only, pending_first)).fetchall()
         records = self._items(rows)
@@ -428,13 +434,12 @@ class NotificationStore:
             completed = db.execute("""SELECT source,COUNT(DISTINCT session),MAX(id) FROM notifications
                 WHERE seen IS NULL AND category='completed' GROUP BY source ORDER BY MAX(id) DESC""").fetchall()
             response = db.execute(f"""SELECT n.source,groups.amount,n.id,n.title FROM notifications n JOIN
-                (SELECT source,COUNT(*) amount,MAX(id) latest FROM notifications
-                 AS n WHERE resolved IS NULL AND dismissed IS NULL AND category='response' AND NOT ({SUPERSEDED_QUESTION}) GROUP BY source) groups
+                (SELECT source,COUNT(*) amount,MAX(id) latest FROM notifications AS n
+                 WHERE {OPEN_QUESTION} GROUP BY source) groups
                 ON n.id=groups.latest ORDER BY n.id DESC""").fetchall()
             if include_receipts:
-                receipts = [row[0] for row in db.execute(f"""SELECT id FROM notifications n WHERE shown IS NULL AND
-                    ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL AND dismissed IS NULL
-                    AND NOT ({SUPERSEDED_QUESTION})))""")]
+                receipts = tuple(row[0] for row in db.execute(f"""SELECT id FROM notifications n WHERE displayed IS NULL AND
+                    ((category='completed' AND seen IS NULL) OR ({OPEN_QUESTION})) ORDER BY id"""))
         summary = {"completed_count": sum(row[1] for row in completed),
                 "completed_sources": [row[0] for row in completed],
                 "response_source_count": len(response),
@@ -446,8 +451,14 @@ class NotificationStore:
     def mark_home_shown(self, identities):
         with closing(self._connect()) as db, db:
             now = time.time()
-            db.executemany("UPDATE notifications SET shown=COALESCE(shown,?), displayed=COALESCE(displayed,?) WHERE id=?",
-                           ((now, now, identity) for identity in identities))
+            db.executemany("UPDATE notifications SET shown=COALESCE(shown,?) WHERE id=?",
+                           ((now, identity) for identity in identities))
+
+    def mark_home_displayed(self, identities):
+        with closing(self._connect()) as db, db:
+            now = time.time()
+            db.executemany("UPDATE notifications SET displayed=COALESCE(displayed,?) WHERE id=?",
+                           ((now, identity) for identity in identities))
 
     def seen_notifications(self, identities, *, include_resolved=False):
         if not identities:
@@ -465,12 +476,13 @@ class NotificationStore:
             return (), 0
         placeholders = ",".join("?" for _ in identities)
         with closing(self._connect()) as db:
-            rows = db.execute(f"""SELECT id,shown IS NULL,category='response' AND
+            rows = db.execute(f"""SELECT id,displayed IS NULL,category='response' AND
                          id>COALESCE((SELECT through_id FROM notification_attention WHERE id=1),0)
                 FROM notifications WHERE id IN ({placeholders}) AND
-                  ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL AND dismissed IS NULL))""",
+                  ((category='completed' AND seen IS NULL) OR (category='response' AND resolved IS NULL AND dismissed IS NULL))
+                ORDER BY id""",
                 identities).fetchall()
-        return tuple(identity for identity, shown_pending, _ in rows if shown_pending), max(
+        return tuple(identity for identity, display_pending, _ in rows if display_pending), max(
             (identity for identity, _, attention_pending in rows if attention_pending), default=0)
 
     def next_pending(self, *, text_only=False):
@@ -794,7 +806,7 @@ async def _run_device_worker(config_path, *, source, client_factory, deadline, p
         methods = [board.poll]
         if live_options is not None:
             methods.extend((board.poll_weather, board.poll_tokens, board.poll_quota,
-                            board.poll_quota_display, board.poll_computer_metrics))
+                            board.poll_quota_display, board.poll_antigravity_quota, board.poll_computer_metrics))
         return board, [asyncio.create_task(method()) for method in methods]
 
     async def stop_session():
