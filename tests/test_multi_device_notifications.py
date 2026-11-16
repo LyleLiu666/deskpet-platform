@@ -197,6 +197,33 @@ class MultiDeviceNotificationTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
             await asyncio.gather(task,return_exceptions=True)
 
+    async def test_background_dispatcher_retries_withdrawal_after_peer_outlasts_idle_timeout(self):
+        boards = {item.identity: NotificationBoard(item) for item in (FIRST, SECOND)}
+        first, peer = boards[FIRST.identity], boards[SECOND.identity]
+        self.inbox.add_agent_event("codex", "session", "question", "response", "Question")
+
+        def factory(config):
+            return Client(config, link_factory=boards[config.identity].link)
+
+        task = asyncio.create_task(run_worker(self.config, client_factory=factory, poll_interval=.01,
+                                              idle_seconds=.03, max_seconds=9))
+        try:
+            await self.wait_for(lambda: all(board.snapshots and board.snapshots[-1]["waiting"] == 1
+                                            for board in boards.values()))
+            peer.available = False
+            first_question = self.inbox.cache_records(active_only=True)[0]
+            self.assertTrue(self.inbox.dismiss_cached_response(first_question["cache_id"]))
+            await self.wait_for(lambda: first.snapshots[-1]["waiting"] == 0)
+            done, _ = await asyncio.wait({task}, timeout=.2)
+            self.assertFalse(done)
+            self.assertEqual(peer.snapshots[-1]["waiting"], 1)
+            peer.available = True
+            await self.wait_for(lambda: peer.snapshots[-1]["waiting"] == 0, timeout=5)
+            await asyncio.wait_for(task, 2)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def test_stop_arriving_during_dispatcher_shutdown_reaches_both_boards(self):
         closing = asyncio.Event()
         allow_close = asyncio.Event()

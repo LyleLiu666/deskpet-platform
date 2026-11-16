@@ -18,6 +18,21 @@ from deskpet_platform.pairing import DeviceConfig
 
 
 class NotificationTests(unittest.TestCase):
+    def test_old_display_receipt_keeps_withdrawal_pending_across_desktop_upgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "notifications.sqlite3"
+            older = notifications.NotificationStore(path)
+            displayed = older.add_agent_event("codex", "session", "q", "response", "Question")
+            older.mark_home_shown([displayed])
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute("DROP TABLE notification_response_projections")
+
+            upgraded = notifications.NotificationStore(path)
+            self.assertTrue(upgraded.resolve_response(displayed))
+            self.assertTrue(upgraded.has_active_notifications(include_unconfirmed=True))
+            upgraded.record_response_projection("screen", [], confirmed=True)
+            self.assertFalse(upgraded.has_active_notifications(include_unconfirmed=True))
+
     def test_new_receiver_inherits_history_without_replaying_it(self):
         from deskpet_platform.device_registry import DeviceRegistry
         with tempfile.TemporaryDirectory() as directory:

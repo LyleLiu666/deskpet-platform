@@ -218,16 +218,20 @@ class NotificationView:
             items = {f"n-{item['id']}": item for item in page["items"]}
             rows = [{"id": key, "revision": 1, **notification_row(item)} for key, item in items.items()]
             extra = {"pagination": [self.page - 1, page["pages"]]}
+        responses = {source["id"] for source in summary["response_sources"]}
+        responses.update(item["id"] for item in items.values() if item["category"] == "response" and not item["resolved"])
         value = {"count": len(rows), "waiting": waiting, "results": results, "running": 0, **extra}
         self.attempt += 1
         version = self.attempt
         async with client._operation:
+            self.store.record_response_projection("screen", responses)
             await channel.send("snapshot_begin", version=version, **value)
             for index, row in enumerate(rows):
                 await channel.send("row", version=version, index=index, **row)
             result = await channel.send("snapshot_commit", version=version)
             if result.get("committed_version") != version:
                 raise RuntimeError("notification_snapshot_not_committed")
+            self.store.record_response_projection("screen", responses, confirmed=True)
         self.rows, self.items, self.signature, self.version = rows, items, signature, version
         if self.mode != "home":
             self.anchor, self.pages = page["anchor"], page["pages"]

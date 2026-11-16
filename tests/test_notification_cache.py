@@ -106,6 +106,30 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list()[0]["id"], question)
         self.assertIn(("cache_receipt_begin", {"feedback_dismissal": True}), self.channel.commands)
 
+    async def test_lost_card_commit_reply_keeps_withdrawal_queued_until_reconnect(self):
+        self.channel.capabilities.update(agent_inbox_read=1, agent_local_inbox=1, cache_feedback_dismissal=1)
+        self.store.add_agent_event("codex", "session", "q", "response", "Question")
+        send = self.channel.send
+
+        async def drop_commit_reply(command, **fields):
+            reply = await send(command, **fields)
+            if command == "cache_commit":
+                raise OSError("disconnect after commit")
+            return reply
+
+        with patch.object(self.channel, "send", side_effect=drop_commit_reply), self.assertRaises(OSError):
+            await self.sync()
+        self.assertEqual(len(self.channel.rows), 1)
+        self.assertTrue(self.store.resolve_agent_event("codex", "session", "q"))
+        reopened = NotificationStore(self.store.path)
+        self.assertTrue(reopened.has_active_notifications(include_unconfirmed=True))
+
+        self.cache = NotificationCache(reopened)
+        self.channel.epoch = "f" * 32
+        await self.sync()
+        self.assertEqual(self.channel.rows, [])
+        self.assertFalse(reopened.has_active_notifications(include_unconfirmed=True))
+
     async def test_dismissal_on_one_board_removes_the_question_from_the_peer_cache_on_reconnect(self):
         root = self.store.path.parent
         shared = NotificationStore(root / "shared.sqlite3")

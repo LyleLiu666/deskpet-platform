@@ -131,6 +131,18 @@ class NotificationStore:
                 PRIMARY KEY(source,session,event_id))""")
             db.execute("""CREATE TABLE IF NOT EXISTS notification_attention (
                 id INTEGER PRIMARY KEY CHECK(id=1), through_id INTEGER NOT NULL)""")
+            projection_schema = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='notification_response_projections'"
+            if db.execute(projection_schema).fetchone() is None:
+                with db:
+                    db.execute("BEGIN IMMEDIATE")
+                    if db.execute(projection_schema).fetchone() is None:
+                        db.execute("""CREATE TABLE notification_response_projections (
+                            projection TEXT NOT NULL, notification_id INTEGER NOT NULL,
+                            PRIMARY KEY(projection, notification_id))""")
+                        # A board can already be offline when its controller is upgraded.
+                        db.execute("""INSERT INTO notification_response_projections
+                            SELECT 'screen',id FROM notifications WHERE category='response'
+                              AND displayed IS NOT NULL AND resolved IS NULL AND dismissed IS NULL""")
         except sqlite3.Error:
             db.close()
             raise
@@ -374,6 +386,18 @@ class NotificationStore:
             return db.execute("""SELECT COUNT(*) FROM notifications
                 WHERE category='response' AND (resolved IS NOT NULL OR dismissed IS NOT NULL)""").fetchone()[0]
 
+    def record_response_projection(self, projection, identities, *, confirmed=False):
+        # Stage before sending a commit. If its reply is lost, keep both the
+        # previous and in-flight rows until a verified snapshot replaces them.
+        if not identities and not confirmed:
+            return
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            if confirmed:
+                db.execute("DELETE FROM notification_response_projections WHERE projection=?", (projection,))
+            db.executemany("INSERT OR IGNORE INTO notification_response_projections VALUES (?,?)",
+                           ((projection, identity) for identity in identities))
+
     def withdrawn_cache_responses(self, cache_ids):
         with closing(self._connect()) as db:
             mask = 0
@@ -531,11 +555,14 @@ class NotificationStore:
                 AND (NOT ? OR category!='response' OR (resolved IS NULL AND dismissed IS NULL))""",
                               (for_device,)).fetchone()[0]
 
-    def has_active_notifications(self):
+    def has_active_notifications(self, *, include_unconfirmed=False):
         with closing(self._connect()) as db:
             return db.execute(f"""SELECT 1 FROM notifications n WHERE
                 (category='response' AND resolved IS NULL AND dismissed IS NULL AND NOT ({SUPERSEDED_QUESTION})) OR
-                (category='completed' AND seen IS NULL) LIMIT 1""").fetchone() is not None
+                (category='completed' AND seen IS NULL) OR
+                (? AND category='response' AND (resolved IS NOT NULL OR dismissed IS NOT NULL OR ({SUPERSEDED_QUESTION}))
+                 AND EXISTS (SELECT 1 FROM notification_response_projections WHERE notification_id=n.id))
+                LIMIT 1""", (include_unconfirmed,)).fetchone() is not None
 
 
 async def deliver_next(client, store):
@@ -711,13 +738,13 @@ async def _run_workers(config_path, *, client_factory, max_seconds, poll_interva
         os.close(descriptor)
 
 
-_INBOX_VERSION = "SELECT COALESCE(MAX(id),0) FROM notifications"
+_INBOX_VERSION = "SELECT COALESCE(MAX(id),0), COUNT(resolved), COUNT(dismissed) FROM notifications"
 
 
 def _inbox_version(inbox):
     try:
         with closing(inbox._connect()) as db:
-            return db.execute(_INBOX_VERSION).fetchone()[0]
+            return db.execute(_INBOX_VERSION).fetchone()
     except (OSError, sqlite3.Error, ValueError):
         return None
 
@@ -726,7 +753,7 @@ def _release_idle_dispatch(inbox, descriptor, through):
     try:
         with closing(inbox._connect(timeout=0)) as db:
             db.execute("BEGIN IMMEDIATE")
-            if db.execute(_INBOX_VERSION).fetchone()[0] != through:
+            if db.execute(_INBOX_VERSION).fetchone() != through:
                 return False
             # The next hook starts its worker after committing. Release the
             # dispatch lock before that commit is possible. The per-board
@@ -740,7 +767,7 @@ def _release_idle_dispatch(inbox, descriptor, through):
 def _sync_active(store):
     try:
         store.sync()
-        return store.has_active_notifications()
+        return store.has_active_notifications(include_unconfirmed=True)
     except (OSError, sqlite3.Error, ValueError):
         return True
 

@@ -451,7 +451,10 @@ class BoardSession:
         records = await asyncio.to_thread(self.notifications.list, 10, for_device=True)
         fingerprint = [(item["id"], item["seen"], item["title"]) for item in records]
         if fingerprint != self.last_message_cache:
+            responses = [item["id"] for item in records if item["category"] == "response"]
+            await asyncio.to_thread(self.notifications.record_response_projection, "legacy", responses)
             await self.client.sync_messages(records)
+            await asyncio.to_thread(self.notifications.record_response_projection, "legacy", responses, confirmed=True)
             self.last_message_cache = fingerprint
 
     async def refresh_agent_notifications(self, heartbeat):

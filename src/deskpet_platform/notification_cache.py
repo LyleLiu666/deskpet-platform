@@ -225,12 +225,15 @@ class NotificationCache:
                     yield
                 await channel.send("cache_detail_commit")
                 yield
+        responses = [record["id"] for record in records if record["category"] == "response" and not record["resolved"]]
         same_manifest = (reuse and not had_receipts and generation and len(prepared) == count and
                          all(source == index for index, (_, _, source) in enumerate(prepared)))
         if same_manifest:
+            self.store.record_response_projection("card", responses, confirmed=True)
             self.confirmed = (channel.boot, generation, records)
             self.confirmed_epoch = channel.epoch
             return
+        self.store.record_response_projection("card", responses)
         reply = await channel.send("cache_begin", generation=generation + 1, count=len(prepared))
         yield
         if reply.get("cache_busy") or reply.get("cache_changed"):
@@ -269,6 +272,7 @@ class NotificationCache:
         reply = await channel.send("cache_commit")
         if reply.get("cache_generation") != generation + 1:
             raise RuntimeError("notification_cache_not_committed")
+        self.store.record_response_projection("card", responses, confirmed=True)
         self.confirmed = (channel.boot, generation + 1, records)
         self.confirmed_epoch = channel.epoch
         self.reuse_failed = False
