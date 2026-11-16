@@ -1340,6 +1340,14 @@ class BoardSession:
             relative=f'wallpapers/{filename}'
             return {'wallpaper':relative,**await self.upload_files([CardFile(source=str(staged),path=relative)],expected_client=client)}
 
+    async def delete_wallpaper(self, path):
+        async with self.storage_lock, self.lock:
+            if self.client is None:return {'status':'not_connected','connection':self.snapshot}
+            if self.client.channel.capabilities.get('wallpaper_delete')!=1:return {'status':'unsupported'}
+            result=await self.client.delete_wallpaper(path)
+            if type(result.get('deleted')) is not bool:raise DeviceError('invalid_wallpaper_delete_response')
+            return {'path':path,'deleted':result['deleted']}
+
     async def add_photo(self, source):
         path = Path(source).expanduser()
         if not path.is_absolute() or not path.is_file():
@@ -1663,6 +1671,11 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     async def desk_add_wallpaper(source: str, name: str = 'wallpaper', device_id: str | None = None) -> dict[str, Any]:
         """导入独立壁纸，不加入照片相框；名称可用英文字母、数字、下划线或连字符。"""
         return await sessions.resolve(device_id).add_wallpaper(source,name)
+
+    @server.tool()
+    async def desk_delete_wallpaper(path: str, device_id: str | None = None) -> dict[str, Any]:
+        """删除指定的已导入壁纸；正在使用的壁纸需先切换。"""
+        return await sessions.resolve(device_id).delete_wallpaper(path)
 
     @server.tool()
     async def desk_add_theme(source: str, name: str = 'theme', device_id: str | None = None) -> dict[str, Any]:

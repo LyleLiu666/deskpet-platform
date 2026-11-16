@@ -22,6 +22,17 @@ from deskpet_platform.pairing import DeviceConfig
 
 
 class CardUploadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wallpaper_delete_reports_missing_and_unsupported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session=BoardSession(Path(directory)/'device.json')
+            path='wallpapers/paper-0123456789abcdef.jpg'
+            self.assertEqual((await session.delete_wallpaper(path))['status'],'not_connected')
+            session.client=SimpleNamespace(channel=SimpleNamespace(capabilities={}))
+            self.assertEqual(await session.delete_wallpaper(path),{'status':'unsupported'})
+            session.client=SimpleNamespace(channel=SimpleNamespace(capabilities={'wallpaper_delete':1}),
+                                           delete_wallpaper=AsyncMock(return_value={'deleted':False}))
+            self.assertEqual(await session.delete_wallpaper(path),{'path':path,'deleted':False})
+
     def test_background_deadline_accounts_for_large_slow_writes(self):
         for size, deadline in ((1024**2, 300), (8 * 1024**2, 1084), (MAX_FILE_BYTES, 16444)):
             with self.subTest(size=size):

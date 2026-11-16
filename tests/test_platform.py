@@ -85,6 +85,21 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await client.delete_resource(path)
 
+    async def test_wallpaper_deletion_requires_capability_and_safe_imported_path(self):
+        client = Client(DeviceConfig(DEVICE, KEY))
+        client.channel = AsyncMock()
+        client.channel.capabilities = {'wallpaper_delete': 1}
+        client.channel.send.return_value = {'deleted': True}
+        path = 'wallpapers/paper-0123456789abcdef.jpg'
+        self.assertEqual(await client.delete_wallpaper(path), {'deleted': True})
+        client.channel.send.assert_awaited_once_with('wallpaper_delete', path=path)
+        for invalid in ('wallpapers/../x.jpg', 'wallpapers/x.jpg', 'photos/p-0123456789abcdef.jpg'):
+            with self.assertRaises(ValueError):
+                await client.delete_wallpaper(invalid)
+        client.channel.capabilities = {}
+        with self.assertRaises(DeviceError):
+            await client.delete_wallpaper(path)
+
     async def test_clock_edit_sdk_validates_a_single_field_adjustment(self):
         class Channel:
             capabilities = {"clock_edit": 1}
@@ -999,7 +1014,7 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                                                  "desk_set_claude_notifications", "desk_set_antigravity_notifications",
                                                  "desk_set_agent_quota",
                                                  "desk_set_opencode_notifications", "desk_set_workbuddy_notifications",
-                                     "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view", "desk_speak", "desk_read_notification", "desk_dashboard_config", "desk_appearance_config", "desk_add_theme", "desk_add_wallpaper"})
+                                     "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view", "desk_speak", "desk_read_notification", "desk_dashboard_config", "desk_appearance_config", "desk_add_theme", "desk_add_wallpaper", "desk_delete_wallpaper"})
                         for name in ("desk_list_devices", "desk_read_manual"):
                             self.assertIs(tools[name].annotations.readOnlyHint, True)
                             self.assertIs(tools[name].annotations.openWorldHint, False)

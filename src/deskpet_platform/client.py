@@ -412,6 +412,14 @@ class Client:
         async with self._upload, self._operation:
             return await self.channel.send("card_delete", path=path, timeout=30)
 
+    async def delete_wallpaper(self, path):
+        if self.channel.capabilities.get('wallpaper_delete') != 1:
+            raise DeviceError('wallpaper_delete_not_supported')
+        if not isinstance(path, str) or not re.fullmatch(r'wallpapers/[A-Za-z0-9][A-Za-z0-9_-]{0,23}-[0-9a-f]{16}\.jpg', path):
+            raise ValueError('请提供 desk_add_wallpaper 返回的完整壁纸路径。')
+        async with self._upload, self._operation:
+            return await self.channel.send('wallpaper_delete', path=path)
+
     async def prepare_role(self, identity, version, actions, finish_action=None):
         if self.channel.capabilities.get("role_actions") != 1:
             raise DeviceError("role_actions_not_supported")
