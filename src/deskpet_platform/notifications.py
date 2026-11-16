@@ -507,10 +507,11 @@ class NotificationStore:
             db.executemany("UPDATE notifications SET seen=COALESCE(seen,?) WHERE id=?",
                            ((now, identity) for identity in identities))
 
-    def unseen_count(self):
+    def unseen_count(self, *, for_device=False):
         with closing(self._connect()) as db:
             return db.execute("""SELECT COUNT(*) FROM notifications WHERE seen IS NULL
-                AND (category!='response' OR (resolved IS NULL AND dismissed IS NULL))""").fetchone()[0]
+                AND (NOT ? OR category!='response' OR (resolved IS NULL AND dismissed IS NULL))""",
+                              (for_device,)).fetchone()[0]
 
     def has_active_notifications(self):
         with closing(self._connect()) as db:

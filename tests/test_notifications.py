@@ -96,6 +96,8 @@ class NotificationTests(unittest.TestCase):
                 self.assertNotIn("Project", [item["title"] for item in inbox.cache_records()])
             self.assertFalse(second.get(question)["resolved"])
             self.assertFalse(second.get(question)["seen"])
+            self.assertEqual(second.unseen_count(), 2)
+            self.assertEqual(second.unseen_count(for_device=True), 1)
             self.assertNotIn(question, [item["id"] for item in second.list_page(1)["items"]])
             self.assertEqual(second.next_pending()["id"], other)
 

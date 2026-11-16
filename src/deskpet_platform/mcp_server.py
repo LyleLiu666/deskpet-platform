@@ -379,7 +379,7 @@ class BoardSession:
                         try:
                             if self.client.channel.capabilities.get("message_cache") == 1:
                                 await self.refresh_messages()
-                            count = min(65535, self.notifications.unseen_count())
+                            count = min(65535, self.notifications.unseen_count(for_device=True))
                         except (sqlite3.Error, ValueError):
                             self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
                         else:
