@@ -56,7 +56,7 @@ class TranscriptionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_and_oversized_responses_are_rejected(self):
         for response in (
-            httpx.Response(200, content=b"x" * 16385),
+            httpx.Response(200, content=b"x" * 32769),
             httpx.Response(200, json={"text": "\x01"}),
             httpx.Response(200, content=b'{"text":"\\ud800"}'),
             httpx.Response(200, content=gzip.compress(b"{}"), headers={"content-encoding": "gzip"}),
@@ -64,6 +64,16 @@ class TranscriptionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(response=response), self.assertRaises(TranscriptionError):
                 await transcribe_pcm(b"\0\0", api_key="test-key", model="model/name",
                                      transport=httpx.MockTransport(lambda _request: response))
+
+    async def test_text_matches_device_rules_at_boundaries(self):
+        # JSON may escape every character even when the resulting text is short.
+        escaped = b'{"text":"' + b"\\u0061" * 4096 + b'"}'
+        text = await transcribe_pcm(b"\0\0", api_key="test-key", model="model/name",
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=escaped)))
+        self.assertEqual(text, "a" * 4096)
+        with self.assertRaises(TranscriptionError):
+            await transcribe_pcm(b"\0\0", api_key="test-key", model="model/name",
+                transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={"text": "a\x7fb"})))
 
     async def test_network_failure_is_sanitized(self):
         def fail(request):

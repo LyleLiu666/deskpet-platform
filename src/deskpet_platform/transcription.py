@@ -12,7 +12,7 @@ import wave
 import httpx
 
 MAX_PCM_BYTES = 24000 * 2 * 120
-_MAX_RESPONSE_BYTES = 16384
+_MAX_RESPONSE_BYTES = 32768
 _MAX_TEXT_BYTES = 4096
 _ENDPOINT = "https://api.siliconflow.cn/v1/audio/transcriptions"
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z")
@@ -63,7 +63,7 @@ async def transcribe_pcm(pcm: bytes, *, api_key: str, model: str,
         text = result["text"]
         if not isinstance(text, str) or len(text.encode("utf-8")) > _MAX_TEXT_BYTES:
             raise ValueError
-        if any(ord(c) < 32 and c not in "\n\r\t" for c in text):
+        if any((ord(c) < 32 and c not in "\n\r\t") or ord(c) == 127 for c in text):
             raise ValueError
         return text
     except (ValueError, KeyError, TypeError, UnicodeError):
