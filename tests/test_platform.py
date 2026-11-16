@@ -836,6 +836,63 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await client.message_view(mode, identity)
 
+    async def test_authenticated_direct_connection_needs_no_pc_listener(self):
+        loop = asyncio.get_running_loop()
+        completed = loop.create_future()
+
+        async def board(reader, writer):
+            try:
+                marker, identity, nonce = (await reader.readline()).decode().strip().split(",")
+                self.assertEqual((marker, identity), ("H1", DEVICE))
+                device_nonce = "0123456789abcdef" * 2
+                signature = proof(KEY, "device", DEVICE, nonce, device_nonce)
+                writer.write(f"D1,{device_nonce},{signature}\n".encode())
+                await writer.drain()
+                expected = proof(KEY, "host", DEVICE, nonce, device_nonce)
+                self.assertEqual(await reader.readline(), f"H2,{expected}\n".encode())
+                codec = RecordCodec(session_key(KEY, DEVICE, nonce, device_nonce), b"DEVC", b"HOST")
+                self.assertEqual(codec.decode(await reader.readline()), b"P1,direct\n")
+                writer.write(codec.encode(b"P1,ack\n"))
+                await writer.drain()
+                completed.set_result(None)
+            except Exception as error:
+                completed.set_exception(error)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        class Discovery(asyncio.DatagramProtocol):
+            def connection_made(self, transport):
+                self.transport = transport
+
+            def datagram_received(self, data, address):
+                marker, identity, nonce = data.decode().split(",")
+                if (marker, identity) != ("DESK-DIRECT-1", DEVICE):
+                    return
+                packet = f"direct|desk-link-v1|{identity}|{nonce}|".encode()
+                signature = hmac.digest(KEY, packet, "sha256")[:16].hex()
+                self.transport.sendto(b"DESK-DIRECT-1," + b"0" * 32, address)
+                self.transport.sendto(f"DESK-DIRECT-1,{signature}".encode(), address)
+
+        listener = await asyncio.start_server(board, "127.0.0.1", 0)
+        async with listener:
+            port = listener.sockets[0].getsockname()[1]
+            udp, _ = await loop.create_datagram_endpoint(Discovery, local_addr=("127.0.0.1", port))
+            try:
+                with tempfile.TemporaryDirectory() as directory, patch(
+                        "asyncio.start_server", side_effect=AssertionError("PC must not listen for TCP")):
+                    link = WifiLink(DEVICE, KEY, lock_root=directory, discovery_host="127.0.0.1", discovery_port=port)
+                    try:
+                        await link.open(timeout=3)
+                        self.assertEqual(link.connection_direction, "direct")
+                        await link.write(b"P1,direct\n")
+                        self.assertEqual(await asyncio.wait_for(link.readline(), 1), b"P1,ack\n")
+                        await asyncio.wait_for(completed, 1)
+                    finally:
+                        await link.close()
+            finally:
+                udp.close()
+
     async def test_handshake_display_and_disconnect_on_local_wire(self):
         observed = asyncio.get_running_loop().create_future()
         tasks = set()
@@ -946,7 +1003,7 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
 
         class Discovery(asyncio.DatagramProtocol):
             def datagram_received(self, packet, address):
-                if not tasks:
+                if not tasks and packet.startswith(b"DESK-LINK-1,"):
                     tasks.add(asyncio.create_task(board(packet)))
 
         transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
@@ -958,6 +1015,7 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                     return WifiLink(identity, key, lock_root=directory, discovery_host="127.0.0.1", discovery_port=port)
 
                 async with Client(DeviceConfig(DEVICE, KEY), link_factory=link) as client:
+                    self.assertEqual(client.link.connection_direction, "callback")
                     self.assertEqual((await client.status())["pet_page"], 0)
                     self.assertEqual(await client.show_text("Hello"), {"generation": 1, "status": "shown"})
                     touch = await client.next_touch(timeout=2)

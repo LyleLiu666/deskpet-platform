@@ -251,6 +251,9 @@ class BoardSession:
         wireless = getattr(getattr(self.client, "link", None), "wireless", None)
         if type(wireless) is bool:
             status["transport"] = "wifi" if wireless else "usb"
+        direction = getattr(getattr(self.client, "link", None), "connection_direction", None)
+        if direction in ("direct", "callback"):
+            status["wifi_connection_direction"] = direction
         if self.snapshot.get("speed_windows") != status.get("speed_windows"):
             self.token_snapshot = None
         self.snapshot = status
