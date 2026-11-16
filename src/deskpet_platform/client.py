@@ -169,6 +169,47 @@ class Client:
         async with self._operation:
             return await self.channel.send("weather_relay", **snapshot)
 
+    async def poll_capture(self):
+        """Inspect pending recordings on a device that explicitly supports capture."""
+        if self.channel.capabilities.get("capture_pull") != 1:
+            raise DeviceError("capture_not_supported")
+        async with self._operation:
+            return await self.channel.send("capture_poll")
+
+    async def receive_capture(self, metadata):
+        """Receive one bounded PCM recording and clear the device copy."""
+        if self.channel.capabilities.get("capture_pull") != 1:
+            raise DeviceError("capture_not_supported")
+        if not isinstance(metadata, dict):
+            raise DeviceError("invalid_capture_metadata")
+        ticket, size, crc = (metadata.get(k) for k in ("ticket", "bytes", "crc32"))
+        if (type(ticket) is not int or not 0 < ticket <= 0xffffffff or
+            type(size) is not int or not 0 < size <= 24000 * 2 * 120 or size % 2 or
+            type(crc) is not int or not 0 <= crc <= 0xffffffff):
+            raise DeviceError("invalid_capture_metadata")
+        async with self._operation:
+            data = bytearray()
+            finished = False
+            try:
+                for offset in range(0, size, 384):
+                    reply = await self.channel.send("capture_chunk", ticket=ticket, offset=offset)
+                    chunk = reply.get("data") if isinstance(reply, dict) else None
+                    expected = min(384, size - offset)
+                    if (not isinstance(chunk, str) or len(chunk) != expected * 2 or
+                        not re.fullmatch(r"[0-9a-f]+", chunk)):
+                        raise DeviceError("invalid_capture_data")
+                    data.extend(bytes.fromhex(chunk))
+                if zlib.crc32(data) != crc:
+                    raise DeviceError("invalid_capture_data")
+                await self.channel.send("capture_finish", ticket=ticket)
+                finished = True
+                return bytes(data)
+            finally:
+                data[:] = b"\0" * len(data)
+                if not finished:
+                    with suppress(Exception):
+                        await self.channel.send("capture_finish", ticket=ticket)
+
     async def queue_transcript(self, text):
         """Queue recognized text for the device; acceptance does not prove display."""
         if not isinstance(text, str):
