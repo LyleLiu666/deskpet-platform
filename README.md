@@ -22,10 +22,13 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 先读 https://github.com/LyleLiu666/deskpet-platform 的 README 和操作手册。
 用我收到的 Release 链接或版本。若未指定，选最新的稳定版；只有预览版时，
 告诉我正在使用哪个预览版。保留已有 Agent 设置、其他设备的配对和储存卡数据。
+开始前确认系统、硬件架构、当前客户端、可用的采集器包和钩子支持情况。
+告诉我需要配合的步骤，例如手机配网、审核钩子和看屏幕。
 
-1. 在独立目录安装。macOS 用 install-macos.command，Windows 用
+1. 核对 Release 的 SHA256SUMS.txt，在独立目录安装。macOS 用 install-macos.command，Windows 用
    install-windows.ps1，Linux 按「手动安装」使用 Python 虚拟环境。
-   把安装好的 deskpet-platform 绝对路径和 mcp 参数加入当前 Agent 的
+   用 --help 确认安装入口能运行。把 deskpet-platform 的绝对路径
+   （Windows 带 .exe）和 mcp 参数加入当前 Agent 的
    stdio MCP 配置，首次启动前按第 5 步准备好测速参数。按操作手册设置
    Codex 的写卡等待时间。如果当前会话
    读不到新增 MCP，告诉我如何开启新会话并续做配对和提醒。
@@ -35,7 +38,8 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
    手动配网时，请我用手机扫搭搭的两个配网码，在手机上填 Wi-Fi 密码。
    搭搭联网后，用 desk_pair_begin 打开配对页，请我在页面填搭搭显示的
    配对码。空白设备先按刷机说明核对板型与首刷包。用 desk_status 核实
-   选中的搭搭已连接。涉及密码、配对码和密钥时，只在对应的本机界面使用。
+   选中的搭搭已连接。配网卡住时，先问我搭搭屏幕显示到哪一步，再按手册排查。
+   涉及密码、配对码和密钥时，只在对应的本机界面使用。
 3. 配对后，直接调用当前 Agent 对应的提醒工具。Codex 调用
    desk_enable_codex_notifications；Claude Code 调用
    desk_set_claude_notifications(enabled=true)；Antigravity 调用
@@ -45,17 +49,19 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
    工具会为这套配置内的已配对设备启用提醒。按工具结果完成审核或重启。
    Codex 请明确告诉我进入 /hooks 或设置中的 Hooks，审核并信任刚写入的
    搭搭条目。若系统或客户端不支持钩子，告诉我具体原因。
-4. 用新会话完成一个短任务，验证一次真实完成提醒。用
-   desk_list_notifications 检查目标搭搭的新事件，并请我确认屏幕收到提醒。
-   有条件时再验证 Agent 提问、我答复后待应答提醒清除。只有写入了钩子文件
-   或只在电脑端看到记录时，请说明还缺哪一步。若旧会话占用搭搭，先关闭它。
+4. 用新会话完成一个短任务，让真实钩子触发一次。用 desk_list_notifications
+   查目标搭搭的新完成事件及显示回执，请我确认屏幕上的提醒可见、中文正常。
+   手动发文字只能验证连接。待答复提醒有实际触发时再验收。
+   若旧会话占用搭搭，请我关闭对应会话。
 5. 测速可选。按 README 使用当前发行版与系统、架构匹配的独立采集器，
    或复用本机已有的兼容采集器。启动 MCP 时用 --token-probe 指定采集器的
    绝对路径，再用 desk_token_status 验证。无现成采集器时，加
-   --no-token-probe 完成安装、配对和提醒。采集器安装只使用已发布的预编译包。
-6. 若我需要额度显示，按操作手册设置对应来源，并告诉我从搭搭的
-   「监控设置」切换。最后告诉我连接、提醒和测速各自的验证结果，
-   以及还需要我做的操作。
+   --no-token-probe 完成安装、配对和提醒。采集器安装只用已发布的预编译包，
+   不下载编译工具链，也不从源码编译。
+6. 分别汇报配对、完成提醒、待答复提醒和测速。用「已验证」附证据，
+   「已配置但未验证」写缺少的确认，「未启用」说明原因和重试方法。
+   我确认屏幕上出现真实完成提醒后，才算完成安装验收。
+   若我需要额度显示，按操作手册设置，再从搭搭的「监控设置」切换。
 ```
 
 ## 给搭搭加一个角色
