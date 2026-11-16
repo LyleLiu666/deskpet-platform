@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main, 'codex/deskpet-probe-*']
-    paths: ['tools/*token_probe.py', '.github/workflows/token-probe.yml']
+    paths: ['tools/*token_probe.py', 'tools/bundle_desktop.py', 'tools/verify_desktop_bundle.py', '.github/workflows/token-probe.yml']
   pull_request:
-    paths: ['tools/*token_probe.py', '.github/workflows/token-probe.yml']
+    paths: ['tools/*token_probe.py', 'tools/bundle_desktop.py', 'tools/verify_desktop_bundle.py', '.github/workflows/token-probe.yml']
 
 permissions:
   contents: read
@@ -37,8 +37,23 @@ jobs:
           dotnet-version: '10.0.400'
       - name: Build and verify with a synthetic session
         run: python tools/build_token_probe.py dist-probe
+      - name: Assemble the desktop installer with its probe
+        shell: bash
+        run: |
+          python -m pip install build==1.2.2.post1
+          python -m build --sdist --outdir dist-source
+          python -c 'import hashlib; from pathlib import Path; paths = sorted(Path("dist-source").glob("*.tar.gz")) + sorted(Path("dist-probe").glob("AgentSpeedProbe-*")); Path("bundle-sums.txt").write_text("".join(hashlib.sha256(path.read_bytes()).hexdigest() + "  " + path.name + "\n" for path in paths), encoding="utf-8")'
+          python tools/bundle_desktop.py dist-source/*.tar.gz dist-probe/AgentSpeedProbe-* bundle-sums.txt dist-desktop
+      - name: Install the desktop archive and start its bundled probe
+        shell: bash
+        run: python tools/verify_desktop_bundle.py dist-desktop/*
       - uses: actions/upload-artifact@v4
         with:
           name: AgentSpeedProbe-${{ matrix.target }}
           path: dist-probe/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeskPet-desktop-${{ matrix.target }}
+          path: dist-desktop/
           if-no-files-found: error

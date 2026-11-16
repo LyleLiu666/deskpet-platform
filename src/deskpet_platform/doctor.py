@@ -4,43 +4,17 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import platform
 import shlex
 import shutil
 import sqlite3
-import subprocess
 
-from .agent_speed_probe import find_installed_probe
+from .agent_speed_probe import find_installed_probe, host_platform
 from .codex_hook import EVENT_MATCHERS, CLI_EVENT_MATCHERS, _load, _matches, _validate_groups, hook_command
 from .device_registry import DeviceRegistry
 from .notifications import NotificationStore, codex_home
 
 
 CLIENTS = ("codex", "claude_code", "antigravity", "opencode", "workbuddy", "workbuddy_ai")
-
-
-def host_platform():
-    system = platform.system()
-    machine = platform.machine().lower()
-    if system == "Darwin" and machine == "x86_64":
-        result = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.optional.arm64"],
-                                capture_output=True, text=True, check=False)
-        if result.stdout.strip() == "1":
-            machine = "arm64"
-    if system == "Windows":
-        machine = os.environ.get("PROCESSOR_ARCHITEW6432", machine).lower()
-    machine = {"amd64": "x64", "x86_64": "x64", "aarch64": "arm64"}.get(machine, machine)
-    assets = {
-        ("Darwin", "arm64"): "macos-arm64.tar.gz",
-        ("Windows", "x64"): "windows-x64.zip",
-        ("Linux", "arm64"): "linux-arm64.tar.gz",
-        ("Linux", "x64"): "linux-x64.tar.gz",
-    }
-    asset = assets.get((system, machine))
-    if system == "Linux" and platform.libc_ver()[0] != "glibc":
-        asset = None
-    return {"system": system, "architecture": machine,
-            "release_probe_asset": f"AgentSpeedProbe-{asset}" if asset else None}
 
 
 def _hook_settings(client, config):

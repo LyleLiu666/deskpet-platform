@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deskpet-platform"
-version = "0.1.0rc3"
+version = "0.1.0rc4"
 description = "Local Wi-Fi SDK and MCP for DeskPet-compatible displays"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,7 +28,7 @@ deskpet-platform = "deskpet_platform.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-deskpet_platform = ["manuals/*.md", "assets/agent_icons/*.png", "assets/agent_icons/LICENSE", "assets/agent_icons/README.md", "assets/fonts/*", "opencode_plugin.js"]
+deskpet_platform = ["manuals/*.md", "assets/agent_icons/*.png", "assets/agent_icons/LICENSE", "assets/agent_icons/README.md", "assets/fonts/*", "assets/token_probes/*/*", "assets/token_probes/*/licenses/*", "opencode_plugin.js"]
 
 [tool.uv]
 cache-keys = [
@@ -39,5 +39,6 @@ cache-keys = [
     { file = "src/deskpet_platform/manuals/*.md" },
     { file = "src/deskpet_platform/assets/agent_icons/*" },
     { file = "src/deskpet_platform/assets/fonts/*" },
+    { file = "src/deskpet_platform/assets/token_probes/**/*" },
     { file = "src/deskpet_platform/opencode_plugin.js" },
 ]

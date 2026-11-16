@@ -25,7 +25,8 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 开始前确认系统、硬件架构、当前客户端、可用的采集器包和钩子支持情况。
 告诉我需要配合的步骤，例如手机配网、审核钩子和看屏幕。
 
-1. 核对 Release 的 SHA256SUMS.txt，在独立目录安装。macOS 用 install-macos.command，Windows 用
+1. 优先选 Release 中与系统和架构匹配的桌面包，核对 SHA256SUMS.txt。
+   在独立目录解压安装。macOS 用 install-macos.command，Windows 用
    install-windows.ps1，Linux 按「手动安装」使用 Python 虚拟环境。
    用 --version 确认安装版本。带入旧版时可用 --help 检查入口。
    把 deskpet-platform 的绝对路径
@@ -57,11 +58,9 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
    若旧会话占用搭搭，请我关闭对应会话。
    新会话可以先运行 deskpet-platform doctor --client <当前客户端> 查看安装
    进度。按实际配置传入 --config（放在 doctor 前）、--device-id 或 --shared-config。
-5. 测速可选。按 README 使用当前发行版与系统、架构匹配的独立采集器，
-   或复用本机已有的兼容采集器。启动 MCP 时用 --token-probe 指定采集器的
-   绝对路径，再用 desk_token_status 验证。无现成采集器时，加
-   --no-token-probe 完成安装、配对和提醒。采集器安装只用已发布的预编译包，
-   不下载编译工具链，也不从源码编译。
+5. 测速可选。桌面包自带采集器，启用测速时直接用 mcp 启动。用
+   desk_token_status 验证读数。如果我选择跳过测速，用 mcp --no-token-probe。
+   只用预编译采集器。当前系统没有兼容采集器时，继续完成配对和提醒。
 6. 分别汇报配对、完成提醒、待答复提醒和测速。用「已验证」附证据，
    「已配置但未验证」写缺少的确认，「未启用」说明原因和重试方法。
    我确认屏幕上出现真实完成提醒后，才算完成安装验收。
@@ -87,22 +86,22 @@ python3 -m venv .venv
 .venv/bin/deskpet-platform status
 ```
 
-已有本地 wheel 文件时，可将上面的 `pip install .` 改为 `pip install /绝对路径/deskpet_platform-0.1.0rc3-py3-none-any.whl`。
+已有本地 wheel 文件时，可将上面的 `pip install .` 改为 `pip install /绝对路径/deskpet_platform-0.1.0rc4-py3-none-any.whl`。
 
 用 MCP 的 `desk_pair_usb` 配对已登记的搭搭。提供本机私有 Wi-Fi 凭据文件时，同一步也可完成配网。需要手动设置时，可扫描搭搭上的配网二维码，再用 `desk_pair_begin` 打开本机配对页。一台搭搭同一时间由一套服务连接。
 
 在 MCP 客户端中以 stdio 注册 `.venv/bin/deskpet-platform mcp`，配置时使用绝对路径。设备支持时钟、相册、天气、Token 状态、Codex 消息和可插拔角色。操作与开发手册也可通过 MCP 读取。
 
-测速需要独立的 `AgentSpeedProbe`。在所用的 [搭搭 Release](https://github.com/LyleLiu666/deskpet-platform/releases) 附件里选择对应的预编译包：
+在 [搭搭 Release](https://github.com/LyleLiu666/deskpet-platform/releases) 选择对应系统的桌面包。桌面包自带 `AgentSpeedProbe`，安装后用 `mcp` 启动即可识别。安装方法与源码包相同。
 
-| 系统 | 采集器包 |
+| 系统 | RC4 桌面包 |
 | --- | --- |
-| macOS 14 或更新，Apple 芯片 | `AgentSpeedProbe-macos-arm64.tar.gz` |
-| Windows x64 | `AgentSpeedProbe-windows-x64.zip` |
-| Linux x64（glibc） | `AgentSpeedProbe-linux-x64.tar.gz` |
-| Linux arm64（glibc） | `AgentSpeedProbe-linux-arm64.tar.gz` |
+| macOS 14 或更新，Apple 芯片 | `deskpet_platform-0.1.0rc4-macos-arm64.tar.gz` |
+| Windows x64 | `deskpet_platform-0.1.0rc4-windows-x64.zip` |
+| Linux x64（glibc） | `deskpet_platform-0.1.0rc4-linux-x64.tar.gz` |
+| Linux arm64（glibc） | `deskpet_platform-0.1.0rc4-linux-arm64.tar.gz` |
 
-核对该 Release 的 `SHA256SUMS.txt` 后，解压到固定目录。将 MCP 的启动参数设为 `mcp --token-probe <解压后采集器的绝对路径>`，在新会话中运行一个任务并检查 `desk_token_status`。安装预编译包无需 Swift、.NET SDK 或 Agent Speed 桌面应用。也可将程序放入设备配置目录的 `bin/`。Windows 依次查找 `AgentSpeedProbe.exe` 和 `AgentSpeed.Probe.exe`，macOS 和 Linux 查找 `AgentSpeedProbe`。旧版 Release 或当前架构缺少采集器时，用 `mcp --no-token-probe` 跳过测速。各包中的 `SOURCE.txt` 和 `licenses/` 记录对应的 [Agent Speed 源码](https://github.com/zoefix/agent-speed/tree/29dffc4e6fbe1da435071e40781b1571dd45ac22) 与许可证。
+测速可用 `mcp --no-token-probe` 关闭。使用通用包时，可以继续配对和接收提醒，也可用 `mcp --token-probe <独立采集器的绝对路径>` 启用测速。设备配置目录 `bin/` 内已装的采集器优先于随包版本。Windows 查找 `AgentSpeedProbe.exe` 和 `AgentSpeed.Probe.exe`，macOS 和 Linux 查找 `AgentSpeedProbe`。运行一个任务后用 `desk_token_status` 确认读数。采集器保留 [Agent Speed 源码链接](https://github.com/zoefix/agent-speed/tree/29dffc4e6fbe1da435071e40781b1571dd45ac22) 和许可证。
 
 支持的设备还可分别开启电脑 CPU 和内存使用率，默认关闭。
 

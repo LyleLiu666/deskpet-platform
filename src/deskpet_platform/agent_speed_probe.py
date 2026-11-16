@@ -5,9 +5,38 @@ from contextlib import suppress
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import platform as platform_info
+import subprocess
 from sys import platform
 import time
+
+
+def host_platform():
+    system = platform_info.system()
+    machine = platform_info.machine().lower()
+    if system == "Darwin" and machine == "x86_64":
+        result = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.optional.arm64"],
+                                capture_output=True, text=True, check=False)
+        if result.stdout.strip() == "1":
+            machine = "arm64"
+    if system == "Windows":
+        machine = os.environ.get("PROCESSOR_ARCHITEW6432", machine).lower()
+    machine = {"amd64": "x64", "x86_64": "x64", "aarch64": "arm64"}.get(machine, machine)
+    assets = {
+        ("Darwin", "arm64"): "macos-arm64.tar.gz",
+        ("Windows", "x64"): "windows-x64.zip",
+        ("Linux", "arm64"): "linux-arm64.tar.gz",
+        ("Linux", "x64"): "linux-x64.tar.gz",
+    }
+    asset = assets.get((system, machine))
+    if system == "Darwin" and platform_info.mac_ver()[0].split(".")[0] in {"10", "11", "12", "13"}:
+        asset = None
+    if system == "Linux" and platform_info.libc_ver()[0] != "glibc":
+        asset = None
+    return {"system": system, "architecture": machine,
+            "release_probe_asset": f"AgentSpeedProbe-{asset}" if asset else None}
 
 
 def find_installed_probe(config_path):
@@ -17,6 +46,12 @@ def find_installed_probe(config_path):
         candidate = bin_dir / name
         if candidate.is_file():
             return candidate
+    asset = host_platform()["release_probe_asset"]
+    if asset:
+        target = asset.removeprefix("AgentSpeedProbe-").removesuffix(".tar.gz").removesuffix(".zip")
+        bundled = Path(__file__).with_name("assets") / "token_probes" / target / names[0]
+        if bundled.is_file() and (platform == "win32" or os.access(bundled, os.X_OK)):
+            return bundled
     return None
 
 
