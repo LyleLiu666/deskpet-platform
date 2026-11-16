@@ -1,7 +1,8 @@
 """Install and receive local Codex hooks without replacing existing hooks."""
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import shlex
 import stat
 import subprocess
@@ -161,6 +162,44 @@ def _remove_from_config(config, command, matchers):
     return removed
 
 
+def generated_hook_target(command):
+    if not isinstance(command, str):
+        return None
+    if command.startswith("powershell.exe "):
+        from .windows_hook_command import generated_arguments
+        arguments = generated_arguments(command)
+        return ("windows", arguments) if arguments is not None else None
+    try:
+        executable, *arguments = shlex.split(command)
+    except ValueError:
+        return None
+    python = PurePosixPath(executable)
+    if (python.is_absolute() and re.fullmatch(r"python(?:3(?:\.[0-9]+t?)?)?", python.name)
+            and arguments[:3] == ["-m", "deskpet_platform", "--config"]
+            and len(arguments) >= 5 and shlex.join([executable, *arguments]) == command):
+        return ("posix", tuple(arguments))
+    return None
+
+
+def _previous_installations(config, command, previous_commands, matchers):
+    previous_commands = tuple(previous_commands)
+    targets = {generated_hook_target(item) for item in (command, *previous_commands)} - {None}
+    if not targets:
+        return previous_commands
+    matches = list(previous_commands)
+    for event in matchers:
+        groups = config.get("hooks", {}).get(event, [])
+        _validate_groups(groups, event)
+        for group in groups:
+            for hook in group["hooks"]:
+                if not isinstance(hook, dict) or hook.get("type") != "command":
+                    continue
+                existing = hook.get("command")
+                if existing != command and generated_hook_target(existing) in targets and existing not in matches:
+                    matches.append(existing)
+    return matches
+
+
 def configure_hooks(path, command, previous_commands, *, enabled, matchers, private):
     """Publish a single validated update for the shared command and all old commands."""
     path = Path(path)
@@ -174,7 +213,7 @@ def configure_hooks(path, command, previous_commands, *, enabled, matchers, priv
         config, original = _load(path, private=private)
         changed = (_add_to_config(config, command, matchers) if enabled else
                    _remove_from_config(config, command, matchers))
-        for previous in previous_commands:
+        for previous in _previous_installations(config, command, previous_commands, matchers):
             changed = _remove_from_config(config, previous, matchers) or changed
         if changed:
             _write(path, config, original=original, private=private)

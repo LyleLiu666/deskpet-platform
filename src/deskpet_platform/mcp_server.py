@@ -28,7 +28,7 @@ from .agent_speed_probe import AgentSpeedProbe, find_installed_probe
 from .card_upload import MAX_FILE_BYTES, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
 from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS, DASHBOARD_ROTATION, DASHBOARD_INTERVALS, _appearance_theme, _appearance_wallpaper
-from .codex_hook import configure_codex_hooks, configure_hooks, hook_command, install_hook, remove_hook
+from .codex_hook import configure_codex_hooks, configure_hooks, hook_command
 from .codex_quota import fetch_quota
 from .computer_metrics import ComputerMetrics, DisplayPreferences
 from .device_registry import DeviceRegistry
@@ -1610,14 +1610,8 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         require_notification_hooks(enabled, os.name, hook)
         command, previous = notification_commands(device_id, hook, *arguments)
 
-        def apply():
-            changed = configure(command, enabled=enabled)
-            for legacy in previous:
-                changed = configure(legacy, enabled=False) or changed
-            return changed
-
         async with hook_configuration_lock:
-            return await asyncio.to_thread(apply)
+            return await asyncio.to_thread(configure, command, previous, enabled=enabled)
 
     sessions = DeviceSessions(registry, session, make_session, start_session)
     portal = None
@@ -2049,7 +2043,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
         path = settings_path()
         changed = await configure_notifications(enabled, device_id, "antigravity-hook",
-            lambda command, *, enabled: configure(path, command, enabled=enabled))
+            lambda command, previous, *, enabled: configure(path, command, enabled=enabled, previous_commands=previous))
         return {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path)}
 
     @server.tool()
@@ -2068,11 +2062,10 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     @server.tool()
     async def desk_set_opencode_notifications(enabled: bool, device_id: str | None = None) -> dict[str, Any]:
         """为所有已配对设备启用或关闭 OpenCode 的完成、提问和授权提醒。"""
-        from .opencode_feedback import configure, plugin_path
+        from .opencode_feedback import configure_registry, plugin_path
 
-        path = plugin_path(hook_command(registry.default_path, "opencode-hook"))
-        changed = await configure_notifications(enabled, device_id, "opencode-hook",
-            lambda command, *, enabled: configure(plugin_path(command), command, enabled=enabled))
+        path = plugin_path(hook_command(shared_config, "opencode-hook"))
+        changed = await configure_notifications(enabled, device_id, "opencode-hook", configure_registry)
         return {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path),
                 "next_step": "重启 OpenCode 后验证提醒。"}
 
@@ -2085,7 +2078,8 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
         path = settings_path(edition)
         changed = await configure_notifications(enabled, device_id, "workbuddy-hook",
-            lambda command, *, enabled: (install_hook if enabled else remove_hook)(path, command, matchers=MATCHERS, private=False),
+            lambda command, previous, *, enabled: configure_hooks(
+                path, command, previous, enabled=enabled, matchers=MATCHERS, private=False),
             "--edition", edition)
         if enabled:
             return {"status": "configured", "added": changed, "config": str(path),

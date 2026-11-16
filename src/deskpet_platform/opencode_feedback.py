@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 
+from .codex_hook import generated_hook_target
 from .file_lock import acquire
 import shlex
 import stat
@@ -51,6 +52,50 @@ def configure(path, command, *, enabled):
     finally:
         os.close(lock)
     return True
+
+
+def _installed_command(path, template):
+    try:
+        data = _read_plugin(path)
+        if data is None:
+            return None
+        line = next(row for row in data.splitlines(keepends=True) if row.startswith(b"const command = "))
+        arguments = json.loads(line.removeprefix(b"const command = ").removesuffix(b";\n"))
+        if not isinstance(arguments, list) or not all(isinstance(item, str) for item in arguments):
+            return None
+        command = shlex.join(arguments)
+        pristine = data.replace(line, b"const command = " + COMMAND_MARKER + b";\n", 1)
+        if path == plugin_path(command) and (pristine == template or
+                hashlib.sha256(pristine).hexdigest() == PREVIOUS_PLUGIN_SHA256):
+            return command
+    except (OSError, ValueError, StopIteration):
+        pass
+    return None
+
+
+def configure_registry(command, previous_commands, *, enabled):
+    path = plugin_path(command)
+    if not enabled and not path.parent.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = os.open(path.parent / ".deskpet-plugins.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        acquire(lock)
+        targets = {generated_hook_target(item) for item in (command, *previous_commands)} - {None}
+        obsolete = set(previous_commands)
+        template = Path(__file__).with_name("opencode_plugin.js").read_bytes()
+        for existing in path.parent.glob("deskpet-*.js"):
+            if existing == path:
+                continue
+            installed = _installed_command(existing, template)
+            if generated_hook_target(installed) in targets:
+                obsolete.add(installed)
+        changed = configure(path, command, enabled=enabled)
+        for old in sorted(obsolete - {command}):
+            changed = configure(plugin_path(old), old, enabled=False) or changed
+        return changed
+    finally:
+        os.close(lock)
 
 
 def _read_plugin(path):

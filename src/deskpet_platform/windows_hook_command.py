@@ -1,5 +1,7 @@
 """Fail-open Windows hook proxy that does not persist incoming event data."""
 import base64
+from pathlib import PureWindowsPath
+import re
 import subprocess
 
 
@@ -43,12 +45,35 @@ exit 0
 '''.lstrip()
 
 
+_PREFIX = "powershell.exe -NoProfile -NonInteractive -EncodedCommand "
+_PAYLOAD = re.compile(re.escape(_SCRIPT).replace("__EXE__", r"([A-Za-z0-9+/=]+)").replace(
+    "__ARGS__", r"([A-Za-z0-9+/=]+)"))
+
+
+def generated_arguments(command):
+    """Return arguments only for the exact launcher template DeskPet generates."""
+    if not command.startswith(_PREFIX) or len(command) > 7900:
+        return None
+    try:
+        script = base64.b64decode(command[len(_PREFIX):], validate=True).decode("utf-16le")
+        fields = _PAYLOAD.fullmatch(script)
+        if fields is None:
+            return None
+        executable, arguments = (base64.b64decode(field, validate=True).decode("utf-8") for field in fields.groups())
+    except (UnicodeError, ValueError):
+        return None
+    path = PureWindowsPath(executable)
+    if path.is_absolute() and path.name.lower() == "python.exe":
+        return arguments
+    return None
+
+
 def build(executable, arguments):
     def encode(value):
         return base64.b64encode(value.encode("utf-8")).decode("ascii")
     script = _SCRIPT.replace("__EXE__", encode(str(executable))).replace(
         "__ARGS__", encode(subprocess.list2cmdline(arguments)))
-    command = "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + base64.b64encode(
+    command = _PREFIX + base64.b64encode(
         script.encode("utf-16le")).decode("ascii")
     if len(command) > 7900:
         raise ValueError("提醒命令过长，未修改 Agent 设置。")
