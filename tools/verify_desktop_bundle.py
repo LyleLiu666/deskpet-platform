@@ -11,7 +11,7 @@ import tempfile
 
 def verify(archive):
     with tempfile.TemporaryDirectory(prefix="DeskPet clean install ") as temporary:
-        root = Path(temporary)
+        root = Path(temporary).resolve()
         source = root / "source"
         shutil.unpack_archive(archive, source, filter="data" if archive.name.endswith(".tar.gz") else None)
         package, = source.iterdir()
