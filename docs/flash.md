@@ -13,4 +13,18 @@
 - **首次刷机包**用于空白开发板，包含引导程序、分区表、启动数据和应用镜像。刷写启动数据会重置启动分区选择。已有固件的小板请先备份 Flash 和储存卡。
 - **升级包**用于装过兼容镜像的小板。先读回分区表并与包内校验值比对，通过后只更新应用区。Wi-Fi、配对设置和储存卡文件位于其他存储区域。
 
-正式发布的下载和逐步刷机命令见 [GitHub Releases](https://github.com/LyleLiu666/deskpet-platform/releases)。当前固件下载尚未开放。已有兼容固件的小板可以按[操作手册](../src/deskpet_platform/manuals/operations.md)连接电脑。
+在 [RC1 下载页](https://github.com/LyleLiu666/deskpet-platform/releases/tag/v0.1.0-rc1) 可取得电脑端安装包与 `deskpet-esp32-2432s028-0.1.0-rc.53-factory.zip`。空白板使用这个首刷包，下载后可用同页的 `SHA256SUMS-firmware.txt` 校验 ZIP。已有兼容固件的小板可直接进入[配网与配对](../src/deskpet_platform/manuals/operations.md#手机扫码配网和配对)。
+
+## 首次刷机
+
+1. 对照上面的板型和接线。用支持数据传输的 USB 线连接小板的数据口。Windows 可在设备管理器的「端口」中查新出现的 `COM` 号；macOS 可在插拔前后用 `ls /dev/cu.*` 对照新出现的串口。关闭占用该串口的工具或 Agent。
+2. 解压首刷包，进入解压目录。macOS 用 `shasum -a 256 -c SHA256SUMS` 校验镜像；Windows 在 PowerShell 运行 `Get-ChildItem -Filter *.bin | Get-FileHash -Algorithm SHA256`，逐项与包内 `SHA256SUMS` 比对。全部匹配后再继续。
+3. 安装 Python 后，在解压目录创建刷机环境。macOS 运行 `python3 -m venv .flash-venv`，再运行 `source .flash-venv/bin/activate`。Windows PowerShell 运行 `py -3 -m venv .flash-venv`，以下所有 `python` 换成 `.\.flash-venv\Scripts\python.exe`。然后用 `python -m pip install esptool==4.5.1` 安装刷机工具。
+4. 将下面的 `PORT` 换成实际串口，例如 Windows 的 `COM5` 或 macOS 的 `/dev/cu.usbserial-140`。先运行第一行，确认识别到 ESP32 和 4 MB Flash，再运行第二行写入并校验。已有固件时，按上节选择升级包。
+
+```sh
+python -m esptool --chip esp32 --port PORT flash_id
+python -m esptool --chip esp32 --port PORT write_flash --verify 0x1000 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 firmware.bin
+```
+
+如果找不到串口，先换数据线或数据口。若识别到串口但无法连接芯片，对照板型说明进入下载模式后重试。写入校验成功后，重启小板，打开 Wi-Fi 设置，用手机扫码配网。让电脑与小板处于同一局域网，再按[操作手册](../src/deskpet_platform/manuals/operations.md#手机扫码配网和配对)完成配对。最后让 Agent 查询设备状态并让小板显示一行测试文字。

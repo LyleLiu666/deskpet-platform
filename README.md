@@ -4,7 +4,7 @@
 
 DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非商用使用、修改和分发。商用需要另行获得授权。随附的图标沿用[各自的许可证](src/deskpet_platform/assets/agent_icons/LICENSE)。
 
-本仓库提供电脑端源码。兼容的开发板是 **ESP32-2432S028 双 USB 版**（ST7789 屏幕、XPT2046 触摸、4 MiB Flash）。已预刷兼容固件的设备可直接配对。板端二进制包的发布状态见[刷机说明](docs/flash.md)。
+本仓库提供电脑端源码。兼容的开发板是 **ESP32-2432S028 双 USB 版**（ST7789 屏幕、XPT2046 触摸、4 MiB Flash）。已预刷兼容固件的小板可直接配网和配对。空白板需要单独取得对应板型的固件首刷包，再按[刷机说明](docs/flash.md)操作。
 
 [交给你的 Agent 安装](#交给你的-agent-安装) · [手动安装](#手动安装) · [开始使用二维码](#开始使用二维码)
 
@@ -19,9 +19,11 @@ DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非�
 ```text
 请帮我在这台电脑上安装和配置 DeskPet，并只操作我选中的小板。
 
-先阅读 https://github.com/LyleLiu666/deskpet-platform 的 README 和操作手册，
-优先使用已发布的稳定 Release 源码包。若没有稳定 Release，请告诉我并使用
-公开仓库源码；不要覆盖我的现有项目、Agent 配置或其他设备的配对。
+先阅读 https://github.com/LyleLiu666/deskpet-platform 的 README 和操作手册。
+使用我收到的电脑端 Release 源码包或指定版本链接。若我没有指定版本，
+优先使用已发布的稳定版；仅有预览版时，告诉我将使用哪个版本。
+如果我的小板还未刷固件，先按刷机说明确认板型和对应的首刷包。
+保留我的现有项目、Agent 配置和其他设备的配对。
 
 1. 在独立目录按 README 安装。macOS 使用 install-macos.command；
    Windows 使用 install-windows.ps1。把安装后的 deskpet-platform 绝对路径注册为
