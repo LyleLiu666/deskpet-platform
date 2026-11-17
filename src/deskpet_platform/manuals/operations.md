@@ -2,11 +2,11 @@
 
 ## 首次连接
 
-1. 在电脑本机安装公开底座包，准备 Python 3.11 至 3.14 或 uv。在 Agent 中配置 stdio MCP，命令为安装得到的 `deskpet-platform` 的绝对路径，参数为 `mcp`。[Python 下载](https://www.python.org/downloads/macos/)
-2. 用 USB 将小板连接到电脑。调用 `desk_pair_usb`，把已确认的串口填入 `port`，把登记的设备 MAC 填入 `expected_identity`。需要同时配网时，在 `credentials_file` 中提供本机 Wi‑Fi 凭据文件的绝对路径。文件权限为 `0600`，JSON 包含 `ssid` 和 `password` 两个字符串，开放网络的密码为空。
-3. 用 `desk_status` 检查连接，再调用 `desk_show_text`。返回 `shown` 或 `finished` 表示设备报告实际绘制。小板已联网但电脑暂时无法访问时，可以通过 USB 完成配对。若 USB 配网失败，小板会尝试恢复原有网络。
+1. 在电脑本机将对应系统的桌面包解压安装到长期保留的用户目录（不要放在系统临时目录或下载目录；Windows 请在原生 Windows 环境安装，不要装在 WSL 内），准备 Python 3.11 至 3.14 或 uv。在 Agent 中配置 stdio MCP，命令为安装得到的 `deskpet-platform` 绝对路径（Windows 为 `.venv\Scripts\deskpet-platform.exe`），参数为 `mcp`。[macOS Python 下载](https://www.python.org/downloads/macos/) · [Windows Python 下载](https://www.python.org/downloads/windows/)
+2. 若用支持数据传输的 USB 线将搭搭插在电脑上，先用 `deskpet-platform find-usb <串口>` 或 `desk_find_usb_device` 读取并核对该串口上的设备 MAC 与 UUID，再调用 `desk_pair_usb`（将已确认的串口填入 `port`，核对一致的设备 MAC 填入 `expected_identity`）。Windows 请先用手机扫搭搭屏幕上的配网二维码连好 Wi-Fi，再调 `desk_pair_usb` 配对；macOS 和 Linux 也可在 `credentials_file` 中传入本机私有 Wi‑Fi 凭据文件绝对路径同一步配网（文件权限须为 `0600`，JSON 包含 `ssid` 和 `password` 两个字符串，开放网络的密码为空）。
+3. 用 `desk_status` 检查连接，再调用 `desk_show_text`。返回 `shown` 或 `finished` 表示设备报告实际绘制。搭搭已连 Wi-Fi 但电脑局域网暂时无法发现时，也可以先通过 USB 完成配对。若 USB 配网失败，搭搭会尝试恢复原有网络。
 
-### 注册 Codex 和 Claude Code
+### 在 Agent 中注册 MCP
 
 以实际安装后的程序绝对路径替换示例路径，在终端分别执行需要的命令。已有同名 `deskpet` 条目时，先检查并更新该条目，不要覆盖其他 MCP 配置。带空格的路径需要保留引号。
 
@@ -15,7 +15,7 @@ codex mcp add deskpet -- "/安装路径/deskpet-platform" mcp
 claude mcp add --scope user deskpet -- "/安装路径/deskpet-platform" mcp
 ```
 
-Windows 路径指向 `.venv\Scripts\deskpet-platform.exe`。设置后打开新的 Agent 会话，调用 `desk_list_devices` 验证连接。未安装测速采集器时可在 `mcp` 后加 `--no-token-probe`；这不会替用户安装额外软件。其他 Agent 若支持 stdio MCP，可用相同程序路径和参数，具体配置方式以对应 Agent 的说明为准。
+Windows 路径指向 `.venv\Scripts\deskpet-platform.exe`。未安装兼容测速采集器或选择跳过测速时，在 `mcp` 后加 `--no-token-probe`；这不会替用户安装额外软件。Antigravity、OpenCode、WorkBuddy 等其他支持 stdio MCP 的客户端，在各自的 MCP 配置文件中填入相同的可执行文件绝对路径与参数数组（`["mcp"]` 或 `["mcp", "--no-token-probe"]`）即可。设置后打开新的 Agent 会话，调用 `desk_list_devices` 验证 MCP 已生效。
 
 ### Codex 的写卡等待时间
 
@@ -32,11 +32,11 @@ tool_timeout_sec = 1200
 
 ### 手机扫码配网和配对
 
-1. 给小板供电。完整显示固件从应用菜单进入 **桌面设置 → Wi-Fi**。参考固件在屏幕未显示配网二维码时，长按屏幕 3 秒打开 Wi-Fi 设置。用手机扫描左侧二维码加入小板热点，再扫描右侧二维码打开设置页。选择 2.4 GHz Wi-Fi 并输入密码，列表中找不到网络时可手动输入名称。联网后，让手机和电脑回到与小板相同的网络。
-2. 调用 `desk_pair_begin` 打开电脑本机配对页。完整显示固件从应用菜单进入 **桌面设置 → 电脑配对**。参考固件尚未校准触屏时，轻触已联网的搭搭显示配对码。用手机扫描配对码，将内容粘贴到本机页面。自动发现失败时，在原配对页面填写搭搭显示的局域网地址，重新输入配对码后重试。也可在本机终端运行 `deskpet-platform pair`，将码粘贴到隐藏输入框。
+1. 给搭搭供电。完整显示固件从应用菜单进入 **桌面设置 → Wi-Fi**。参考固件在屏幕未显示配网二维码时，长按屏幕 3 秒打开 Wi-Fi 设置。用手机扫描左侧二维码加入搭搭热点，再扫描右侧二维码打开设置页。选择 2.4 GHz Wi-Fi 并输入密码，列表中找不到网络时可手动输入名称。联网后，让手机和电脑回到与搭搭相同的局域网。
+2. 如果搭搭未插电脑 USB 数据线，调用 `desk_pair_begin` 打开电脑本机配对网页。完整显示固件从应用菜单进入 **桌面设置 → 电脑配对**（参考固件尚未校准触屏时，轻触已联网的搭搭显示配对码）。用手机扫描屏幕上的配对码二维码并复制，粘贴到本机配对网页。自动发现失败时，在原配对页面填写搭搭屏幕显示的局域网 IP 地址，重新输入配对码后重试。也可在本机终端运行 `deskpet-platform pair`，将配对码粘贴到隐藏输入框。
 3. 用 `desk_pair_status` 查看配对页结果，再用 `desk_status` 检查连接。
 
-运行 `deskpet-platform doctor --client codex` 可查看本机已配对设备、钩子文件、最近触发的事件和该设备保存的显示回执。多个设备时加 `--device-id`。独立接收端使用 `deskpet-platform --config <接收端配置> doctor --client codex --shared-config <原设备配置>`。其他客户端使用 `claude_code`、`antigravity`、`opencode`、`workbuddy` 或 `workbuddy_ai`。`doctor` 可在 MCP 使用搭搭时运行。写入配置后，仍要在 Agent 界面完成适用的信任步骤，并在新会话触发一次提醒。用 `desk_status` 验证当前连接，用 `desk_token_status` 验证实际测速读数。
+运行 `deskpet-platform doctor --client codex` 可查看本机已配对设备、钩子文件、最近触发的事件和该设备保存的显示回执。多个设备时加 `--device-id`。独立接收端使用 `deskpet-platform --config <接收端配置> doctor --client codex --shared-config <原设备配置>`。`--client` 支持 `codex`、`claude_code`、`antigravity`、`opencode`、`workbuddy` 和 `workbuddy_ai`；使用其他 MCP 客户端时无需运行 `doctor`，直接用 `desk_list_devices` 和 `desk_status` 检查连接即可。`doctor` 可在 MCP 连接搭搭时同时运行。写入钩子配置后，仍要在 Agent 界面完成适用的信任或重启步骤，并在新会话触发一次真实提醒。用 `desk_status` 验证当前连接，用 `desk_token_status` 验证实际测速读数。
 
 连接显示 `busy` 时，停止另一个控制同一设备的服务或 MCP 实例。连接显示 `offline` 时，先检查设备供电、Wi‑Fi 和配对。运行 MCP 时用工具查状态，终端的独立 `status` 也要临时占用连接。若当前 MCP 观察到连接中断，`desk_status` 的 `last_link_loss` 会保留首个错误、连接恢复时间，以及有新读数送达时的测速恢复时间。单位为毫秒，从该次中断起算。
 
@@ -106,10 +106,10 @@ tool_timeout_sec = 1200
 - 更换搭搭电脑端的安装目录后，重新启用对应 Agent 的提醒，可更新同一配对配置的旧钩子。Codex 需重新审核新增命令。
 
 - 用 `desk_enable_codex_notifications` 启用 Codex 提醒，再到 Codex 的 `/hooks` 或设置中的 Hooks 审核并信任新增条目。工具会返回写入的 `hooks.json` 路径。只有新会话实际触发钩子、且选中的搭搭已显示提醒，才算验证完成。电脑端可用 `desk_list_notifications` 检查是否收到事件。为 MCP 设置 `CODEX_HOME` 后，启用和停用操作都使用该目录。小屏可通过 Wi-Fi 连接时，关闭 MCP 后也可由本机后台进程投递。`desk_list_notifications` 和 `desk_mark_notification_seen` 管理小屏自己的提醒记录。`desk_disable_codex_notifications` 移除本程序的 hook，保留已有提醒。[Codex Hooks 说明](https://developers.openai.com/codex/hooks)
-- 额度来源在小屏「监控设置」中选择：Codex、Claude Code、Antigravity Gemini 或 Antigravity Claude/GPT。Codex 使用其本机账户接口；账号未返回的积分或重置卡显示为空。Claude Code 和 Antigravity CLI 在 macOS 上可分别调用 `desk_set_agent_quota(source="claude_code", enabled=true)` 或 `desk_set_agent_quota(source="antigravity", enabled=true)` 启用采集，再打开对应 Agent 会话。原状态栏命令会保留；调用同一工具并传 `enabled=false` 可移除采集。Windows 上，Claude Code 没有现有自定义状态栏时可以同样启用；如果已有状态栏，程序暂不自动修改，避免使用错误的命令环境。Antigravity 的 Windows 采集尚未验证。启用自定义状态栏可能隐藏 Claude Code 原本显示的部分快捷键提示。Agent 没有提供有效数据、会话未开始、状态栏被其他设置覆盖或数据过期时，小屏显示 `--`，并不代表额度为零。启用 Antigravity 额度采集后，若搭搭已连接并选择 Antigravity，电脑可以用已登录的官方 CLI 定期读取额度。停用采集会停止这条轮询。同一套电脑配置下的搭搭共用读数。Antigravity 的模型组映射尚未用真实账户数据验收，桌面应用的额度接口也未验证。
+- 额度来源在小屏「监控设置」中选择：Codex、Claude Code、Antigravity Gemini 或 Antigravity Claude/GPT。Codex 使用其本机账户接口；账号未返回的积分或重置卡显示为空。Claude Code 和 Antigravity CLI 在 macOS 上可分别调用 `desk_set_agent_quota(source="claude_code", enabled=true)` 或 `desk_set_agent_quota(source="antigravity", enabled=true)` 启用采集，再打开对应 Agent 会话。原状态栏命令会保留；调用同一工具并传 `enabled=false` 可移除采集。Windows 上，Claude Code 没有现有自定义状态栏时可以同样启用；如果已有状态栏，程序暂不自动修改，避免使用错误的命令环境。Antigravity 的 Windows 采集尚未验证。启用自定义状态栏可能隐藏 Claude Code 原本显示的部分快捷键提示。Agent 没有提供有效数据、会话未开始、状态栏被其他设置覆盖或数据过期时，小屏显示 `--`，并不代表额度为零。启用 Antigravity 额度采集后，电脑用已登录的官方 CLI 定期读取额度。支持多来源同屏的设备会同时更新各来源，单来源设备在选择 Antigravity 时刷新。停用采集会停止这条轮询。同一套电脑配置下的搭搭共用读数。Antigravity 的模型组映射尚未用真实账户数据验收，桌面应用的额度接口也未验证。
 - 用 `desk_set_claude_notifications` 启用或关闭 Claude Code 提醒。已启用旧版提醒的用户可再次启用以更新钩子。Claude Code 2.1.281 的 macOS 隔离会话验证了完成、提问和答复；Windows 隔离会话验证了完成，提问和答复使用合成事件验证。按 Esc 取消的问题会在下次发送消息或完成一轮时清除。[Claude Code Hooks 说明](https://code.claude.com/docs/en/hooks)
 - 初次配置或新增客户端时，用 `desk_notification_setup` 查看 Codex、Claude Code、Antigravity、OpenCode、WorkBuddy 和 WorkBuddy AI 的提醒配置状态和启用工具。启用 Claude Code 或 Antigravity 额度采集后，工具也会返回该客户端的 `notification_setup`。用户可以按需启用提醒。
-- 用 `desk_set_antigravity_notifications` 启用或关闭 Antigravity 的完成和提问提醒。已启用旧版提醒的用户可再次启用以更新钩子。重启客户端后用新会话确认屏幕提醒。Antigravity CLI 1.5.7 已通过真实完成和提问钩子测试。桌面应用和授权弹窗仍待验证。[Antigravity Hooks 说明](https://antigravity.google/docs/hooks)
+- 用 `desk_set_antigravity_notifications` 启用或关闭 Antigravity 的完成和提问提醒。已启用旧版提醒的用户可再次启用以更新钩子。先开新会话确认屏幕提醒，未加载时再重启客户端。Antigravity CLI 1.5.7 已通过真实完成和提问钩子测试；桌面应用已验证完成提醒，待答复提醒和授权弹窗仍待单独验收。[Antigravity Hooks 说明](https://antigravity.google/docs/hooks)
 - 用 `desk_set_opencode_notifications` 启用或关闭 OpenCode 完成、提问和授权提醒。已安装旧版的用户可再次启用以升级插件，之后重启 OpenCode。中止或删除会话会清除该会话的待应答状态，保留提醒记录。OpenCode 1.18.25 的隔离实例已验证完成、提问、答复和拒绝授权。实机验证拒绝授权只清除对应请求。日常桌面配置仍待验收。[OpenCode V1 插件配置](https://opencode.ai/v1/docs/plugins/)
 - 用 `desk_set_workbuddy_notifications` 启用或关闭 WorkBuddy 的完成、提问和授权提醒。WorkBuddy 使用默认的 `workbuddy`，WorkBuddy AI 使用 `workbuddy_ai`。启用后重启相应应用。提问按请求编号清除。授权按会话轮次合并，并在该轮结束时清除。两版内置 CLI 已通过完成提醒测试，WorkBuddy 5.1.5 另通过授权提示和拒绝后清除的实机测试。桌面应用及 WorkBuddy AI 授权仍待验收。
 
