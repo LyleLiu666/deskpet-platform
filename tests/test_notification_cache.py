@@ -128,19 +128,23 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
         record, = self.cache.committed_records(self.channel)
         self.assertEqual(record["workspace_context"], ("仓库", "original"))
 
-    async def test_desktop_button_is_committed_only_for_openable_codex_notifications(self):
+    async def test_desktop_button_is_committed_only_for_supported_notifications(self):
         thread = "019a2da9-e5d0-7000-844a-1c30b7f5477d"
         self.store.add_agent_event("codex", thread, "completed", "completed", "Codex completion")
         self.store.add_agent_event("codex", thread, "question", "response", "Codex question")
         self.store.add_agent_event("claude_code", thread, "turn", "completed", "Claude completion")
         self.store.add_agent_event("codex", "unresolved-id", "turn", "completed", "No local thread id")
+        self.store.add_agent_event("antigravity", "local-chat", "turn", "completed", "Antigravity completion")
+        self.store.add_agent_event("antigravity", "local-chat", "question", "response", "Antigravity question")
         self.channel.capabilities.update(agent_local_inbox=1, agent_inbox_read=1,
                                          cache_feedback_dismissal=1, open_session=1)
-        await self.sync()
+        with patch("deskpet_platform.desktop_launch.sys.platform", "darwin"):
+            await self.sync()
         rows = {row["id"]: row for command, row in self.channel.commands if command == "cache_item"}
         for record in self.store.cache_records(active_only=True):
             self.assertEqual(rows[record["cache_id"]].get("open_session", False),
-                             record["source"] == "codex" and record["session"] == thread)
+                             (record["source"] == "codex" and record["session"] == thread) or
+                             record["source"] == "antigravity")
 
     async def asyncSetUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -345,7 +349,7 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
                 raise asyncio.CancelledError
 
         with (patch("deskpet_platform.mcp_server.asyncio.sleep", side_effect=sleep),
-              patch("deskpet_platform.mcp_server.can_open_codex_session", return_value=False)):
+              patch("deskpet_platform.mcp_server.supports_desktop_launch", return_value=False)):
             with self.assertRaises(asyncio.CancelledError):
                 await session.poll()
         self.assertLess(delays[0], 1)

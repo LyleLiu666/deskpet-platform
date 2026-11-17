@@ -9,8 +9,11 @@ import os
 from pathlib import Path
 import platform as platform_info
 import subprocess
+import tempfile
 from sys import platform
 import time
+
+from .device_lock import DeviceLock
 
 
 def host_platform():
@@ -64,7 +67,12 @@ class AgentSpeedProbe:
             digest = hashlib.file_digest(source, "sha256").hexdigest()[:12]
         self.metric_version = "agent-speed-output-v1-" + digest
         self.process = self.reader = self.latest = None
+        self.lease = None
+        self.cache_lock = DeviceLock("agent-speed:" + self.metric_version)
+        self.shared_path = self.cache_lock.root / (self.cache_lock.name + ".json")
+        self.request_path = self.cache_lock.root / (self.cache_lock.name + ".request")
         self.speed_state = None
+        self.last_requested = None
         self.trend = deque()
         self.lock = asyncio.Lock()
 
@@ -104,19 +112,93 @@ class AgentSpeedProbe:
 
     async def sample(self):
         async with self.lock:
+            self.last_requested = time.monotonic()
             if self.reader is not None and self.reader.done():
                 await self._close()
             if self.process is None:
-                self.process = await asyncio.create_subprocess_exec(
-                    str(self.executable), "--watch", "86400", stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL, limit=4 * 1024 * 1024,
-                )
+                try:
+                    self.lease = self.cache_lock.__enter__()
+                except RuntimeError as error:
+                    if not str(error).startswith("device_busy:"):
+                        raise
+                    self._request_shared()
+                    self.latest = self._read_shared()
+                    return self.normalize(self.latest, time.time()) if self.latest is not None else None
+                try:
+                    self.process = await asyncio.create_subprocess_exec(
+                        str(self.executable), "--watch", "86400", stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL, limit=4 * 1024 * 1024,
+                    )
+                except BaseException:
+                    self.lease.__exit__(None, None, None)
+                    self.lease = None
+                    raise
                 self.reader = asyncio.create_task(self._read(self.process))
             return self.normalize(self.latest, time.time()) if self.latest is not None else None
 
+    def _request_shared(self):
+        try:
+            if self.request_path.is_symlink():
+                return
+            descriptor = os.open(self.request_path, os.O_WRONLY | os.O_CREAT, 0o600)
+            os.close(descriptor)
+            os.utime(self.request_path, None)
+        except OSError:
+            pass
+
+    def _shared_requested_recently(self):
+        try:
+            if self.request_path.is_symlink():
+                return False
+            age = time.time() - self.request_path.stat().st_mtime
+            return -1 <= age < 35
+        except OSError:
+            return False
+
+    def _read_shared(self):
+        try:
+            if self.shared_path.is_symlink() or self.shared_path.stat().st_size > 4096:
+                return None
+            with self.shared_path.open("r", encoding="utf-8") as source:
+                value = json.load(source)
+            return value if isinstance(value, dict) else None
+        except (OSError, ValueError):
+            return None
+
+    def _write_shared(self, value):
+        name = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.shared_path.parent,
+                                             prefix=".speed-", delete=False) as target:
+                name = target.name
+                json.dump(value, target, separators=(",", ":"))
+            os.replace(name, self.shared_path)
+        except OSError:
+            if name:
+                with suppress(OSError):
+                    os.unlink(name)
+
     async def _read(self, process):
         try:
-            while line := await process.stdout.readline():
+            while True:
+                if (self.last_requested is not None and time.monotonic() - self.last_requested >= 35
+                        and not self._shared_requested_recently()):
+                    if process.returncode is None:
+                        with suppress(ProcessLookupError):
+                            process.terminate()
+                        try:
+                            await asyncio.wait_for(process.wait(), 2)
+                        except asyncio.TimeoutError:
+                            with suppress(ProcessLookupError):
+                                process.kill()
+                            await process.wait()
+                    break
+                try:
+                    line = await asyncio.wait_for(process.stdout.readline(), 2)
+                except asyncio.TimeoutError:
+                    continue
+                if not line:
+                    break
                 try:
                     value = json.loads(line)
                 except (UnicodeError, ValueError):
@@ -128,10 +210,14 @@ class AgentSpeedProbe:
                                "live": {"output": live.get("output")} if isinstance(live, dict) else None,
                                "estimatedShare": value.get("estimatedShare"),
                                "generating": value.get("generating"), "tools": value.get("tools")}
+                self._write_shared(self.latest)
         except (OSError, ValueError):
             pass
         finally:
             self.latest = None
+            if self.lease is not None and process.returncode is not None:
+                self.lease.__exit__(None, None, None)
+                self.lease = None
 
     async def _close(self):
         if self.reader is not None:
@@ -150,6 +236,9 @@ class AgentSpeedProbe:
                 with suppress(ProcessLookupError):
                     process.kill()
                 await process.wait()
+        if self.lease is not None:
+            self.lease.__exit__(None, None, None)
+            self.lease = None
 
     async def close(self):
         async with self.lock:

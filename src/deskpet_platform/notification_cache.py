@@ -7,7 +7,7 @@ import time
 import zlib
 
 from .channel import CommandRejected
-from .codex_session import codex_session_url
+from .desktop_launch import notification_launch_args
 from .notification_detail import render_cached_detail
 from .notification_graphics import notification_row
 from .notification_view import _detail_pixels
@@ -304,10 +304,9 @@ class NotificationCache:
         for record in records:
             item, bitmap, detail, pixels = _prepare(record, finished_gray=finished_gray,
                                                     feedback_dismissal=feedback_dismissal)
-            if desktop_sessions and record["source"] == "codex":
-                session = record.get("session", record.get("completion_session"))
-                if codex_session_url(session):
-                    item["open_session"] = True
+            session = record.get("session", record.get("completion_session"))
+            if desktop_sessions and notification_launch_args(record["source"], session):
+                item["open_session"] = True
             rendered.append((item, bitmap, detail, pixels))
         return rendered
 

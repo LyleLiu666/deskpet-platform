@@ -12,7 +12,7 @@ import json
 
 
 class TouchTests(unittest.IsolatedAsyncioTestCase):
-    async def test_open_session_routes_only_the_matching_cached_codex_event(self):
+    async def test_desktop_launch_routes_only_matching_cached_notifications(self):
         class Wire:
             async def write(self, raw):
                 self.request = json.loads(raw[3:])
@@ -29,12 +29,14 @@ class TouchTests(unittest.IsolatedAsyncioTestCase):
             channel.epoch, channel.boot, channel.online = "a" * 32, 1, True
             channel.capabilities = {"touch_demo": 1}
             thread = "019a2da9-e5d0-7000-844a-1c30b7f5477d"
-            for source in ("codex", "claude_code"):
+            for source in ("codex", "antigravity", "claude_code"):
                 session.notifications.add_agent_event(source, thread, "turn", "completed", source)
             records = {row["source"]: row["cache_id"] for row in session.notifications.cache_records()}
-            with patch("deskpet_platform.mcp_server.open_codex_session", return_value=True) as launch:
+            with (patch("deskpet_platform.desktop_launch.sys.platform", "darwin"),
+                  patch("deskpet_platform.desktop_launch.subprocess.run") as launch):
                 for operation, (identity, status) in enumerate([
-                    (records["codex"], "accepted"), (records["claude_code"], "rejected"),
+                    (records["codex"], "accepted"), (records["antigravity"], "accepted"),
+                    (records["claude_code"], "rejected"),
                     (records["codex"] + "f", "rejected"),
                 ], 1):
                     touch = {"type": "touch", "epoch": channel.epoch, "boot": 1, "operation": operation,
@@ -47,9 +49,15 @@ class TouchTests(unittest.IsolatedAsyncioTestCase):
                     await session.process_touch(event)
                     self.assertEqual(wire.request["status"], status)
                     self.assertEqual(wire.request["operation"], operation)
-                launch.assert_called_once_with(f"codex://threads/{thread}")
+                self.assertEqual([item.args[0] for item in launch.call_args_list],
+                                 [["/usr/bin/open", f"codex://threads/{thread}"],
+                                  ["/usr/bin/open", "-b", "com.google.antigravity"]])
+                launch.side_effect = OSError("application unavailable")
+                channel.events.put_nowait({**touch, "operation": 5, "id": records["antigravity"]})
+                await session.process_touch(await client.pending_touch())
+                self.assertEqual(wire.request["status"], "rejected")
 
-            touch = {**touch, "operation": 4, "id": records["codex"]}
+            touch = {**touch, "operation": 6, "id": records["codex"]}
             channel.capture_event(b"P1," + json.dumps(touch).encode() + b"\n")
             self.assertEqual(await client.next_touch(), touch)
             self.assertEqual(wire.request["type"], "touch_ack")

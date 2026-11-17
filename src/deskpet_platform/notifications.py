@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 import time
 import asyncio
 from .channel import TextNotVisible
-from .codex_session import codex_session_url
+from .desktop_launch import notification_launch_args
 
 from .file_lock import acquire, release
 
@@ -452,12 +452,12 @@ class NotificationStore:
             return identity
         return None
 
-    def cached_codex_session_url(self, cache_id):
+    def cached_notification_launch_args(self, cache_id):
         with closing(self._connect()) as db:
             identity = self._matching_cache_record(db, cache_id)
-            row = db.execute("SELECT session FROM notifications WHERE id=? AND source='codex'",
+            row = db.execute("SELECT source,session FROM notifications WHERE id=?",
                              (identity,)).fetchone()
-            return codex_session_url(row[0]) if row else None
+            return notification_launch_args(*row) if row else None
 
     def mark_cached_seen(self, cache_id, *, grouped_completions=False):
         with closing(self._connect()) as db, db:

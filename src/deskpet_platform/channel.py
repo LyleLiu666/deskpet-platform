@@ -101,6 +101,22 @@ class Channel:
                 raise DeviceError('handshake_required')
             return await self._exchange(message_type,fields,clock_epoch,timeout)
 
+    async def send_speed_snapshot(self, **fields):
+        async with self.lock:
+            if not self.online:
+                raise DeviceError("handshake_required")
+            self.seq += 1
+            packet = dict(epoch=self.epoch, seq=self.seq, type="speed_snapshot", **fields)
+            line = ("P1," + json.dumps(packet, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+            if len(line) > 1024:
+                raise DeviceError("line_too_long")
+            try:
+                await asyncio.wait_for(self.transport.write(line), self.timeout)
+                return self.seq
+            except (OSError, asyncio.TimeoutError, asyncio.CancelledError):
+                self.online = False
+                raise
+
     async def _exchange(self, kind, fields, clock_epoch=None, timeout=None):
         if {'epoch','seq','type'} & fields.keys():
             raise DeviceError('invalid_fields: reserved envelope')

@@ -31,7 +31,7 @@ from .channel import AckTimeout, CommandRejected, DeviceError
 from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS, DASHBOARD_ROTATION, DASHBOARD_INTERVALS, _appearance_theme, _appearance_wallpaper
 from .codex_hook import configure_codex_hooks, configure_hooks, hook_command
 from .codex_quota import fetch_quota
-from .codex_session import can_open_codex_session, open_codex_session
+from .desktop_launch import launch_notification, supports_desktop_launch
 from .computer_metrics import ComputerMetrics, DisplayPreferences
 from .device_registry import DeviceRegistry
 from .device_sessions import DeviceSessions
@@ -371,7 +371,7 @@ class BoardSession:
                                getattr(getattr(self.client, "link", None), "wireless", False) is True)
                     heartbeat = await self.client.status(compact=True) if compact else await self.client.status()
                     if (channel.capabilities.get("agent_cache_first") == 1 and
-                            channel.epoch != self.session_open_epoch and can_open_codex_session()):
+                            channel.epoch != self.session_open_epoch and supports_desktop_launch()):
                         try:
                             await self.client.enable_session_open()
                         except CommandRejected as error:
@@ -638,9 +638,9 @@ class BoardSession:
         if event["action"] == "open_session":
             accepted = False
             try:
-                url = await asyncio.to_thread(self.notifications.cached_codex_session_url, event["id"])
-                if url:
-                    accepted = await asyncio.to_thread(open_codex_session, url)
+                args = await asyncio.to_thread(self.notifications.cached_notification_launch_args, event["id"])
+                if args:
+                    accepted = await asyncio.to_thread(launch_notification, args)
             except (OSError, sqlite3.Error, subprocess.SubprocessError):
                 pass  # Report failure to the board without dropping the connection.
             await self.client.finish_session_open(event, accepted=accepted)
@@ -841,12 +841,62 @@ class BoardSession:
 
     async def poll_tokens(self):
         runtime = None
+        pending = None
+        snapshot_client = None
+        snapshot_epoch = None
+        verified_epoch = None
+        legacy_quota_due = 0.0
+        last_connected_at = None
+        last_windows = None
+        last_frame = None
+        next_publish = 0.0
+
+        async def publish(client, windows, snapshot, adaptive, sampled_at, captured_at, state, style, rates):
+            nonlocal snapshot_client, snapshot_epoch, verified_epoch, legacy_quota_due
+            async with self.lock:
+                if (client is not self.client or windows != self.snapshot.get("speed_windows")
+                        or time.monotonic() - sampled_at >= 3):
+                    return
+                if client.channel.capabilities.get("speed_snapshot") == 1 and snapshot["sessions"] is not None:
+                    if (snapshot_client is not client or snapshot_epoch != client.channel.epoch or
+                            (client.channel.capabilities.get("quota_sources") != 1 and
+                             time.monotonic() >= legacy_quota_due)):
+                        await client.update_tokens(snapshot, windows=windows)
+                        snapshot_client = client
+                        snapshot_epoch = client.channel.epoch
+                        legacy_quota_due = time.monotonic() + 10
+                    if not await client.update_speed_history(captured_at=captured_at, snapshot=snapshot,
+                                                             state=state, style=style, rates=rates,
+                                                             verify=verified_epoch != (client, client.channel.epoch)):
+                        return
+                    verified_epoch = (client, client.channel.epoch)
+                else:
+                    await client.update_tokens(snapshot, windows=windows)
+                    snapshot_client = None
+                    snapshot_epoch = None
+                self.token_snapshot = {**snapshot, "adaptive": adaptive}
+                self.token_published_at = time.monotonic()
+                loss = self.last_link_loss
+                if (loss is not None and loss["speed_was_active"]
+                        and "connection_recovery_ms" in loss and "speed_recovery_ms" not in loss):
+                    loss["speed_recovery_ms"] = self._elapsed_since_link_loss()
+                    self.snapshot["last_link_loss"] = loss.copy()
+
         try:
             while True:
+                cycle_started = time.monotonic()
                 client = self.client
                 windows = self.snapshot.get("speed_windows")
-                if (client is not None and client.channel.capabilities.get("token_stats") == 1 and
-                        (windows is not None or client.channel.capabilities.get("speed_windows") != 1)):
+                connected = (client is not None and client.channel.capabilities.get("token_stats") == 1 and
+                             (windows is not None or client.channel.capabilities.get("speed_windows") != 1))
+                if connected:
+                    last_connected_at = cycle_started
+                    last_windows = windows
+                offline_grace = (client is None and last_connected_at is not None and
+                                 cycle_started - last_connected_at < 30)
+                if offline_grace:
+                    windows = last_windows
+                if connected or offline_grace:
                     try:
                         if self.probe_collector is not None:
                             snapshot = await self.probe_collector.sample()
@@ -873,11 +923,20 @@ class BoardSession:
                         runtime.configure(windows)
                         speed_state = speed_state if speed_state in ("L", "E", "I") else (
                             "L" if snapshot["rate10"] else "I")
-                        frame = Frame(str(int(now)), now, snapshot["rate10"], speed_state, metric_version)
-                        runtime.history.add(frame, now)
+                        collector = self.probe_collector or self.reference_collector
+                        latest = getattr(collector, "latest", None)
+                        stamp = (latest.get("t") if self.probe_collector else latest.get("captured_at_ms")) if isinstance(latest, dict) else None
+                        captured_at = stamp / 1000 if type(stamp) in (int, float) else now
+                        frame = Frame(str(int(captured_at * 1000)), captured_at, snapshot["rate10"], speed_state, metric_version)
+                        frame_key = (metric_version, frame.sample_id)
+                        if frame_key != last_frame:
+                            runtime.history.add(frame, now)
+                            last_frame = frame_key
                         runtime.observe(frame, now)
                         await runtime.tick()
-                        snapshot["gear"] = (runtime.wire() or {}).get("current", 0)
+                        style = runtime.wire()
+                        snapshot["gear"] = (style or {}).get("current", 0)
+                        rates = runtime.history.recent_rates(metric_version, int(now))
                         allowance = self.codex_allowance
                         current = [row for row in allowance.get("quotas", []) if row[2] > now]
                         if current:
@@ -885,22 +944,25 @@ class BoardSession:
                         for key in ("credits", "reset_cards"):
                             if key in allowance:
                                 snapshot[key] = allowance[key]
-                        if client.channel.capabilities.get("token_quality") == 1:
+                        if client is not None and client.channel.capabilities.get("token_quality") == 1:
                             snapshot["speed_state"] = speed_state
-                        async with self.lock:
-                            if client is self.client and windows == self.snapshot.get("speed_windows"):
-                                await client.update_tokens(snapshot, windows=windows)
-                                self.token_snapshot = {**snapshot, "adaptive": runtime.status()}
-                                self.token_published_at = time.monotonic()
-                                loss = self.last_link_loss
-                                if (loss is not None and loss["speed_was_active"]
-                                        and "connection_recovery_ms" in loss and "speed_recovery_ms" not in loss):
-                                    loss["speed_recovery_ms"] = self._elapsed_since_link_loss()
-                                    self.snapshot["last_link_loss"] = loss.copy()
+                        if connected and cycle_started >= next_publish and (pending is None or pending.done()):
+                            if pending is not None:
+                                try:
+                                    pending.result()
+                                except LINK_ERRORS:
+                                    pass
+                            pending = asyncio.create_task(publish(client, windows, snapshot, runtime.status(),
+                                                                  time.monotonic(), captured_at, speed_state,
+                                                                  style, rates))
+                            next_publish = cycle_started + 1
                     except (sqlite3.Error, *LINK_ERRORS):
                         pass
-                await asyncio.sleep(1)
+                await asyncio.sleep(max(0, .5 - (time.monotonic() - cycle_started)))
         finally:
+            if pending is not None:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
             if self.reference_collector is not None:
                 await self.reference_collector.close()
             if self.owns_probe_collector:

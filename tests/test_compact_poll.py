@@ -107,8 +107,11 @@ class CompactPollTests(unittest.IsolatedAsyncioTestCase):
             session.record_status({"boot": 1})
 
             board.update_tokens.side_effect = [OSError("device did not accept the sample"), None]
-            with patch("deskpet_platform.mcp_server.asyncio.sleep",
-                       AsyncMock(side_effect=asyncio.CancelledError)):
+            real_sleep = asyncio.sleep
+            async def stop_after_publish(_delay):
+                await real_sleep(.02)
+                raise asyncio.CancelledError
+            with patch("deskpet_platform.mcp_server.asyncio.sleep", side_effect=stop_after_publish):
                 with self.assertRaises(asyncio.CancelledError):
                     await session.poll_tokens()
                 self.assertNotIn("speed_recovery_ms", session.snapshot["last_link_loss"])

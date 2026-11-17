@@ -57,6 +57,120 @@ class AgentSpeedProbeTests(unittest.IsolatedAsyncioTestCase):
                     create_server(config, token_probe=explicit)
                     factory.assert_called_once_with(explicit)
 
+    async def test_sampling_continues_while_device_send_is_delayed(self):
+        class Collector:
+            metric_version = "fixture"
+            speed_state = "L"
+            def __init__(self):
+                self.count = 0
+                self.sampled_three = asyncio.Event()
+            async def sample(self):
+                self.count += 1
+                if self.count >= 3:
+                    self.sampled_three.set()
+                return {"rate10": 120, "sessions": 1, "trend": [0] * 12, "quotas": []}
+        class Client:
+            channel = type("Channel", (), {"capabilities": {"token_stats": 1}})()
+            async def update_tokens(self, value, *, windows=None):
+                await asyncio.Event().wait()
+        with tempfile.TemporaryDirectory() as directory:
+            collector = Collector()
+            session = BoardSession(Path(directory) / "device.json", probe_collector=collector)
+            session.client = Client()
+            task = asyncio.create_task(session.poll_tokens())
+            try:
+                await asyncio.wait_for(collector.sampled_three.wait(), 4)
+                self.assertGreaterEqual(collector.count, 3)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_sampling_continues_when_device_temporarily_disconnects(self):
+        class Collector:
+            metric_version = "fixture"
+            speed_state = "L"
+            def __init__(self):
+                self.count = 0
+                self.third = asyncio.Event()
+            async def sample(self):
+                self.count += 1
+                if self.count == 3:
+                    self.third.set()
+                return {"rate10": 120, "sessions": 1, "trend": [0] * 12, "quotas": []}
+        class Client:
+            channel = type("Channel", (), {"capabilities": {"token_stats": 1}})()
+            async def update_tokens(self, value, *, windows=None):
+                pass
+        with tempfile.TemporaryDirectory() as directory:
+            collector = Collector()
+            session = BoardSession(Path(directory) / "device.json", probe_collector=collector)
+            session.client = Client()
+            task = asyncio.create_task(session.poll_tokens())
+            try:
+                async with asyncio.timeout(2):
+                    while not collector.count:
+                        await asyncio.sleep(.01)
+                session.client = None
+                await asyncio.wait_for(collector.third.wait(), 4)
+                self.assertGreaterEqual(collector.count, 3)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_idle_probe_is_terminated_and_a_later_sample_restarts_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "probe"
+            executable.write_text("#!/bin/sh\nwhile true; do sleep 1; done\n")
+            executable.chmod(0o700)
+            probe = AgentSpeedProbe(executable)
+            try:
+                await probe.sample()
+                first = probe.process
+                self.assertIsNotNone(first)
+                probe.last_requested = -1000000
+                await asyncio.wait_for(probe.reader, 4)
+                self.assertIsNotNone(first.returncode)
+                await probe.sample()
+                self.assertIsNot(probe.process, first)
+                self.assertIsNone(probe.process.returncode)
+            finally:
+                await probe.close()
+
+    async def test_same_client_new_epoch_reestablishes_initial_token_state(self):
+        class Collector:
+            metric_version = "fixture"
+            speed_state = "L"
+            async def sample(self):
+                return {"rate10": 120, "sessions": 1, "trend": [0] * 12, "quotas": []}
+        class Channel:
+            capabilities = {"token_stats": 1, "speed_snapshot": 1, "quota_sources": 1}
+            epoch = "first"
+        class Client:
+            def __init__(self):
+                self.channel = Channel()
+                self.token_updates = 0
+                self.history_updates = 0
+                self.second = asyncio.Event()
+            async def update_tokens(self, value, *, windows=None):
+                self.token_updates += 1
+            async def update_speed_history(self, **kwargs):
+                self.history_updates += 1
+                if self.history_updates == 1:
+                    self.channel.epoch = "second"
+                if self.history_updates == 2:
+                    self.second.set()
+                return True
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json", probe_collector=Collector())
+            session.client = client = Client()
+            task = asyncio.create_task(session.poll_tokens())
+            try:
+                await asyncio.wait_for(client.second.wait(), 4)
+                self.assertEqual(client.token_updates, 2)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
     async def test_missing_probe_is_reported_and_never_falls_back_to_a_simplified_rate(self):
         class Channel:
             capabilities = {"token_stats": 1, "speed_windows": 1}
@@ -174,6 +288,94 @@ class AgentSpeedProbeTests(unittest.IsolatedAsyncioTestCase):
                 process = collector.process
                 await collector.close()
             self.assertIsNotNone(process.returncode)
+
+    async def test_independent_collectors_share_one_process_and_take_over(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe"
+            path.write_text("#!/usr/bin/env python3\nimport json,time\n"
+                            "while True:\n"
+                            " print(json.dumps({'t':int(time.time()*1000),'state':'running',"
+                            "'live':{'output':23.4},'estimatedShare':0,'generating':1,'tools':0}),flush=True)\n"
+                            " time.sleep(.05)\n")
+            path.chmod(0o700)
+            first, second = AgentSpeedProbe(path), AgentSpeedProbe(path)
+            try:
+                await first.sample()
+                async with asyncio.timeout(4):
+                    while await second.sample() is None:
+                        await asyncio.sleep(.05)
+                self.assertEqual(second.latest["live"]["output"], 23.4)
+                self.assertIsNone(second.process)
+                first.last_requested = -1000000
+                await asyncio.sleep(.2)
+                self.assertIsNone(first.process.returncode)
+                leader = first.process
+                await first.close()
+                self.assertIsNotNone(leader.returncode)
+                async with asyncio.timeout(4):
+                    while second.process is None:
+                        await second.sample()
+                        await asyncio.sleep(.05)
+                self.assertIsNotNone(second.process)
+                async with asyncio.timeout(4):
+                    while await second.sample() is None:
+                        await asyncio.sleep(.05)
+            finally:
+                await first.close()
+                await second.close()
+
+    async def test_separate_processes_share_the_same_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe"
+            path.write_text("#!/usr/bin/env python3\nimport json,time\n"
+                            "# " + directory + "\n"
+                            "while True:\n"
+                            " print(json.dumps({'t':int(time.time()*1000),'state':'running',"
+                            "'live':{'output':19},'estimatedShare':0,'generating':1,'tools':0}),flush=True)\n"
+                            " time.sleep(.05)\n")
+            path.chmod(0o700)
+            program = """
+import asyncio, sys
+from deskpet_platform.agent_speed_probe import AgentSpeedProbe
+async def run():
+    probe = AgentSpeedProbe(sys.argv[1])
+    try:
+        while await probe.sample() is None:
+            await asyncio.sleep(.05)
+        print("leader" if probe.process else "follower", flush=True)
+        command = await asyncio.to_thread(sys.stdin.readline)
+        if command.strip() == "takeover":
+            while probe.process is None:
+                await probe.sample()
+                await asyncio.sleep(.05)
+            print("takeover", flush=True)
+            await asyncio.to_thread(sys.stdin.readline)
+    finally:
+        await probe.close()
+asyncio.run(run())
+"""
+            async def start():
+                return await asyncio.create_subprocess_exec(sys.executable, "-c", program, str(path),
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+            first = await start()
+            second = None
+            try:
+                self.assertEqual(await asyncio.wait_for(first.stdout.readline(), 5), b"leader\n")
+                second = await start()
+                self.assertEqual(await asyncio.wait_for(second.stdout.readline(), 5), b"follower\n")
+                first.stdin.write(b"stop\n")
+                await first.stdin.drain()
+                await asyncio.wait_for(first.wait(), 5)
+                self.assertEqual(first.returncode, 0)
+                second.stdin.write(b"takeover\n")
+                await second.stdin.drain()
+                self.assertEqual(await asyncio.wait_for(second.stdout.readline(), 5), b"takeover\n")
+            finally:
+                for process in (first, second):
+                    if process:
+                        process.stdin.close()
+                        await asyncio.wait_for(process.wait(), 5)
+                        self.assertEqual(process.returncode, 0)
 
     async def test_board_session_sends_the_shared_probe_reading(self):
         class Collector:

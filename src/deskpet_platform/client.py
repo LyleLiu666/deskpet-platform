@@ -1,5 +1,6 @@
 """Connection, status and a small text display operation for developers."""
 import asyncio
+import time
 from dataclasses import asdict
 from datetime import datetime
 import hashlib
@@ -300,6 +301,26 @@ class Client:
             if windows is not None:
                 return await self.channel.send("token_update", **snapshot, speed_windows=windows)
             return await self.channel.send("token_update", **snapshot)
+
+    async def update_speed_history(self, *, captured_at, snapshot, state, style, rates, verify=False):
+        async with self._operation:
+            sent = time.time()
+            if not -1 <= sent - captured_at <= 3:
+                return False
+            end = int(sent)
+            history = "".join(f"{(rates.get(second) if rates.get(second) is not None else 0xffffff):06x}"
+                              for second in range(end - 59, end + 1))
+            style = ({key: style[key] for key in ("overall", "current", "calibrated", "current_calibrated")}
+                     if style else None)
+            sequence = await self.channel.send_speed_snapshot(
+                sent_ms=int(sent * 1000), captured_ms=int(captured_at * 1000),
+                rate10=snapshot["rate10"], sessions=snapshot["sessions"] or 0,
+                status=state, style=style, history=history)
+            if verify:
+                reply = await self.channel.send("heartbeat")
+                if reply.get("speed_snapshot_seq") != sequence:
+                    raise DeviceError("speed_snapshot_not_accepted")
+            return True
 
     async def update_quota(self, reading):
         if self.channel.capabilities.get("quota_sources") != 1:

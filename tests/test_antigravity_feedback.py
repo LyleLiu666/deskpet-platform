@@ -33,6 +33,8 @@ class AntigravityFeedbackTests(unittest.TestCase):
         records = self.store.list()
         self.assertEqual([(row["source"], row["title"], row["category"]) for row in records],
                          [("antigravity", "project", "completed")])
+        with closing(sqlite3.connect(self.store.path)) as db:
+            self.assertEqual(db.execute("SELECT workspace FROM notifications").fetchone()[0], "/sample/project")
         self.assertNotIn(b"private input", self.store.path.read_bytes())
 
     def test_named_hook_entries_can_target_two_boards_independently(self):
@@ -103,6 +105,8 @@ class AntigravityFeedbackTests(unittest.TestCase):
         self.assertEqual(receive("after", "PostToolUse", "one"), {})
         self.assertEqual([(r["source"], r["category"], r["resolved"]) for r in self.store.list()],
                          [("antigravity", "response", False), ("antigravity", "response", True)])
+        with closing(sqlite3.connect(self.store.path)) as db:
+            self.assertEqual(db.execute("SELECT DISTINCT workspace FROM notifications").fetchall(), [("/sample/project",)])
         self.assertNotIn(b"private question", self.store.path.read_bytes())
 
     def test_upgrade_replaces_only_the_previously_installed_stop_hook(self):

@@ -166,12 +166,15 @@ def _summary_title(session: str, transcript_path: object, *, wait_for_title: boo
     return None
 
 
-def _workspace_title(event: dict) -> str | None:
+def _workspace(event: dict) -> str | None:
     workspaces = event.get("workspacePaths")
     workspace = workspaces[0] if isinstance(workspaces, list) and workspaces else None
-    if not isinstance(workspace, str):
-        return None
-    return _clean_title(Path(workspace).name)
+    return workspace if isinstance(workspace, str) and workspace else None
+
+
+def _workspace_title(event: dict) -> str | None:
+    workspace = _workspace(event)
+    return _clean_title(Path(workspace).name) if workspace else None
 
 
 def session_title(session: str, event: dict, *, wait_for_title: bool = False) -> str:
@@ -230,7 +233,7 @@ def _deliver_question(store, event, session):
     if not isinstance(questions, list) or not questions:
         return False
     title = session_title(session, event)
-    return bool(store.add_agent_event("antigravity", session, identity, "response", title))
+    return bool(store.add_agent_event("antigravity", session, identity, "response", title, workspace=_workspace(event)))
 
 
 def deliver(store, event):
@@ -257,4 +260,4 @@ def deliver(store, event):
     if identity is None:
         return False
     title = session_title(session, event, wait_for_title=True)
-    return bool(store.add_agent_event("antigravity", session, identity, "completed", title))
+    return bool(store.add_agent_event("antigravity", session, identity, "completed", title, workspace=_workspace(event)))

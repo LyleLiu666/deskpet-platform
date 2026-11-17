@@ -33,6 +33,27 @@ KEY = bytes(range(32))
 
 
 class PlatformTests(unittest.IsolatedAsyncioTestCase):
+    async def test_speed_history_serializes_missing_seconds_and_preserves_real_samples(self):
+        client = Client(DeviceConfig("02:00:00:00:00:01", bytes(32)))
+        client.channel = AsyncMock()
+        client.channel.capabilities = {"speed_snapshot": 1}
+        with patch("deskpet_platform.client.time.time", return_value=1700000100.5):
+            await client.update_speed_history(
+                captured_at=1700000100.25,
+                snapshot={"rate10": 12, "sessions": 2}, state="L",
+                style={"overall": 1, "current": 3, "calibrated": True, "current_calibrated": True,
+                       "version": 1, "age_ms": 0},
+                rates={1700000041: 42, 1700000099: 0, 1700000100: 12})
+        data = client.channel.send_speed_snapshot.await_args.kwargs
+        self.assertEqual(data["captured_ms"], 1700000100250)
+        self.assertEqual(data["sent_ms"], 1700000100500)
+        points = [int(data["history"][i:i+6], 16) for i in range(0, 360, 6)]
+        self.assertEqual(points[0], 42)
+        self.assertEqual(points[1], 0xffffff)
+        self.assertEqual(points[-2:], [0, 12])
+        self.assertEqual(data["style"], {"overall": 1, "current": 3, "calibrated": True,
+                                         "current_calibrated": True})
+
     async def test_message_sync_sends_full_metadata_only_when_supported(self):
         client = Client(DeviceConfig(DEVICE, KEY))
         client.channel = AsyncMock()
