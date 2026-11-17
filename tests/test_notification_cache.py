@@ -1,7 +1,9 @@
 import asyncio
 import base64
+from contextlib import closing
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -45,6 +47,8 @@ class CacheBoard:
                      "cache_count": len(self.rows)}
             if self.mount is not None:
                 state["cache_mount"] = self.mount
+            if self.capabilities.get("open_session") == 1:
+                state["open_session"] = True
             return state
         if command == "cache_receipt_next":
             return self.receipts.pop(0) if self.receipts else {"has_receipt": False}
@@ -83,6 +87,61 @@ class CacheBoard:
 
 
 class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
+    async def test_completed_detail_uses_saved_workspace_after_codex_state_changes(self):
+        thread = "019a2da9-e5d0-7000-844a-1c30b7f5477d"
+        workspace = self.store.path.parent / "two-checkouts"
+        workspace.mkdir()
+        state_path = self.store.path.parent / "state_5.sqlite"
+        with sqlite3.connect(state_path) as state:
+            state.execute("CREATE TABLE threads(id TEXT, cwd TEXT, git_origin_url TEXT)")
+            state.execute("INSERT INTO threads VALUES (?, ?, NULL)", (thread, str(workspace)))
+        with patch("deskpet_platform.notifications.codex_home", return_value=self.store.path.parent):
+            self.store.add_agent_event("codex", thread, "turn", "completed", "Review")
+            record, = self.store.cache_records(active_only=True)
+            self.assertEqual(record["workspace_context"], ("工作区", "two-checkouts"))
+            _, _, detail, data = _prepare(record, finished_gray=True)
+            with sqlite3.connect(state_path) as state:
+                state.execute("UPDATE threads SET git_origin_url=?", ("https://example.test/team/actual-repo.git",))
+            self.assertEqual(self.store.cache_records(active_only=True), [record])
+            _, _, updated, new_data = _prepare(record, finished_gray=True)
+            self.store.add_agent_event("codex", thread, "next", "completed", "Next review")
+            newest, = self.store.cache_records(active_only=True)
+            self.assertEqual(newest["workspace_context"], ("仓库", "actual-repo"))
+        self.assertEqual(updated["content_revision"], detail["content_revision"])
+        self.assertEqual(new_data, data)
+        self.assertTrue(any(data[:15 * 288 // 4]))
+
+    async def test_legacy_metadata_backfills_once_while_transport_remains_available(self):
+        identity = self.store.add_agent_event("codex", "session", "turn", "completed", "Legacy")
+        with closing(self.store._connect()) as db, db:
+            db.execute("UPDATE notifications SET workspace_context=NULL WHERE id=?", (identity,))
+        self.channel.capabilities.update(agent_local_inbox=1, agent_cache_first=1)
+        with patch("deskpet_platform.notifications._workspace_context", return_value=("仓库", "original")) as resolve:
+            await self.cache.step(self.client)
+            self.assertIsNotNone(self.cache.preparation)
+            self.assertFalse(self.client._operation.locked())
+            await self.sync()
+        resolve.assert_called_once()
+        with patch("deskpet_platform.notifications._workspace_context", side_effect=AssertionError("read live workspace")):
+            self.cache = NotificationCache(self.store)
+            await self.sync()
+        record, = self.cache.committed_records(self.channel)
+        self.assertEqual(record["workspace_context"], ("仓库", "original"))
+
+    async def test_desktop_button_is_committed_only_for_openable_codex_notifications(self):
+        thread = "019a2da9-e5d0-7000-844a-1c30b7f5477d"
+        self.store.add_agent_event("codex", thread, "completed", "completed", "Codex completion")
+        self.store.add_agent_event("codex", thread, "question", "response", "Codex question")
+        self.store.add_agent_event("claude_code", thread, "turn", "completed", "Claude completion")
+        self.store.add_agent_event("codex", "unresolved-id", "turn", "completed", "No local thread id")
+        self.channel.capabilities.update(agent_local_inbox=1, agent_inbox_read=1,
+                                         cache_feedback_dismissal=1, open_session=1)
+        await self.sync()
+        rows = {row["id"]: row for command, row in self.channel.commands if command == "cache_item"}
+        for record in self.store.cache_records(active_only=True):
+            self.assertEqual(rows[record["cache_id"]].get("open_session", False),
+                             record["source"] == "codex" and record["session"] == thread)
+
     async def asyncSetUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -94,6 +153,8 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
     async def sync(self):
         for _ in range(25):
             await self.cache.step(self.client)
+            if self.cache.preparation is not None:
+                await self.cache.preparation
             if self.cache.transfer is None:
                 return
         self.fail("cache transfer did not finish")
@@ -278,10 +339,13 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
             delays.append(delay)
             if len(delays) == 1:
                 self.assertFalse(any(row["shown"] for row in self.store.list()))
+            if session.notification_cache.preparation is not None:
+                await session.notification_cache.preparation
             if len(delays) == 4:
                 raise asyncio.CancelledError
 
-        with patch("deskpet_platform.mcp_server.asyncio.sleep", side_effect=sleep):
+        with (patch("deskpet_platform.mcp_server.asyncio.sleep", side_effect=sleep),
+              patch("deskpet_platform.mcp_server.can_open_codex_session", return_value=False)):
             with self.assertRaises(asyncio.CancelledError):
                 await session.poll()
         self.assertLess(delays[0], 1)
@@ -290,31 +354,37 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
         self.assertLess(operations.index("cache_commit"), operations.index("snapshot_begin"))
         self.assertTrue(all(row["shown"] for row in self.store.list()))
 
+    async def refresh(self, session):
+        await session.refresh_agent_notifications({"pet_page": 0})
+        if session.notification_cache.preparation is not None:
+            await session.notification_cache.preparation
+            await session.refresh_agent_notifications({"pet_page": 0})
+
     async def test_first_reminder_waits_for_committed_card_and_shown_receipt_causes_no_upload(self):
         session = BoardSession(self.store.path.with_name("device.json"))
         session.client = self.client
         self.channel.capabilities["agent_cache_first"] = 1
         first = self.store.add_agent_event("codex", "s", "first", "completed", "First")
         self.channel.cache_available = False
-        await session.refresh_agent_notifications({"pet_page": 0})
+        await self.refresh(session)
         self.assertEqual([cmd for cmd, _ in self.channel.commands], ["cache_state"])
         self.assertFalse(self.store.list()[0]["shown"])
 
         self.channel.cache_available = True
         session.notification_cache.poll_at = 0
-        await session.refresh_agent_notifications({"pet_page": 0})
+        await self.refresh(session)
         operations = [cmd for cmd, _ in self.channel.commands]
         self.assertLess(operations.index("cache_detail_commit"), operations.index("cache_commit"))
         self.assertLess(operations.index("cache_commit"), operations.index("snapshot_begin"))
         self.assertEqual([(item["id"], item["shown"]) for item in self.store.list()], [(first, True)])
 
         session.notification_cache.poll_at = 0
-        await session.refresh_agent_notifications({"pet_page": 0})
+        await self.refresh(session)
         self.assertEqual(sum(cmd == "cache_commit" for cmd, _ in self.channel.commands), 1)
 
         self.channel.epoch = "f" * 32
         self.assertIsNone(session.notification_cache.committed_records(self.channel))
-        await session.refresh_agent_notifications({"pet_page": 0})
+        await self.refresh(session)
         self.assertEqual(sum(cmd == "cache_commit" for cmd, _ in self.channel.commands), 1)
         self.assertEqual([item["id"] for item in session.notification_cache.committed_records(self.channel)], [first])
 
@@ -323,18 +393,18 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
         session.client = self.client
         self.channel.capabilities["agent_cache_first"] = 1
         first = self.store.add_agent_event("codex", "s", "first", "completed", "First")
-        await session.refresh_agent_notifications({"pet_page": 0})
+        await self.refresh(session)
         self.assertEqual([item["id"] for item in session.notification_cache.committed_records(self.channel)], [first])
         self.channel.failure = "cache_commit"
         newer = self.store.add_agent_event("workbuddy", "s", "next", "completed", "New")
-        await session.refresh_agent_notifications({"pet_page": 0})
+        await self.refresh(session)
         self.assertEqual([item["id"] for item in session.notification_cache.committed_records(self.channel)], [first])
         self.assertFalse(self.store.list()[0]["shown"])
 
         self.channel.failure = None
         self.channel.epoch = "f" * 32
         self.assertIsNone(session.notification_cache.committed_records(self.channel))
-        await session.refresh_agent_notifications({"pet_page": 0})
+        await self.refresh(session)
         self.assertEqual([item["id"] for item in session.notification_cache.committed_records(self.channel)], [newer, first])
         self.assertTrue(self.store.list()[0]["shown"])
 
@@ -343,7 +413,7 @@ class TestNotificationCache(unittest.IsolatedAsyncioTestCase):
         session.client = self.client
         self.channel.cache_available = False
         self.store.add_agent_event("codex", "s", "first", "completed", "First")
-        await session.refresh_agent_notifications({"pet_page": 0})
+        await self.refresh(session)
         operations = [cmd for cmd, _ in self.channel.commands]
         self.assertLess(operations.index("snapshot_commit"), operations.index("cache_state"))
         self.assertTrue(self.store.list()[0]["shown"])

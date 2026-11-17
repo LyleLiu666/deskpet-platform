@@ -506,6 +506,70 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(board.pending, [])
             self.assertEqual(board.commits, 1)
 
+    async def test_card_summary_applies_clear_watermark_and_dismiss_before_ack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shared = notifications.NotificationStore(root / "shared.sqlite3")
+            session = BoardSession(root / "device" / "device.json", notification_source=shared)
+            for i in range(12):
+                shared.add_agent_event("codex", f"session-{i}", "done", "completed", "old completion")
+            shared.add_agent_event("codex", "session-0", "done-again", "completed", "same session")
+            shared.add_agent_event("codex", "first-question", "ask", "response", "old request")
+            shared.add_agent_event("codex", "second-question", "ask", "response", "live request")
+            session.notifications.sync()
+            rows, summary = session.notifications.legacy_message_snapshot(0, 0)
+            self.assertEqual(summary, (12, 2))
+            self.assertEqual(len(rows), 10)
+            latest, older_question = rows[:2]
+            clear = latest["id"], int(latest["created_at"])
+            session.notifications.legacy_message_snapshot(clear[0], clear[1] + 1)
+            self.assertEqual(session.notifications.home_summary()["completed_count"], 12)
+            shared.add_agent_event("codex", "later-session", "done", "completed", "arrived after clear")
+            session.notifications.sync()
+
+            class Device:
+                channel = type("Channel", (), {"capabilities": {"message_card_summary": 1}})()
+                pending = [{"id": older_question["id"], "created": int(older_question["created_at"])}]
+                sent = []
+
+                async def pending_notice_feedback(self):
+                    return [], clear, self.pending.copy()
+
+                async def acknowledge_notice_reads(self, ids):
+                    assert ids == [older_question["id"]]
+                    assert shared.home_summary()["response_count"] == 1
+                    self.pending.clear()
+
+                async def sync_messages(self, records, **fields):
+                    self.sent.append((records, fields))
+
+            session.client = board = Device()
+            await session.refresh_messages()
+            self.assertEqual(len(board.sent), 1)
+            rows, fields = board.sent[-1]
+            self.assertEqual(fields, {"summary": (1, 1), "clear": clear})
+            self.assertEqual([row["id"] for row in rows if row["category"] == "response"], [latest["id"]])
+            self.assertFalse(rows[0]["seen"])
+            await session.refresh_messages()
+            self.assertEqual(len(board.sent), 1)
+            session.message_cache_due = 0
+            await session.refresh_messages()
+            self.assertEqual(len(board.sent), 2)
+            session.notifications.resolve_response(latest["id"])
+            await session.refresh_messages()
+            self.assertEqual(board.sent[-1][1]["summary"], (1, 0))
+
+    def test_screen_cache_prioritizes_pending_over_newer_completions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
+            questions = [store.add_agent_event("codex", f"s-{i}", "question", "response", f"request {i}")
+                         for i in range(10)]
+            store.add_agent_event("codex", "later", "done", "completed", "newer completion")
+            rows, summary = store.legacy_message_snapshot(0, 0)
+            self.assertEqual(summary, (1, 10))
+            self.assertEqual([row["id"] for row in rows], list(reversed(questions)))
+            self.assertTrue(all(row["category"] == "response" for row in rows))
+
     def test_existing_notifications_keep_their_delivery_state_after_migration(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "notifications.sqlite3"

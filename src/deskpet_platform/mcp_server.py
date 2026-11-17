@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 import tempfile
 import time
@@ -30,6 +31,7 @@ from .channel import AckTimeout, CommandRejected, DeviceError
 from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS, DASHBOARD_ROTATION, DASHBOARD_INTERVALS, _appearance_theme, _appearance_wallpaper
 from .codex_hook import configure_codex_hooks, configure_hooks, hook_command
 from .codex_quota import fetch_quota
+from .codex_session import can_open_codex_session, open_codex_session
 from .computer_metrics import ComputerMetrics, DisplayPreferences
 from .device_registry import DeviceRegistry
 from .device_sessions import DeviceSessions
@@ -100,6 +102,7 @@ class BoardSession:
         self.identity_registry = None
         self.usb_port = UsbPort.register(usb_port, allow_missing=True) if usb_port is not None else None
         self.client = None
+        self.session_open_epoch = None
         self.next_wifi_probe = 0.0
         self.snapshot = {"connection": "starting"}
         self.lock = asyncio.Lock()
@@ -121,6 +124,7 @@ class BoardSession:
         self.attention_source = None
         self.attention_due = 0.0
         self.last_message_cache = None
+        self.message_cache_due = 0
         self.weather_path = Path(path).parent / "weather-location.json"
         self.weather_lock = asyncio.Lock()
         self.weather_due = 0.0
@@ -155,6 +159,7 @@ class BoardSession:
         self.weather_due = 0
         self.computer_preference_client = None
         self.attention_client = None
+        self.session_open_epoch = None
         if self.client is not None:
             client, self.client = self.client, None
             self.dropped_touches += getattr(client.channel, "dropped_events", 0)
@@ -361,9 +366,19 @@ class BoardSession:
                         self.last_message_cache = None
                         if self.client.channel.capabilities.get("clock_sync") == 1:
                             await self.client.sync_clock(only_missing=True)
-                    compact = (self.client.channel.capabilities.get("compact_status") == 1 and
+                    channel = self.client.channel
+                    compact = (channel.capabilities.get("compact_status") == 1 and
                                getattr(getattr(self.client, "link", None), "wireless", False) is True)
                     heartbeat = await self.client.status(compact=True) if compact else await self.client.status()
+                    if (channel.capabilities.get("agent_cache_first") == 1 and
+                            channel.epoch != self.session_open_epoch and can_open_codex_session()):
+                        try:
+                            await self.client.enable_session_open()
+                        except CommandRejected as error:
+                            if error.code not in ("card_busy", "role_busy"):
+                                raise
+                        else:
+                            self.session_open_epoch = channel.epoch
                     sampled_client = self.client
                     if self.client.channel.capabilities.get('message_read_aloud')==1:
                         await self.refresh_read_request(self.client)
@@ -388,11 +403,13 @@ class BoardSession:
                         try:
                             if self.client.channel.capabilities.get("message_cache") == 1:
                                 await self.refresh_messages()
-                            count = min(65535, self.notifications.unseen_count(for_device=True))
+                            card_summary = (self.client.channel.capabilities.get("message_cache") == 1 and
+                                            self.client.channel.capabilities.get("message_card_summary") == 1)
+                            count = None if card_summary else min(65535, self.notifications.unseen_count(for_device=True))
                         except (sqlite3.Error, ValueError):
                             self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
                         else:
-                            if count != self.last_notice_count:
+                            if count is not None and count != self.last_notice_count:
                                 await self.client.set_notice_count(count)
                                 self.last_notice_count = count
                             capabilities = self.client.channel.capabilities
@@ -460,18 +477,42 @@ class BoardSession:
 
     async def refresh_messages(self):
         client = self.client
-        ids = await client.pending_notice_reads()
+        card_summary = client.channel.capabilities.get("message_card_summary") == 1
+        if card_summary:
+            ids, clear, dismissals = await client.pending_notice_feedback()
+            for item in dismissals:
+                await asyncio.to_thread(self.notifications.dismiss_legacy_response, item["id"], item["created"])
+        else:
+            ids = await client.pending_notice_reads()
+            dismissals = []
         if ids:
-            await asyncio.to_thread(self.notifications.mark_seen_many, ids)
-            await client.acknowledge_notice_reads(ids)
-        records = await asyncio.to_thread(self.notifications.list, 10, for_device=True)
-        fingerprint = [(item["id"], item["seen"], item["title"]) for item in records]
-        if fingerprint != self.last_message_cache:
+            await asyncio.to_thread(self.notifications.mark_seen_many, ids, grouped_completions=card_summary)
+        acknowledged = ids + [item["id"] for item in dismissals]
+        if acknowledged:
+            await client.acknowledge_notice_reads(acknowledged)
+
+        fields = {}
+        stamp = None
+        if card_summary:
+            records, summary = await asyncio.to_thread(self.notifications.legacy_message_snapshot, *clear)
+            stamp = (summary, clear)
+            fields = {"summary": summary, "clear": clear}
+        else:
+            records = await asyncio.to_thread(self.notifications.list, 10, for_device=True)
+        fingerprint = (stamp, [(item["id"], item["seen"], item["title"]) for item in records])
+        if fingerprint != self.last_message_cache or (card_summary and time.monotonic() >= self.message_cache_due):
             responses = [item["id"] for item in records if item["category"] == "response"]
             await asyncio.to_thread(self.notifications.record_response_projection, "legacy", responses)
-            await client.sync_messages(records)
+            try:
+                await client.sync_messages(records, **fields)
+            except CommandRejected as error:
+                if not card_summary or error.code not in ("notice_cache_busy", "notice_cache_commit_failed"):
+                    raise
+                # A local read/clear can invalidate a snapshot while it is being sent.
+                return
             await asyncio.to_thread(self.notifications.record_response_projection, "legacy", responses, confirmed=True)
             self.last_message_cache = fingerprint
+            self.message_cache_due = time.monotonic() + 8
 
     async def refresh_agent_notifications(self, heartbeat):
         if self.client is not None:
@@ -594,6 +635,16 @@ class BoardSession:
             pass # A disconnected board drops the volatile request.
 
     async def process_touch(self, event):
+        if event["action"] == "open_session":
+            accepted = False
+            try:
+                url = await asyncio.to_thread(self.notifications.cached_codex_session_url, event["id"])
+                if url:
+                    accepted = await asyncio.to_thread(open_codex_session, url)
+            except (OSError, sqlite3.Error, subprocess.SubprocessError):
+                pass  # Report failure to the board without dropping the connection.
+            await self.client.finish_session_open(event, accepted=accepted)
+            return
         self.notification_view.touch(event, channel=getattr(self.client, "channel", None))
         if event["action"] == "notice_open":
             item = self.notifications.latest_unseen()

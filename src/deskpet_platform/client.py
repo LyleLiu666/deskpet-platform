@@ -438,6 +438,12 @@ class Client:
         async with self._operation:
             return await self.channel.send("network_select", ssid=ssid)
 
+    async def enable_session_open(self):
+        async with self._operation:
+            state = await self.channel.send("cache_state")
+            if state.get("session_open_ready") is True:
+                await self.channel.send("session_open_ready")
+
     async def next_touch(self, timeout: float = 15):
         """Wait for the reference firmware's tap event, then acknowledge it."""
         if self.channel.capabilities.get("touch_demo") != 1:
@@ -452,24 +458,35 @@ class Client:
                 await asyncio.sleep(0.2)
 
     async def pending_touch(self):
-        """Acknowledge one already received touch without waiting for a new one."""
+        """Read one touch. Desktop actions are acknowledged after dispatch."""
         if self.channel.capabilities.get("touch_demo") != 1:
             return None
         async with self._operation:
             if self.channel.events.empty():
                 return None
-            return await self._acknowledge_touch()
+            return await self._acknowledge_touch(defer_desktop=True)
 
-    async def _acknowledge_touch(self):
+    async def _acknowledge_touch(self, *, defer_desktop=False):
         event = self.channel.events.get_nowait()
+        if event["action"] == "open_session":
+            if not defer_desktop:
+                await self._send_touch_ack(event, "rejected")
+        else:
+            await self._send_touch_ack(event, "accepted")
+        return event
+
+    async def finish_session_open(self, event, *, accepted):
+        async with self._operation:
+            await self._send_touch_ack(event, "accepted" if accepted else "rejected")
+
+    async def _send_touch_ack(self, event, status):
         try:
             await self.channel.send("touch_ack", boot=event["boot"],
-                                    operation=event["operation"], status="accepted")
+                                    operation=event["operation"], status=status)
         except CommandRejected as error:
             # Older firmware rejects a valid event's ACK after its tap slot expires.
             if error.code != "unsupported_command":
                 raise
-        return event
 
     async def upload_file(self, path, source, *, expected_sha256=None, resume=None):
         """Transfer one file to the board's card, reporting a verified write."""
@@ -674,13 +691,27 @@ class Client:
             await self.channel.send("notice_detail", notification_id=identity)
 
     async def pending_notice_reads(self):
+        ids, _, _ = await self.pending_notice_feedback()
+        return ids
+
+    async def pending_notice_feedback(self):
         async with self._operation:
             reply = await self.channel.send("notice_pending")
         ids = reply.get("ids")
         if (not isinstance(ids, list) or len(ids) > 10 or
                 any(type(identity) is not int or not 0 < identity <= 0xFFFFFFFF for identity in ids)):
             raise DeviceError("invalid_notice_reads")
-        return ids
+        clear = (reply.get("clear_through", 0), reply.get("clear_created", 0))
+        dismissals = reply.get("dismissals", [])
+        if (any(type(value) is not int or not 0 <= value <= 0xFFFFFFFF for value in clear)
+                or ("clear_through" in reply) != ("clear_created" in reply)
+                or (clear[0] == 0 and clear[1] != 0)
+                or not isinstance(dismissals, list) or len(ids) + len(dismissals) > 10
+                or any(not isinstance(item, dict) or set(item) != {"id", "created"}
+                       or any(type(value) is not int or not 0 < value <= 0xFFFFFFFF
+                              for value in item.values()) for item in dismissals)):
+            raise DeviceError("invalid_notice_feedback")
+        return ids, clear, dismissals
 
     async def acknowledge_notice_reads(self, ids):
         async with self._operation:
@@ -698,12 +729,17 @@ class Client:
         async with self._operation:
             return await self.channel.send("message_view", mode=mode, **fields)
 
-    async def sync_messages(self, records):
+    async def sync_messages(self, records, *, summary=None, clear=(0, 0)):
         records = list(records)
         rows = [{"id": item["id"], "created": int(item["created_at"]), "seen": item["seen"],
                  "title": _notice_title(item["title"]).hex()} for item in records]
         async with self._operation:
-            await self.channel.send("notice_cache_begin", count=len(rows))
+            fields = {"count": len(rows)}
+            if summary is not None:
+                fields.update(unread=summary[0], responses=summary[1], through=clear[0], created=clear[1])
+                if self.channel.capabilities.get("message_dismissal") == 1:
+                    fields["dismissals"] = True
+            await self.channel.send("notice_cache_begin", **fields)
             for record, row in zip(records, rows):
                 await self.channel.send("notice_cache_row", **row)
                 if self.channel.capabilities.get("message_metadata") == 1:

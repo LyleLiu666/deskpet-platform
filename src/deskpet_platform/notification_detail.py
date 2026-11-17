@@ -8,6 +8,7 @@ import zlib
 from PIL import Image, ImageDraw, ImageFont
 
 from .client import _text_font
+from .notifications import SOURCE_NAMES
 
 FONT='/System/Library/Fonts/Hiragino Sans GB.ttc'
 UI_FONT=next(Path('/System/Library/AssetsV2').glob('com_apple_MobileAsset_Font*/**/PingFang.ttc'),None)
@@ -71,14 +72,15 @@ def render_detail(note,page):
                 fresh=bool(note['fresh']),crc=zlib.crc32(data),pixels=data)
 
 @lru_cache(maxsize=256)
-def _finished_pixels(title,repository,finished,gray):
+def _finished_pixels(title,repository,finished,gray,agent=None,workspace_label="仓库"):
     image=Image.new('L',(WIDTH,112),0);draw=ImageDraw.Draw(image)
+    title_offset=15 if agent else 0
     for size in range(22,9,-1):
         font=ui_font(size)
         lines=balanced_text(title,font,WIDTH-4)
-        if len(lines)*size<=48 and all(font.getlength(line)<=WIDTH-4 for line in lines):break
+        if len(lines)*size<=48-title_offset and all(font.getlength(line)<=WIDTH-4 for line in lines):break
     line_height=size
-    top=max(0,(48-len(lines)*line_height)//2)
+    top=title_offset+max(0,(48-title_offset-len(lines)*line_height)//2)
     for index,line in enumerate(lines):
         draw.text(((WIDTH-font.getlength(line))/2,top+index*line_height),line,font=font,anchor='lt',fill=255)
     font=ui_font(13)
@@ -86,7 +88,10 @@ def _finished_pixels(title,repository,finished,gray):
         if font.getlength(text)<=width:return text
         while text and font.getlength(text+'…')>width:text=text[:-1]
         return text+'…'
-    for y,label,value in ((53,'仓库',repository or '暂无'),(85,'结束时间',finished)):
+    if agent:
+        name=fitting(agent, WIDTH-4)
+        draw.text(((WIDTH-font.getlength(name))/2,0),name,font=font,anchor='lt',fill=210)
+    for y,label,value in ((53,workspace_label,repository or '暂无'),(85,'结束时间',finished)):
         draw.text((5,y),label,font=font,anchor='lt',fill=255)
         draw.text((80,y),fitting(value,208),font=font,anchor='lt',fill=255)
     if gray:
@@ -98,7 +103,8 @@ def _finished_pixels(title,repository,finished,gray):
 def render_finished_detail(note,gray=False):
     # Only session title, verified repository name and end time reach the board.
     finished=datetime.fromtimestamp(note['created']).strftime('%Y-%m-%d %H:%M')
-    pixels=_finished_pixels(note['title'],note['repository'],finished,gray)
+    pixels=_finished_pixels(note['title'],note['repository'],finished,gray,
+                            note.get("agent"),note.get("workspace_label","仓库"))
     value=dict(id=note['id'],revision=note['revision'],page=0,pages=1,
                short_id=note['handle'][-8:],reported=finished,fresh=bool(note['fresh']),
                crc=zlib.crc32(pixels),pixels=pixels)
@@ -116,5 +122,7 @@ def render_cached_detail(record, *, finished_gray=False):
         "reported_at": record["created_at"], "created": record["created_at"], "fresh": False,
     }
     if record["category"] == "completed":
+        note["workspace_label"], note["repository"] = record.get("workspace_context", ("工作区", "未记录"))
+        note["agent"] = SOURCE_NAMES.get(record["source"], record["source"])
         return render_finished_detail(note, gray=finished_gray)
     return render_detail(note, 0)

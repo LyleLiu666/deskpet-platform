@@ -1,4 +1,5 @@
 """Persist recent notifications on devices that support individual offline reads."""
+import asyncio
 import base64
 from datetime import datetime
 import struct
@@ -6,6 +7,7 @@ import time
 import zlib
 
 from .channel import CommandRejected
+from .codex_session import codex_session_url
 from .notification_detail import render_cached_detail
 from .notification_graphics import notification_row
 from .notification_view import _detail_pixels
@@ -17,7 +19,7 @@ DETAIL_CHUNK_BYTES = 252
 
 def _fingerprint(item, bitmap):
     metadata = struct.pack("<BIIQQBB", item["kind"], item["revision"], item["content_revision"],
-                           item["created_ms"], item["updated_ms"], item["unread"], 0)
+                           item["created_ms"], item["updated_ms"], item["unread"], item.get("open_session", False))
     details = item["detail_crc"]
     canonical = (item["id"].encode("ascii") + b"\0" + metadata + base64.b64decode(item["title"]) + b"\0" +
                  base64.b64decode(bitmap[1:]) + struct.pack(f"<B{len(details)}I", len(details), *details))
@@ -63,6 +65,7 @@ class NotificationCache:
         self.store = store
         self.epoch = None
         self.transfer = None
+        self.preparation = None
         self.confirmed = None
         self.confirmed_epoch = None
         self.poll_at = 0
@@ -89,6 +92,9 @@ class NotificationCache:
         if channel.epoch != self.epoch:
             self.epoch = channel.epoch
             self.transfer = None
+            if self.preparation is not None:
+                self.preparation.cancel()
+                self.preparation = None
             self.poll_at = self.retry_at = 0
             self.reuse_failed = False
             self.session_ids = False
@@ -102,6 +108,8 @@ class NotificationCache:
                                        committed is None or committed == self._records(channel)):
                 return
             self.transfer = self._sync(channel)
+        if self.preparation is not None and not self.preparation.done():
+            return
         async with client._operation:
             # Bound the amount of work between heartbeats. Use spare time on
             # fast links to make a complete card commit sooner.
@@ -113,6 +121,8 @@ class NotificationCache:
                     return
                 try:
                     await anext(self.transfer)
+                    if self.preparation is not None and not self.preparation.done():
+                        return
                 except StopAsyncIteration:
                     self.transfer = None
                     self.poll_at = time.monotonic() + 5
@@ -207,11 +217,15 @@ class NotificationCache:
                         await channel.send("cache_abort")
                         raise RuntimeError("invalid_cache_manifest")
                     active[fingerprint] = index if fingerprint not in active else None
+        self.preparation = asyncio.create_task(asyncio.to_thread(
+            self._prepare_records, records, finished_gray=channel.capabilities.get("agent_local_inbox") == 1,
+            feedback_dismissal=supports_dismissal, desktop_sessions=state.get("open_session") is True,
+        ))
+        yield
+        preparation, self.preparation = self.preparation, None
+        rendered = preparation.result()
         prepared = []
-        finished_gray = channel.capabilities.get("agent_local_inbox") == 1
-        for record in records:
-            item, bitmap, detail, pixels = _prepare(record, finished_gray=finished_gray,
-                                                    feedback_dismissal=supports_dismissal)
+        for item, bitmap, detail, pixels in rendered:
             reusable = active.get(_fingerprint(item, bitmap)) if reuse else None
             prepared.append((item, bitmap, reusable))
             if reusable is not None or detail is None:
@@ -283,6 +297,19 @@ class NotificationCache:
         self.confirmed_epoch = channel.epoch
         self.reuse_failed = False
         yield
+
+    def _prepare_records(self, records, *, finished_gray, feedback_dismissal, desktop_sessions):
+        self.store.backfill_workspace_context(records)
+        rendered = []
+        for record in records:
+            item, bitmap, detail, pixels = _prepare(record, finished_gray=finished_gray,
+                                                    feedback_dismissal=feedback_dismissal)
+            if desktop_sessions and record["source"] == "codex":
+                session = record.get("session", record.get("completion_session"))
+                if codex_session_url(session):
+                    item["open_session"] = True
+            rendered.append((item, bitmap, detail, pixels))
+        return rendered
 
     async def _withdraw_open_feedback(self, channel, state):
         generation = state.get("cache_browsing_generation")

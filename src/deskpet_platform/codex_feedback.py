@@ -124,5 +124,5 @@ def deliver(store, event):
     if project.strip() and project.isprintable() and project != title:
         title = f"{project} · {title}"
     store.add_agent_events("codex", session, identities, "response", title,
-                           parent_turn=turn, response_group=identities[0])
+                           parent_turn=turn, response_group=identities[0], workspace=cwd)
     return len(identities)

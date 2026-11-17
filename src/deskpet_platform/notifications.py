@@ -6,9 +6,12 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
+from urllib.parse import urlsplit
 import time
 import asyncio
 from .channel import TextNotVisible
+from .codex_session import codex_session_url
 
 from .file_lock import acquire, release
 
@@ -63,6 +66,55 @@ def session_title(session, cwd):
     except (OSError, sqlite3.Error):
         pass
     return (Path(cwd).name if isinstance(cwd, str) else "")[:64] or "Codex"
+
+
+def _origin_name(origin):
+    if not isinstance(origin, str) or not origin.isprintable():
+        return ""
+    try:
+        path = urlsplit(origin).path if "://" in origin else origin.rsplit(":", 1)[-1]
+    except ValueError:
+        return ""
+    return Path(path).name.removesuffix(".git")[:64]
+
+
+def _git_root(workspace):
+    env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    try:
+        if not workspace.is_dir():
+            return None
+        result = subprocess.run(["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+                                check=True, capture_output=True, text=True, timeout=1, env=env)
+        root = Path(result.stdout.strip())
+        return root if root.is_absolute() else None
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
+
+
+def _valid_workspace(workspace):
+    return workspace if isinstance(workspace, str) and len(workspace) <= 4096 and workspace.isprintable() else None
+
+
+def _workspace_context(source, session, workspace):
+    if source == "codex":
+        try:
+            state = (codex_home() / "state_5.sqlite").resolve().as_uri()
+            with closing(sqlite3.connect(state + "?mode=ro", uri=True, timeout=0.1)) as db:
+                row = db.execute("SELECT cwd,git_origin_url FROM threads WHERE id=?", (session,)).fetchone()
+            if row:
+                if (not workspace or workspace == row[0]) and (repository := _origin_name(row[1])):
+                    return "仓库", repository
+                workspace = workspace or row[0]
+        except (OSError, sqlite3.Error):
+            pass
+    if isinstance(workspace, str) and workspace.isprintable():
+        path = Path(workspace)
+        if path.is_absolute():
+            if repository := _git_root(path):
+                return "仓库", repository.name[:64]
+            if path.name:
+                return "工作区", path.name[:64]
+    return "工作区", "未记录"
 
 
 class NotificationStore:
@@ -139,6 +191,18 @@ class NotificationStore:
                     db.execute("BEGIN IMMEDIATE")
                     if db.execute(group_schema).fetchone() is None:
                         db.execute("ALTER TABLE notifications ADD COLUMN response_group TEXT")
+            workspace_schema = "SELECT 1 FROM pragma_table_info('notifications') WHERE name='workspace'"
+            if db.execute(workspace_schema).fetchone() is None:
+                with db:
+                    db.execute("BEGIN IMMEDIATE")
+                    if db.execute(workspace_schema).fetchone() is None:
+                        db.execute("ALTER TABLE notifications ADD COLUMN workspace TEXT")
+            context_schema = "SELECT 1 FROM pragma_table_info('notifications') WHERE name='workspace_context'"
+            if db.execute(context_schema).fetchone() is None:
+                with db:
+                    db.execute("BEGIN IMMEDIATE")
+                    if db.execute(context_schema).fetchone() is None:
+                        db.execute("ALTER TABLE notifications ADD COLUMN workspace_context TEXT")
             db.execute("""CREATE TABLE IF NOT EXISTS notification_resolutions (
                 source TEXT NOT NULL, session TEXT NOT NULL, event_id TEXT NOT NULL, resolved REAL NOT NULL,
                 PRIMARY KEY(source,session,event_id))""")
@@ -177,14 +241,14 @@ class NotificationStore:
             if through > after:
                 if initial_history and after == 0:
                     db.execute("""INSERT OR IGNORE INTO main.notifications
-                        (source,session,turn,title,created,category,parent_turn,resolved,response_group,shown,seen,dismissed,action_pending)
-                        SELECT source,session,turn,title,created,category,parent_turn,resolved,response_group,?,seen,dismissed,0
+                        (source,session,turn,title,created,category,parent_turn,resolved,response_group,shown,seen,dismissed,action_pending,workspace,workspace_context)
+                        SELECT source,session,turn,title,created,category,parent_turn,resolved,response_group,?,seen,dismissed,0,workspace,workspace_context
                         FROM inbox.notifications WHERE id>? AND id<=? ORDER BY id""", (time.time(), after, through))
                     db.execute("INSERT OR REPLACE INTO notification_attention VALUES (1,(SELECT COALESCE(MAX(id),0) FROM notifications))")
                 else:
                     db.execute("""INSERT OR IGNORE INTO main.notifications
-                        (source,session,turn,title,created,category,parent_turn,resolved,response_group,dismissed)
-                        SELECT source,session,turn,title,created,category,parent_turn,resolved,response_group,dismissed
+                        (source,session,turn,title,created,category,parent_turn,resolved,response_group,dismissed,workspace,workspace_context)
+                        SELECT source,session,turn,title,created,category,parent_turn,resolved,response_group,dismissed,workspace,workspace_context
                         FROM inbox.notifications WHERE id>? AND id<=? ORDER BY id""", (after, through))
                 db.execute("INSERT OR REPLACE INTO notification_sync VALUES (1,?)", (through,))
             # Keep old inboxes compatible with acknowledgements that arrive
@@ -208,7 +272,9 @@ class NotificationStore:
                 not all(isinstance(value, str) and 0 < len(value) <= 128 and value.isprintable()
                         for value in (session, turn))):
             raise ValueError("invalid_codex_stop_event")
-        title = session_title(session, event.get("cwd"))
+        workspace = _valid_workspace(event.get("cwd"))
+        title = session_title(session, workspace)
+        context = _workspace_context("codex", session, workspace)
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             pending = db.execute(f"""SELECT 1 FROM notifications n WHERE source='codex' AND session=?
@@ -216,14 +282,16 @@ class NotificationStore:
                 AND NOT ({SUPERSEDED_QUESTION}) LIMIT 1""", (session, turn)).fetchone()
             if pending:
                 return None
-            return self._insert(db, "codex", session, turn, "completed", title, None)
+            return self._insert(db, "codex", session, turn, "completed", title, None, workspace=workspace, context=context)
 
-    def add_agent_event(self, source, session, event_id, category, title, *, parent_turn=None, response_group=None):
+    def add_agent_event(self, source, session, event_id, category, title, *, parent_turn=None, response_group=None,
+                        workspace=None):
         """Record an explicit adapter event, idempotently within one agent session."""
         return self.add_agent_events(source, session, (event_id,), category, title,
-                                     parent_turn=parent_turn, response_group=response_group)[0]
+                                     parent_turn=parent_turn, response_group=response_group, workspace=workspace)[0]
 
-    def add_agent_events(self, source, session, event_ids, category, title, *, parent_turn=None, response_group=None):
+    def add_agent_events(self, source, session, event_ids, category, title, *, parent_turn=None, response_group=None,
+                         workspace=None):
         """Record a batch in one transaction so a failure cannot expose a partial group."""
         valid_source = (isinstance(source, str) and 0 < len(source) <= 32 and
                         all(c in "abcdefghijklmnopqrstuvwxyz0123456789_" for c in source))
@@ -236,19 +304,21 @@ class NotificationStore:
                 not isinstance(title, str) or not title.strip() or not title.isprintable()):
             raise ValueError("invalid_agent_event")
         title = " ".join(title.split())[:64]
+        workspace = _valid_workspace(workspace)
+        context = _workspace_context(source, session, workspace) if category == "completed" and event_ids else None
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            return [self._insert(db, source, session, event_id, category, title, parent_turn, response_group)
+            return [self._insert(db, source, session, event_id, category, title, parent_turn, response_group, workspace, context)
                     for event_id in event_ids]
 
     @staticmethod
-    def _insert(db, source, session, event_id, category, title, parent_turn, response_group=None):
+    def _insert(db, source, session, event_id, category, title, parent_turn, response_group=None, workspace=None, context=None):
         resolution = db.execute("SELECT resolved FROM notification_resolutions WHERE source=? AND session=? AND event_id=?",
                                 (source, session, event_id)).fetchone() if category == "response" else None
         db.execute("""INSERT OR IGNORE INTO notifications
-            (source,session,turn,title,created,category,parent_turn,resolved,response_group) VALUES (?,?,?,?,?,?,?,?,?)""",
+            (source,session,turn,title,created,category,parent_turn,resolved,response_group,workspace,workspace_context) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                    (source, session, event_id, title, time.time(), category, parent_turn,
-                    resolution[0] if resolution else None, response_group))
+                   resolution[0] if resolution else None, response_group, workspace, json.dumps(context) if context else None))
         identity, stored_category, stored_turn, stored_group = db.execute(
             "SELECT id,category,parent_turn,response_group FROM notifications WHERE source=? AND session=? AND turn=?",
             (source, session, event_id)).fetchone()
@@ -320,7 +390,7 @@ class NotificationStore:
         with closing(self._connect()) as db:
             # Within one request show its latest unanswered question. A more
             # recent request supersedes older turns, including after answer.
-            rows = db.execute(f"""SELECT id,title,created,shown,seen,source,category,resolved,session,turn
+            rows = db.execute(f"""SELECT id,title,created,shown,seen,source,category,resolved,session,turn,workspace,workspace_context
                 FROM notifications AS n
                 WHERE dismissed IS NULL AND (NOT ? OR (category='completed' AND id IN (
                     SELECT MAX(id) FROM notifications WHERE category='completed' AND seen IS NULL
@@ -339,7 +409,30 @@ class NotificationStore:
                 record["completion_session"] = row[8]
             if active_only:
                 record["session"] = row[8]
+                if row[10]:
+                    record["workspace"] = row[10]
+                if row[11]:
+                    record["workspace_context"] = tuple(json.loads(row[11]))
         return records
+
+    def backfill_workspace_context(self, records):
+        legacy = [record for record in records if "session" in record and record["category"] == "completed"
+                  and "workspace_context" not in record]
+        if not legacy:
+            return
+        contexts = {}
+        for record in legacy:
+            key = record["source"], record["session"], record.get("workspace")
+            if key not in contexts:
+                contexts[key] = _workspace_context(*key)
+        with closing(self._connect()) as db, db:
+            for record in legacy:
+                key = record["source"], record["session"], record.get("workspace")
+                db.execute("UPDATE notifications SET workspace_context=? WHERE id=? AND workspace_context IS NULL",
+                           (json.dumps(contexts[key]), record["id"]))
+                stored, = db.execute("SELECT workspace_context FROM notifications WHERE id=?",
+                                     (record["id"],)).fetchone()
+                record["workspace_context"] = tuple(json.loads(stored))
 
     def _matching_cache_record(self, db, cache_id):
         parts = cache_id.split("-", 2)
@@ -359,6 +452,13 @@ class NotificationStore:
             return identity
         return None
 
+    def cached_codex_session_url(self, cache_id):
+        with closing(self._connect()) as db:
+            identity = self._matching_cache_record(db, cache_id)
+            row = db.execute("SELECT session FROM notifications WHERE id=? AND source='codex'",
+                             (identity,)).fetchone()
+            return codex_session_url(row[0]) if row else None
+
     def mark_cached_seen(self, cache_id, *, grouped_completions=False):
         with closing(self._connect()) as db, db:
             identity = self._matching_cache_record(db, cache_id)
@@ -374,21 +474,46 @@ class NotificationStore:
         """Persist the dismissal in the shared inbox before acknowledging the device."""
         with closing(self._connect()) as db, db:
             identity = self._matching_cache_record(db, cache_id)
-            if identity is None:
-                return False
-            event = db.execute("""SELECT source,session,turn FROM notifications
-                WHERE id=? AND category='response'""", (identity,)).fetchone()
-            if event is None:
-                return False
-            now = time.time()
-            if self.source is not None:
-                # The cache ID is board-local. The adapter's event identity is shared.
-                with closing(self.source._connect()) as inbox, inbox:
-                    inbox.execute("""UPDATE notifications SET dismissed=COALESCE(dismissed,?)
-                        WHERE (source,session,turn)=(?,?,?) AND category='response'""", (now, *event))
-            return db.execute("""UPDATE notifications SET dismissed=COALESCE(dismissed,?),
-                seen=COALESCE(seen,?) WHERE id=? AND category='response'""",
-                (now, now, identity)).rowcount > 0
+            return identity is not None and self._dismiss_response(db, identity)
+
+    def dismiss_legacy_response(self, identity, created):
+        with closing(self._connect()) as db, db:
+            row = db.execute("SELECT created FROM notifications WHERE id=? AND category='response'",
+                             (identity,)).fetchone()
+            if row is not None and int(row[0]) == created:
+                self._dismiss_response(db, identity)
+
+    def _dismiss_response(self, db, identity):
+        event = db.execute("""SELECT source,session,turn FROM notifications
+            WHERE id=? AND category='response'""", (identity,)).fetchone()
+        if event is None:
+            return False
+        now = time.time()
+        if self.source is not None:
+            # The cache ID is board-local. The adapter's event identity is shared.
+            with closing(self.source._connect()) as inbox, inbox:
+                inbox.execute("""UPDATE notifications SET dismissed=COALESCE(dismissed,?)
+                    WHERE (source,session,turn)=(?,?,?) AND category='response'""", (now, *event))
+        return db.execute("""UPDATE notifications SET dismissed=COALESCE(dismissed,?),
+            seen=COALESCE(seen,?) WHERE id=? AND category='response'""", (now, now, identity)).rowcount > 0
+
+    def legacy_message_snapshot(self, through, created):
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE" if through else "BEGIN")
+            if through:
+                anchor = db.execute("SELECT created FROM notifications WHERE id=?", (through,)).fetchone()
+                if anchor is not None and int(anchor[0]) == created:
+                    db.execute("""UPDATE notifications SET seen=? WHERE id<=? AND seen IS NULL
+                        AND category='completed'""", (time.time(), through))
+            completed = db.execute("""SELECT count(*) FROM (SELECT DISTINCT source,session
+                FROM notifications WHERE category='completed' AND seen IS NULL)""").fetchone()[0]
+            responses = db.execute(f"SELECT count(*) FROM notifications n WHERE {OPEN_QUESTION}").fetchone()[0]
+            rows = db.execute(f"""SELECT * FROM (
+                SELECT id,title,created,shown,seen,source,category,resolved FROM notifications n
+                WHERE category='completed' OR ({OPEN_QUESTION})
+                ORDER BY category='response' DESC,id DESC LIMIT 10
+                ) ORDER BY id DESC""").fetchall()
+        return self._items(rows), (min(65535, completed), min(65535, responses))
 
     def withdrawn_response_count(self):
         with closing(self._connect()) as db:
@@ -573,9 +698,14 @@ class NotificationStore:
             return db.execute("""UPDATE notifications SET resolved=? WHERE source=? AND session=?
                 AND category='response' AND resolved IS NULL""", (time.time(), source, session)).rowcount
 
-    def mark_seen_many(self, identities):
+    def mark_seen_many(self, identities, *, grouped_completions=False):
         with closing(self._connect()) as db, db:
             now = time.time()
+            if grouped_completions:
+                db.executemany("""UPDATE notifications SET seen=? WHERE category='completed' AND seen IS NULL
+                    AND id<=? AND (source,session)=(SELECT source,session FROM notifications
+                                                   WHERE id=? AND category='completed')""",
+                               ((now, identity, identity) for identity in identities))
             db.executemany("UPDATE notifications SET seen=COALESCE(seen,?) WHERE id=?",
                            ((now, identity) for identity in identities))
 

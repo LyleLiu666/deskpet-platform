@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from deskpet_platform.mcp_server import BoardSession
 from deskpet_platform.channel import Channel, CommandRejected
@@ -11,6 +12,49 @@ import json
 
 
 class TouchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_open_session_routes_only_the_matching_cached_codex_event(self):
+        class Wire:
+            async def write(self, raw):
+                self.request = json.loads(raw[3:])
+
+            async def readline(self):
+                return b"P1," + json.dumps({**self.request, "ok": True, "boot": 1}).encode() + b"\n"
+
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json")
+            config = DeviceConfig("02:00:00:00:00:01", bytes(32))
+            client = session.client = Client(config)
+            wire = Wire()
+            channel = client.channel = Channel(wire, config.identity)
+            channel.epoch, channel.boot, channel.online = "a" * 32, 1, True
+            channel.capabilities = {"touch_demo": 1}
+            thread = "019a2da9-e5d0-7000-844a-1c30b7f5477d"
+            for source in ("codex", "claude_code"):
+                session.notifications.add_agent_event(source, thread, "turn", "completed", source)
+            records = {row["source"]: row["cache_id"] for row in session.notifications.cache_records()}
+            with patch("deskpet_platform.mcp_server.open_codex_session", return_value=True) as launch:
+                for operation, (identity, status) in enumerate([
+                    (records["codex"], "accepted"), (records["claude_code"], "rejected"),
+                    (records["codex"] + "f", "rejected"),
+                ], 1):
+                    touch = {"type": "touch", "epoch": channel.epoch, "boot": 1, "operation": operation,
+                             "version": 0, "id": identity, "action": "open_session"}
+                    channel.capture_event(b"P1," + json.dumps(touch).encode() + b"\n")
+                    event = await client.pending_touch()
+                    self.assertEqual(event, touch)
+                    if operation == 1:
+                        self.assertFalse(hasattr(wire, "request"))
+                    await session.process_touch(event)
+                    self.assertEqual(wire.request["status"], status)
+                    self.assertEqual(wire.request["operation"], operation)
+                launch.assert_called_once_with(f"codex://threads/{thread}")
+
+            touch = {**touch, "operation": 4, "id": records["codex"]}
+            channel.capture_event(b"P1," + json.dumps(touch).encode() + b"\n")
+            self.assertEqual(await client.next_touch(), touch)
+            self.assertEqual(wire.request["type"], "touch_ack")
+            self.assertEqual(wire.request["status"], "rejected")
+
     async def test_transfer_receipt_survives_touch_queue_overflow(self):
         class Wire:
             async def write(self, raw):

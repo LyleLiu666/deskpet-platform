@@ -110,7 +110,7 @@ def deliver(store, event):
             identity = _turn_id(event)
             if identity:
                 break
-        completed = identity and store.add_agent_event("claude_code", session, identity, "completed", title)
+        completed = identity and store.add_agent_event("claude_code", session, identity, "completed", title, workspace=cwd)
         return bool(completed or settled)
     if event.get("tool_name") != TOOL:
         return False
@@ -120,7 +120,7 @@ def deliver(store, event):
     if kind == "PreToolUse":
         details = event.get("tool_input")
         if isinstance(details, dict) and isinstance(details.get("questions"), list) and details["questions"]:
-            return bool(store.add_agent_event("claude_code", session, identity, "response", title))
+            return bool(store.add_agent_event("claude_code", session, identity, "response", title, workspace=cwd))
     if kind in ("PostToolUse", "PostToolUseFailure"):
         return bool(store.resolve_agent_event("claude_code", session, identity))
     return False
