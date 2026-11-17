@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+import asyncio
 from io import BytesIO
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ from urllib.parse import urlsplit
 
 from deskpet_platform.weather import fetch_relay_weather
 from deskpet_platform.mcp_server import BoardSession
+from deskpet_platform.client import Client
 
 
 class WeatherRelayTests(unittest.TestCase):
@@ -41,6 +43,7 @@ class WeatherRelayTests(unittest.TestCase):
     def test_device_location_returns_bounded_current_and_week(self):
         result = fetch_relay_weather({"latitude": 31.2, "longitude": 121.5, "label": "Desk"},
                                      opener=self.provider, now=self.now)
+        self.assertEqual(result["city"], "Desk")
         self.assertEqual(self.visited, ["api.open-meteo.com"])
         self.assertEqual((result["degrees"], result["icon"], result["ttl_seconds"]), (14, 0, 5100))
         self.assertEqual(bytes.fromhex(result["days"])[:5], bytes([11, 12, 107, 115, 7]))
@@ -120,6 +123,20 @@ class WeatherRelaySessionTests(unittest.IsolatedAsyncioTestCase):
             with patch("deskpet_platform.mcp_server.fetch_relay_weather", side_effect=disconnected):
                 await session.refresh_weather()
             client.relay_weather.assert_not_awaited()
+
+
+class WeatherRelayCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_city_sent_only_when_device_advertises_support(self):
+        client = Client.__new__(Client)
+        client._operation = asyncio.Lock()
+        client.channel = SimpleNamespace(capabilities={"weather_relay": 1}, send=AsyncMock())
+        snapshot = {"degrees": 14, "city": "Suzhou"}
+        await client.relay_weather(snapshot)
+        client.channel.send.assert_awaited_with("weather_relay", degrees=14)
+        client.channel.capabilities["weather_relay_city"] = 1
+        await client.relay_weather(snapshot)
+        client.channel.send.assert_awaited_with("weather_relay", degrees=14, city="Suzhou")
+        self.assertEqual(snapshot["city"], "Suzhou")
 
 
 if __name__ == "__main__":

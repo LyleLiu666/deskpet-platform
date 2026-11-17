@@ -156,6 +156,56 @@ class RoleInstallTests(unittest.TestCase):
 
 
 class RoleInstallFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_larger_motion_requires_device_capability_before_upload(self):
+        from test_role_archive import make_archive, make_motion
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = make_archive(root, motion=make_motion(width=245, height=256))
+            session = BoardSession(root / "device.json")
+            board = SimpleNamespace(channel=SimpleNamespace(capabilities={
+                "card_transfer": 1, "role_actions": 1, "role_zip_motion": 1}),
+                upload_file=AsyncMock(), prepare_role=AsyncMock())
+            session.client = board
+            self.assertEqual(await session.install_role(archive),
+                             {"status": "unsupported", "reason": "role_large_motion_not_supported"})
+            board.upload_file.assert_not_awaited()
+
+    async def test_custom_anchor_requires_device_capability_before_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = make_archive(root)
+            with ZipFile(archive) as package:
+                contents = {name: package.read(name) for name in package.namelist()}
+            timeline = bytearray(contents["pet-v2/timeline-v2.bin"])
+            struct.pack_into("<hh", timeline, 20 + 12, 87, 159)
+            struct.pack_into("<I", timeline, 12, zlib.crc32(timeline[20:]))
+            contents["pet-v2/timeline-v2.bin"] = timeline
+            with ZipFile(archive, "w") as package:
+                for name, data in contents.items():
+                    package.writestr(name, data)
+            session = BoardSession(root / "device.json")
+            board = SimpleNamespace(channel=SimpleNamespace(capabilities={
+                "card_transfer": 1, "role_actions": 1, "role_zip_motion": 1}),
+                upload_file=AsyncMock(), prepare_role=AsyncMock())
+            session.client = board
+            self.assertEqual(await session.install_role(archive),
+                             {"status": "unsupported", "reason": "role_large_frames_not_supported"})
+            board.upload_file.assert_not_awaited()
+
+    async def test_larger_portable_frames_require_device_capability_before_upload(self):
+        from test_role_archive import make_archive
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = make_archive(root, width=240, height=218)
+            session = BoardSession(root / "device.json")
+            board = SimpleNamespace(channel=SimpleNamespace(capabilities={
+                "card_transfer": 1, "role_actions": 1, "role_zip_motion": 1}),
+                upload_file=AsyncMock(), prepare_role=AsyncMock())
+            session.client = board
+            self.assertEqual(await session.install_role(archive),
+                             {"status": "unsupported", "reason": "role_large_frames_not_supported"})
+            board.upload_file.assert_not_awaited()
+
     async def test_install_rejects_pet1_before_upload_on_full_display_firmware(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

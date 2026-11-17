@@ -86,7 +86,10 @@ def fetch_relay_weather(location=None, *, opener=urlopen, now=None):
         ttl = int(5400 - max(0, age))
         if ttl < 1:
             raise ValueError()
-        return {"degrees": _rounded(temperature), "icon": icon, "ttl_seconds": ttl, "days": days.hex()}
+        result = {"degrees": _rounded(temperature), "icon": icon, "ttl_seconds": ttl, "days": days.hex()}
+        if "label" in location:
+            result["city"] = location["label"]
+        return result
     except (OSError, KeyError, IndexError, TypeError, OverflowError, ValueError):
         raise ValueError("无法取得有效的天气数据。") from None
 

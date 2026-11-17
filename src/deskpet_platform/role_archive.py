@@ -25,22 +25,24 @@ ROLE1_ZIP_FILES = {
     "kind": 6,
     "row.565": 320 * 68 * 2,
     "land.bin": 512 + 336 * 240,
-    "motion.bin": 104 + 128 * (16 + 65536),
-    "pet-v2/frames.bin": 20 + 512 * (768 + 176 * 160),
+    "motion.bin": 104 + 128 * (16 + 131072),
+    "pet-v2/frames.bin": 20 + 512 * 65536,
     "pet-v2/timeline-v2.bin": 20 + 30 * 80,
 }
 FIXED_SIZE_FILES = {"kind", "row.565", "land.bin"}
 _FRAME = struct.Struct("<IIIHH")
 
 
-def _valid_cel(data):
+def _valid_cel(data, width, height):
     offset = 512
     visible = False
-    for _ in range(192):
+    for _ in range(height):
         if offset >= len(data):
             return False
         runs = data[offset]
         offset += 1
+        if runs > (width + 1) // 2:
+            return False
         end = 0
         for _ in range(runs):
             if offset + 2 > len(data):
@@ -48,7 +50,7 @@ def _valid_cel(data):
             x, count = data[offset:offset + 2]
             offset += 2
             stop = offset + count * 2
-            if not count or x < end or x + count > 184 or stop > len(data):
+            if not count or x < end or x + count > width or stop > len(data):
                 return False
             visible |= any(alpha >= 16 for alpha in data[offset + 1:stop:2])
             offset, end = stop, x + count
@@ -62,7 +64,7 @@ def validate_motion(path):
             raise ValueError()
         data = path.read_bytes()
         magic, version, width, height, clips, frames, burst, size = struct.unpack_from("<4s6HI", data)
-        if ((magic, width, height, size) != (b"DNC1", 184, 192, len(data)) or
+        if (magic != b"DNC1" or (width, height) not in ((184, 192), (245, 256)) or size != len(data) or
                 {2: 5, 3: 10}.get(version) != clips or
                 not 0 < burst < frames <= 128):
             raise ValueError()
@@ -90,11 +92,11 @@ def validate_motion(path):
         for index in range(frames):
             start, length, checksum, duration, reserved = _FRAME.unpack_from(data, table + index * _FRAME.size)
             stop = start + length
-            if (start != offset or not 704 <= length <= 65536 or stop > len(data) or
+            if (start != offset or not 512 + height <= length <= 131072 or stop > len(data) or
                     not 1 <= duration <= 10000 or reserved):
                 raise ValueError()
             cel = data[start:stop]
-            if zlib.crc32(cel) != checksum or not _valid_cel(cel):
+            if zlib.crc32(cel) != checksum or not _valid_cel(cel, width, height):
                 raise ValueError()
             if moving <= index < frames - burst:
                 if cel in idle:

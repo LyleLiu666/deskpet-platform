@@ -15,6 +15,7 @@ from pathlib import Path
 import tempfile
 import time
 import sqlite3
+import struct
 from typing import Any, Literal, get_args
 import webbrowser
 
@@ -1437,6 +1438,23 @@ class BoardSession:
                 return {"status": "unsupported"}
             if bundle.portable and capabilities.get("role_zip_motion") != 1:
                 return {"status": "unsupported", "reason": "role_zip_motion_not_supported"}
+            if bundle.portable and capabilities.get("role_large_frames") != 1:
+                frames = next(item.source for item in bundle.files if item.relative == "pet-v2/frames.bin")
+                with frames.open("rb") as stream:
+                    header = stream.read(10)
+                timeline = next(item.source for item in bundle.files if item.relative == "pet-v2/timeline-v2.bin")
+                data = timeline.read_bytes()
+                anchors = (struct.unpack_from("<hh", data, offset + 12)
+                           for offset in range(20, len(data), 80))
+                if (len(header) != 10 or struct.unpack_from("<HH", header, 6) != (176, 160) or
+                        any(anchor != (88, 159) for anchor in anchors)):
+                    return {"status": "unsupported", "reason": "role_large_frames_not_supported"}
+            if bundle.portable and capabilities.get("role_large_motion") != 1:
+                motion = next(item.source for item in bundle.files if item.relative == "motion-v2.bin")
+                with motion.open("rb") as stream:
+                    header = stream.read(10)
+                if len(header) != 10 or struct.unpack_from("<HH", header, 6) != (184, 192):
+                    return {"status": "unsupported", "reason": "role_large_motion_not_supported"}
             # Full display builds before role1_required already advertised pet_view.
             role1_required = capabilities.get("role1_required", capabilities.get("pet_view") is True)
             if not bundle.portable and role1_required == 1:

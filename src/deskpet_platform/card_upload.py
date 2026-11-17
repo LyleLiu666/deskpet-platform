@@ -228,6 +228,7 @@ async def upload_file(channel, device_ip, key, path, source, *, expected_sha256=
         # Each HTTP retry uses a fresh one-use address, as in the reference controller.
         for attempt in range(3):
             relay = CardRelay(device_ip, encrypted).start()
+            retry_delay = 0
             try:
                 fields = dict(path=path, bytes=size, crc32=crc, iv=iv.hex(), url=relay.url)
                 if background:
@@ -240,11 +241,19 @@ async def upload_file(channel, device_ip, key, path, source, *, expected_sha256=
                     raise RuntimeError("设备未确认储存卡文件已写入。")
                 break
             except CommandRejected as error:
+                # The board explicitly reports this only when no worker was
+                # started, so no write can still be running behind the retry.
+                worker_unavailable = (background and error.code == "card_transfer_failed" and
+                                      error.stage == "worker_start")
                 if (attempt == 2 or (background and deadline <= loop.time()) or
-                        error.stage not in ("http_open", "http_headers", "http_body", "http_tag")):
+                        not worker_unavailable and error.stage not in ("http_open", "http_headers", "http_body", "http_tag")):
                     raise
+                if worker_unavailable:
+                    retry_delay = min(3 * (attempt + 1), max(0, deadline - loop.time()))
             finally:
                 await asyncio.to_thread(relay.close)
+            if retry_delay:
+                await asyncio.sleep(retry_delay)
     return {"path": path, "bytes": size, "crc32": f"{crc:08x}",
             "unchanged": result.get("unchanged") is True}
 

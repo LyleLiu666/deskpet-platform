@@ -12,9 +12,9 @@ from deskpet_platform.role_staging import prepare_role_source, stage_role
 from test_role_pack import make_pack
 
 
-def make_motion(*, dense=False, glide=False, layered=False, first_gear_frames=2):
-    pixels = (bytes((1, 0, 160)) + bytes((0, 255)) * 160) * 192 if dense else (
-        bytes((1, 2, 3, 0, 255, 0, 127, 0, 0)) + bytes(191))
+def make_motion(*, dense=False, glide=False, layered=False, first_gear_frames=2, width=184, height=192):
+    pixels = (bytes((1, 0, 160)) + bytes((0, 255)) * 160) * height if dense else (
+        bytes((1, 2, 3, 0, 255, 0, 127, 0, 0)) + bytes(height-1))
     counts = (first_gear_frames,) + (1,) * 9 if glide else (1,) * 5
     clips = bytearray()
     first = 0
@@ -39,15 +39,15 @@ def make_motion(*, dense=False, glide=False, layered=False, first_gear_frames=2)
         entries.extend(struct.pack("<IIIHH", offset, len(frame), zlib.crc32(frame), 300, 0))
         offset += len(frame)
     return (
-        struct.pack("<4s6HI", b"DNC1", 3 if glide else 2, 184, 192, len(counts), len(frames), 1, offset) +
+        struct.pack("<4s6HI", b"DNC1", 3 if glide else 2, width, height, len(counts), len(frames), 1, offset) +
         clips + entries + b"".join(frames)
     )
 
 
-def make_archive(directory, *, extra=None, link=False, motion=None):
+def make_archive(directory, *, extra=None, link=False, motion=None, width=176, height=160):
     artwork = directory / "pet"
     artwork.mkdir(exist_ok=True)
-    make_pack(artwork)
+    make_pack(artwork, width=width, height=height)
     path = directory / "测试角色.zip"
     with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", '{"version":1,"id":"user-archive","name":"测试角色"}')
@@ -65,6 +65,19 @@ def make_archive(directory, *, extra=None, link=False, motion=None):
 
 
 class RoleArchiveTests(unittest.TestCase):
+    def test_larger_motion_keeps_the_same_clips_and_actions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = make_archive(root, motion=make_motion(glide=True, dense=True, width=245, height=256))
+            role = prepare_role_source(archive, root / "accepted")
+            self.assertEqual(role.actions[-5:], tuple(f"glide_{gear}" for gear in range(1, 6)))
+
+    def test_portable_role_accepts_larger_interaction_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = make_archive(root, width=240, height=218)
+            self.assertTrue(prepare_role_source(archive, root / "accepted").portable)
+
     def test_glide_running_clip_matches_firmware_frame_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

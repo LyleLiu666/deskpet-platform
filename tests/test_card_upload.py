@@ -212,8 +212,10 @@ class CardUploadTests(unittest.IsolatedAsyncioTestCase):
                      ("card_transfer_failed", "http_headers", True),
                      ("card_transfer_failed", "http_body", True),
                      ("card_transfer_failed", "http_tag", True),
+                     ("card_transfer_failed", "worker_start", True),
                      ("card_transfer_failed", "card_verify", False),
                      ("card_transfer_failed", "http_status", False),
+                     ("other_error", "worker_start", False),
                      ("unknown_card_transfer", None, False))
             for code, stage, retry in cases:
                 with self.subTest(code=code, stage=stage):

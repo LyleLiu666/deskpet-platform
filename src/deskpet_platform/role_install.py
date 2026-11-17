@@ -152,7 +152,7 @@ def validate_action_pack(directory, *, portable=False):
                     width * height > 65536 - 768 or not 1 <= actions <= MAX_ROLE_ACTIONS or not 1 <= count <= MAX_ROLE_FRAMES or
                     frames.stat().st_size != 20 + count * (768 + width * height)):
                 raise ValueError()
-            if portable and ((width, height) != (176, 160) or actions not in (12, 30) or count > 512):
+            if portable and (actions not in (12, 30) or count > 512):
                 raise ValueError()
             crc = 0
             while chunk := stream.read(256 * 1024):
@@ -179,8 +179,6 @@ def validate_action_pack(directory, *, portable=False):
             if (identity != index or not 1 <= number <= capacity or first >= count or not 100 <= duration <= 6000 or
                     loop > 1 or fallback >= entries or not safe or safe >> number or
                     not 0 <= x < width or not 0 <= y < height):
-                raise ValueError()
-            if portable and (x, y) != (88, 159):
                 raise ValueError()
             order_start = offset + record.size
             if any(frame >= count for frame in indices.unpack_from(data, order_start)[:number]):

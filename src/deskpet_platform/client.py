@@ -170,6 +170,8 @@ class Client:
     async def relay_weather(self, snapshot):
         if self.channel.capabilities.get("weather_relay") != 1:
             raise DeviceError("weather_not_supported")
+        if self.channel.capabilities.get("weather_relay_city") != 1:
+            snapshot = {key: value for key, value in snapshot.items() if key != "city"}
         async with self._operation:
             return await self.channel.send("weather_relay", **snapshot)
 
