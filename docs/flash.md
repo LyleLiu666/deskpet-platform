@@ -13,7 +13,9 @@
 - **首次刷机包**用于空白开发板，包含引导程序、分区表、启动数据和应用镜像。刷写启动数据会重置启动分区选择。已有固件的小板请先备份 Flash 和储存卡。
 - **升级包**用于装过兼容镜像的小板。先读回分区表并与包内校验值比对，通过后只更新应用区。Wi-Fi、配对设置和储存卡文件位于其他存储区域。
 
-在 [RC1 下载页](https://github.com/LyleLiu666/deskpet-platform/releases/tag/v0.1.0-rc1) 可取得当前固件 `rc.54`。空白板选 `deskpet-esp32-2432s028-0.1.0-rc.54-factory.zip`。运行 `rc.53` 的兼容小板选 `deskpet-esp32-2432s028-0.1.0-rc.54-upgrade.zip`，解压后按包内 README 校验分区表并更新。下载后可用同页的 `SHA256SUMS-firmware-rc.54.txt` 核对 ZIP 的 SHA-256。已安装 `rc.54` 的小板可直接进入[配网与配对](../src/deskpet_platform/manuals/operations.md#手机扫码配网和配对)。
+空白板可从 [RC1 下载页](https://github.com/LyleLiu666/deskpet-platform/releases/tag/v0.1.0-rc1) 下载 `deskpet-esp32-2432s028-0.1.0-rc.54-factory.zip` 首刷包，并用同页的 `SHA256SUMS-firmware-rc.54.txt` 核对。首次刷写后，如需最新功能，可再按下述方式升级应用。
+
+已使用兼容分区表的小板，可从 [RC6 下载页](https://github.com/LyleLiu666/deskpet-platform/releases/tag/v0.1.0-rc6) 下载最新应用镜像 `firmware-0834cc7.bin`，并用同页的 `SHA256SUMS-firmware.txt` 核对。升级前须核对目标板型及读回的分区表，按发布页和源码材料包中的说明操作。更新后进入[配网与配对](../src/deskpet_platform/manuals/operations.md#手机扫码配网和配对)。
 
 ## 首次刷机
 
