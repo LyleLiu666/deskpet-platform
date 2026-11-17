@@ -69,6 +69,8 @@ class QuotaStore:
 
     def refresh_antigravity(self):
         """Coalesce CLI attempts across all processes using this quota store."""
+        if not self.path.is_file() or self.path.is_symlink():
+            return
         source = "antigravity"
         now = time.time()
         if self.read(source, now, max_age=ANTIGRAVITY_REFRESH_SECONDS):

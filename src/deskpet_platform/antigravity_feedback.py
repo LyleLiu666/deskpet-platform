@@ -1,8 +1,11 @@
 """Receive Antigravity's completion and question hooks."""
+from contextlib import closing
 import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
+import time
 from uuid import UUID
 
 from .codex_hook import _load, _write, generated_hook_target
@@ -84,20 +87,107 @@ def configure(path, command, *, enabled, previous_commands=()):
     return changed
 
 
-def _completed_prompt(session, transcript_path):
-    if not isinstance(transcript_path, str) or not transcript_path:
+def _is_uuid(value: str) -> bool:
+    try:
+        return str(UUID(value)) == value
+    except (ValueError, AttributeError):
+        return False
+
+
+def _transcript_target(session: str, transcript_path: object) -> tuple[str, Path] | None:
+    if not isinstance(transcript_path, str) or not transcript_path or not _is_uuid(session):
         return None
     try:
-        if str(UUID(session)) != session:
-            return None
         path = Path(transcript_path).expanduser()
         if path.name not in ("transcript.jsonl", "transcript_full.jsonl"):
             return None
-        path = path.resolve()
+        resolved = path.resolve()
         profiles = Path.home() / ".gemini"
-        if not any(path == (profiles / profile).resolve() / "brain" / session /
-                   ".system_generated" / "logs" / path.name for profile in ANTIGRAVITY_PROFILES):
+        for profile in ANTIGRAVITY_PROFILES:
+            expected = (profiles / profile).resolve() / "brain" / session / ".system_generated" / "logs" / path.name
+            if resolved == expected:
+                return profile, resolved
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _query_summary_row(db_path: Path, session: str) -> tuple[object, ...] | None:
+    if db_path.is_symlink() or not db_path.is_file():
+        return None
+    try:
+        uri = db_path.resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.1)) as db:
+            return db.execute(
+                "SELECT title FROM conversation_summaries WHERE conversation_id=?",
+                (session,),
+            ).fetchone()
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+
+
+def _clean_title(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    clean = " ".join(value.split())
+    if not clean or not clean.isprintable():
+        return None
+    return clean[:64]
+
+
+def _read_summary_title(db_path: Path, session: str, *, wait_for_title: bool = False) -> str | None:
+    row = _query_summary_row(db_path, session)
+    if row is None:
+        return None
+    if title := _clean_title(row[0]):
+        return title
+    if not wait_for_title:
+        return None
+    for delay in (0.05, 0.1, 0.15):
+        time.sleep(delay)
+        row = _query_summary_row(db_path, session)
+        if row is None:
             return None
+        if title := _clean_title(row[0]):
+            return title
+    return None
+
+
+def _summary_title(session: str, transcript_path: object, *, wait_for_title: bool = False) -> str | None:
+    if not _is_uuid(session):
+        return None
+    target = _transcript_target(session, transcript_path)
+    profiles = (target[0],) if target is not None else ANTIGRAVITY_PROFILES
+    root = Path.home() / ".gemini"
+    for profile in profiles:
+        title = _read_summary_title(root / profile / "conversation_summaries.db", session, wait_for_title=wait_for_title)
+        if title is not None:
+            return title
+    return None
+
+
+def _workspace_title(event: dict) -> str | None:
+    workspaces = event.get("workspacePaths")
+    workspace = workspaces[0] if isinstance(workspaces, list) and workspaces else None
+    if not isinstance(workspace, str):
+        return None
+    return _clean_title(Path(workspace).name)
+
+
+def session_title(session: str, event: dict, *, wait_for_title: bool = False) -> str:
+    return (
+        _summary_title(session, event.get("transcriptPath"), wait_for_title=wait_for_title)
+        or _workspace_title(event)
+        or "Antigravity"
+    )
+
+
+def _completed_prompt(session, transcript_path):
+    target = _transcript_target(session, transcript_path)
+    if target is None:
+        return None
+    _, path = target
+    try:
         if not path.is_file():
             return None
         with path.open("rb") as stream:
@@ -124,7 +214,7 @@ def _completed_prompt(session, transcript_path):
     return None
 
 
-def _deliver_question(store, event, session, title):
+def _deliver_question(store, event, session):
     tool = event.get("toolCall")
     if not isinstance(tool, dict) or tool.get("name") != QUESTION_TOOL:
         return False
@@ -139,6 +229,7 @@ def _deliver_question(store, event, session, title):
     questions = args.get("questions") if isinstance(args, dict) else None
     if not isinstance(questions, list) or not questions:
         return False
+    title = session_title(session, event)
     return bool(store.add_agent_event("antigravity", session, identity, "response", title))
 
 
@@ -148,13 +239,9 @@ def deliver(store, event):
     session = event.get("conversationId")
     if not isinstance(session, str) or not 0 < len(session) <= 128 or not session.isprintable():
         return False
-    workspaces = event.get("workspacePaths")
-    workspace = workspaces[0] if isinstance(workspaces, list) and workspaces else None
-    title = Path(workspace).name if isinstance(workspace, str) else ""
-    title = title if title.strip() and title.isprintable() else "Antigravity"
     kind = event.get("hookEventName", "Stop")
     if kind in ("PreToolUse", "PostToolUse"):
-        return _deliver_question(store, event, session, title)
+        return _deliver_question(store, event, session)
     execution = event.get("executionNum")
     if (kind != "Stop" or event.get("fullyIdle") is not True or event.get("error") or
             event.get("continuationActive") or type(execution) is not int or not 0 <= execution <= 2**63 - 1):
@@ -169,4 +256,5 @@ def deliver(store, event):
         return False
     if identity is None:
         return False
+    title = session_title(session, event, wait_for_title=True)
     return bool(store.add_agent_event("antigravity", session, identity, "completed", title))

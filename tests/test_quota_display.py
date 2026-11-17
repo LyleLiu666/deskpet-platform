@@ -44,6 +44,65 @@ class QuotaDisplayTests(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
+    async def test_multi_source_board_receives_codex_and_both_antigravity_groups(self):
+        class Channel:
+            capabilities = {"quota_sources": 1, "quota_multi": 1}
+
+        class Board:
+            channel = Channel()
+
+            def __init__(self):
+                self.complete = asyncio.Event()
+                self.snapshots = {}
+
+            async def update_quota(self, reading):
+                self.snapshots[reading["source"]] = reading["quotas"]
+                if len(self.snapshots) == 4:
+                    self.complete.set()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = QuotaStore(root / "quota.sqlite3")
+            now = int(time.time())
+            buckets = {
+                "gemini-5h": {"remaining_fraction": 0.97},
+                "gemini-weekly": {"remaining_fraction": 0.90},
+                "3p-5h": {"remaining_fraction": 0.75},
+                "3p-weekly": {"remaining_fraction": 0.60},
+            }
+            store.record("antigravity", {"quota": buckets}, now)
+            session = BoardSession(root / "device.json", quota_store=store, no_token_probe=True)
+            session.client = board = Board()
+            session.snapshot["quota_source"] = "antigravity_gemini"
+            session.codex_live_allowance = {"quotas": [[84, 300, now + 300], [63, 10080, now + 6000]]}
+            session.codex_live_observed_at = now
+            task = asyncio.create_task(session.poll_quota_display())
+            try:
+                await asyncio.wait_for(board.complete.wait(), 2)
+                self.assertEqual(board.snapshots, {
+                    "codex": [[84, 300, now + 300], [63, 10080, now + 6000]],
+                    "claude_code": [],
+                    "antigravity_gemini": [[97, 300, None], [90, 10080, None]],
+                    "antigravity_third_party": [[75, 300, None], [60, 10080, None]],
+                })
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_multi_source_board_refreshes_antigravity_with_codex_selected(self):
+        class Board:
+            channel = type("Channel", (), {"capabilities": {"quota_sources": 1, "quota_multi": 1}})()
+
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json", no_token_probe=True)
+            session.client = Board()
+            session.snapshot["quota_source"] = "codex"
+            with patch.object(session.quota_store, "refresh_antigravity") as refresh:
+                with patch("deskpet_platform.mcp_server.asyncio.sleep", side_effect=asyncio.CancelledError):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await session.poll_antigravity_quota()
+                refresh.assert_called_once()
+
     async def test_antigravity_refresh_is_shared_even_if_the_cli_returns_no_reading(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "quota.sqlite3"

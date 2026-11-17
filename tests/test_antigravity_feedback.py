@@ -1,6 +1,8 @@
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -115,3 +117,58 @@ class AntigravityFeedbackTests(unittest.TestCase):
         self.assertEqual(hooks["other"], previous)
         self.assertTrue(antigravity_feedback.configure(path, command, enabled=False))
         self.assertEqual(json.loads(path.read_text()), {"other": previous})
+
+    def test_session_title_is_read_from_conversation_summaries_without_leaking_preview(self):
+        session = "4adc6fe4-8ffc-4ad1-b021-87e685a1ca82"
+        profile = self.root / ".gemini" / "antigravity"
+        transcript = profile / "brain" / session / ".system_generated" / "logs" / "transcript.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(
+            json.dumps({"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "private prompt"}) + "\n"
+            + json.dumps({"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE"}) + "\n"
+        )
+        db_path = profile / "conversation_summaries.db"
+        with closing(sqlite3.connect(db_path)) as db, db:
+            db.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, preview TEXT)")
+            db.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?)",
+                       (session, "  搭搭通知标题测试 \n ", "private preview snippet"))
+        event = {"hookEventName": "Stop", "terminationReason": "NO_TOOL_CALL", "fullyIdle": True,
+                 "conversationId": session, "executionNum": 0, "transcriptPath": str(transcript),
+                 "workspacePaths": [], "lastUserInput": "private prompt"}
+        with patch("deskpet_platform.antigravity_feedback.Path.home", return_value=self.root):
+            self.assertTrue(antigravity_feedback.deliver(self.store, event))
+        records = self.store.list()
+        self.assertEqual([(r["source"], r["title"], r["category"]) for r in records],
+                         [("antigravity", "搭搭通知标题测试", "completed")])
+        raw = self.store.path.read_bytes()
+        self.assertNotIn(b"private prompt", raw)
+        self.assertNotIn(b"private preview", raw)
+
+    def test_stop_waits_briefly_for_pending_summary_title_and_ignores_symlink_db(self):
+        session = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        profile = self.root / ".gemini" / "antigravity"
+        profile.mkdir(parents=True)
+        db_path = profile / "conversation_summaries.db"
+        with closing(sqlite3.connect(db_path)) as db, db:
+            db.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT)")
+            db.execute("INSERT INTO conversation_summaries VALUES (?, ?)", (session, ""))
+
+        def populate_on_sleep(_delay):
+            with closing(sqlite3.connect(db_path)) as db, db:
+                db.execute("UPDATE conversation_summaries SET title=? WHERE conversation_id=?",
+                           ("异步生成的会话名", session))
+
+        event = {"hookEventName": "Stop", "terminationReason": "model_stop", "fullyIdle": True,
+                 "conversationId": session, "executionNum": 1, "workspacePaths": ["/sample/fallback"]}
+        with patch("deskpet_platform.antigravity_feedback.Path.home", return_value=self.root), \
+             patch("deskpet_platform.antigravity_feedback.time.sleep", side_effect=populate_on_sleep):
+            self.assertTrue(antigravity_feedback.deliver(self.store, event))
+        self.assertEqual(self.store.list()[0]["title"], "异步生成的会话名")
+
+        linked_profile = self.root / "linked" / ".gemini" / "antigravity"
+        linked_profile.mkdir(parents=True)
+        (linked_profile / "conversation_summaries.db").symlink_to(db_path)
+        second = {**event, "executionNum": 2}
+        with patch("deskpet_platform.antigravity_feedback.Path.home", return_value=self.root / "linked"):
+            self.assertTrue(antigravity_feedback.deliver(self.store, second))
+        self.assertEqual(self.store.list()[0]["title"], "fallback")

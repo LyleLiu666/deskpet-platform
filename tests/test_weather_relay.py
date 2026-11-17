@@ -85,6 +85,27 @@ class WeatherRelaySessionTests(unittest.IsolatedAsyncioTestCase):
             fetch.assert_called_once_with(location)
             client.relay_weather.assert_awaited_once_with(result)
 
+    async def test_reconnect_resends_weather_before_regular_refresh_is_due(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json", no_token_probe=True)
+            session.snapshot = {"connection": "connected"}
+
+            def board():
+                return SimpleNamespace(channel=SimpleNamespace(capabilities={"weather_relay": 1}),
+                                       relay_weather=AsyncMock(), close=AsyncMock())
+
+            first = session.client = board()
+            session.weather_path.write_text(json.dumps({"latitude": 3.0, "longitude": 4.0}))
+            result = {"degrees": 14, "icon": 0, "ttl_seconds": 1200, "days": "00" * 35}
+            with patch("deskpet_platform.mcp_server.fetch_relay_weather", return_value=result):
+                await session.refresh_weather()
+                first.relay_weather.assert_awaited_once_with(result)
+                self.assertGreater(session.weather_due, 0)
+                await session.drop()
+                second = session.client = board()
+                await session.refresh_weather()
+            second.relay_weather.assert_awaited_once_with(result)
+
     async def test_disconnected_device_never_receives_a_stale_fetch(self):
         with tempfile.TemporaryDirectory() as directory:
             session = BoardSession(Path(directory) / "device.json")

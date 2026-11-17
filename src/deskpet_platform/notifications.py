@@ -13,6 +13,9 @@ from .channel import TextNotVisible
 from .file_lock import acquire, release
 
 
+LEGACY_TOAST_MAX_AGE_SECONDS = 60
+
+
 SOURCE_NAMES = {"codex": "Codex", "claude_code": "Claude Code", "workbuddy": "WorkBuddy",
                 "antigravity": "Antigravity", "opencode": "OpenCode"}
 
@@ -485,6 +488,21 @@ class NotificationStore:
         return tuple(identity for identity, display_pending, _ in rows if display_pending), max(
             (identity for identity, _, attention_pending in rows if attention_pending), default=0)
 
+    def summarize_legacy_backlog(self):
+        """Acknowledge backlog through the board's unread inbox summary."""
+        now = time.time()
+        cutoff = now - LEGACY_TOAST_MAX_AGE_SECONDS
+        eligible = """seen IS NULL
+            AND (category!='response' OR (resolved IS NULL AND dismissed IS NULL))"""
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            recent, = db.execute(f"""SELECT COUNT(*) FROM notifications
+                WHERE {eligible} AND shown IS NULL AND created>=?""", (cutoff,)).fetchone()
+            # Leave one fresh event eligible for its normal toast and animation.
+            db.execute(f"""UPDATE notifications SET shown=COALESCE(shown,?), action_pending=0
+                WHERE {eligible} AND (shown IS NULL OR action_pending=1)
+                AND (created<? OR (? AND shown IS NULL))""", (now, cutoff, recent > 1))
+
     def next_pending(self, *, text_only=False):
         # Shown legacy records have no action flag. Only an explicit retry keeps a shown record pending.
         with closing(self._connect()) as db:
@@ -586,8 +604,9 @@ async def deliver_next(client, store):
         if client.channel.capabilities.get("role_actions") == 1:
             state = await client.status()
             action = state.get("finish_action")
-            pending = state.get("role_state") == "loading"
-            if state.get("role_state") == "ready" and action:
+            ready = state.get("role_active_ready", state.get("role_state") == "ready")
+            pending = not ready and state.get("role_state") == "loading"
+            if ready and action:
                 actions = await client.list_actions()
                 if action in actions:
                     result = await client.play_role(actions.index(action), 3000)

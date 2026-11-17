@@ -152,6 +152,7 @@ class BoardSession:
         if self.screen_speech_task and not self.screen_speech_task.done():self.screen_speech_task.cancel()
         self.screen_speech_task=None
         self.token_snapshot = None
+        self.weather_due = 0
         self.computer_preference_client = None
         self.attention_client = None
         if self.client is not None:
@@ -394,6 +395,12 @@ class BoardSession:
                             if count != self.last_notice_count:
                                 await self.client.set_notice_count(count)
                                 self.last_notice_count = count
+                            capabilities = self.client.channel.capabilities
+                            if capabilities.get("message_cache") == 1 and capabilities.get("agent_home") != 1:
+                                try:
+                                    await asyncio.to_thread(self.notifications.summarize_legacy_backlog)
+                                except (sqlite3.Error, ValueError):
+                                    self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
                     if self.client.channel.capabilities.get("agent_home") == 1:
                         try:
                             await self.refresh_agent_notifications(heartbeat)
@@ -881,45 +888,61 @@ class BoardSession:
             updated = await self.refresh_quota()
             await asyncio.sleep(300 if updated else 10)
 
+    def quota_display_sources(self):
+        client = self.client
+        if client is None or client.channel.capabilities.get("quota_sources") != 1:
+            return ()
+        if client.channel.capabilities.get("quota_multi") == 1:
+            return SOURCES
+        selected = self.snapshot.get("quota_source")
+        return (selected,) if selected in SOURCES else ()
+
     async def poll_antigravity_quota(self):
         """Refresh the shared quota cache without delaying writes to the board."""
         while True:
-            client = self.client
-            eligible = (client is not None and client.channel.capabilities.get("quota_sources") == 1 and
-                        self.snapshot.get("quota_source") in ANTIGRAVITY_WINDOWS)
+            eligible = any(source in ANTIGRAVITY_WINDOWS for source in self.quota_display_sources())
             if eligible:
                 with suppress(OSError, sqlite3.Error, ValueError):
                     await asyncio.to_thread(self.quota_store.refresh_antigravity)
             await asyncio.sleep(60 if eligible else 5)
 
     async def poll_quota_display(self):
-        """Send the selected allowance independently of the live speed probe."""
-        last_client = last_reading = None
-        due = 0.0
+        """Keep each display feed fresh independently of the live speed probe."""
+        last_client, last_sources = None, ()
+        sent = {}
         while True:
-            client = self.client
-            source = self.snapshot.get("quota_source")
-            if client is None or client.channel.capabilities.get("quota_sources") != 1 or source not in SOURCES:
-                last_client = last_reading = None
-                await asyncio.sleep(1)
-                continue
-            now = time.time()
-            provider = "claude_code" if source == "claude_code" else "antigravity"
-            captured = None if source == "codex" else await asyncio.to_thread(self.quota_store.read, provider, now)
-            codex_age = now - self.codex_live_observed_at
-            codex = self.codex_live_allowance if 0 <= codex_age <= MAX_CODEX_ALLOWANCE_AGE else None
-            reading = project_quota(source, codex=codex,
-                                    claude=captured if source == "claude_code" else None,
-                                    antigravity=captured if source in ANTIGRAVITY_WINDOWS else None, now=now)
-            if client is not last_client or reading != last_reading or time.monotonic() >= due:
-                async with self.lock:
-                    if client is self.client and source == self.snapshot.get("quota_source"):
-                        try:
-                            await client.update_quota(reading)
-                        except LINK_ERRORS:
-                            last_client = last_reading = None
-                        else:
-                            last_client, last_reading, due = client, reading, time.monotonic() + 5
+            client, sources = self.client, self.quota_display_sources()
+            if client is not last_client or sources != last_sources:
+                sent.clear()
+                last_client, last_sources = client, sources
+            if sources:
+                now = time.time()
+                claude = (await asyncio.to_thread(self.quota_store.read, "claude_code", now)
+                          if "claude_code" in sources else None)
+                antigravity = (await asyncio.to_thread(self.quota_store.read, "antigravity", now)
+                               if any(source in ANTIGRAVITY_WINDOWS for source in sources) else None)
+                codex_age = now - self.codex_live_observed_at
+                codex = self.codex_live_allowance if 0 <= codex_age <= MAX_CODEX_ALLOWANCE_AGE else None
+                pending = []
+                for source in sources:
+                    reading = project_quota(source, codex=codex, claude=claude, antigravity=antigravity, now=now)
+                    previous, due = sent.get(source, (None, 0.0))
+                    if reading != previous or time.monotonic() >= due:
+                        pending.append((source, reading))
+                if pending:
+                    async with self.lock:
+                        for source, reading in pending:
+                            if client is not self.client or source not in self.quota_display_sources():
+                                break
+                            try:
+                                await client.update_quota(reading)
+                            except CommandRejected:
+                                sent.pop(source, None)
+                            except LINK_ERRORS:
+                                sent.pop(source, None)
+                                break
+                            else:
+                                sent[source] = reading, time.monotonic() + 5
             await asyncio.sleep(1)
 
     async def configure_computer_metrics(self, *, cpu=None, memory=None):
@@ -2102,7 +2125,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
             lambda command, previous, *, enabled: configure(path, command, enabled=enabled, previous_commands=previous))
         result = {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path)}
         if enabled:
-            result["next_step"] = "重启 Antigravity，打开新会话并确认搭搭收到真实提醒。"
+            result["next_step"] = "打开新的 Antigravity 会话确认搭搭收到真实提醒；若未加载再重启客户端。"
         return result
 
     @server.tool()

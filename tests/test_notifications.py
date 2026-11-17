@@ -320,6 +320,73 @@ class NotificationTests(unittest.TestCase):
 
 
 class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_inbox_keeps_backlog_unread_and_delivers_a_fresh_single(self):
+        class Board:
+            class Channel:
+                capabilities = {}
+            channel = Channel()
+            def __init__(self):
+                self.texts = []
+
+            async def show_text(self, text):
+                self.texts.append(text)
+                return {"status": "shown"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
+            with patch.object(notifications.time, "time", return_value=100):
+                for i in range(15):
+                    store.add_agent_event("codex", "s", str(i), "completed", "Old")
+                request = store.add_agent_event("codex", "s", "old-request", "response", "Still open")
+            with patch.object(notifications.time, "time", return_value=3700):
+                fresh = store.add_agent_event("codex", "s", "fresh", "completed", "Fresh")
+                store.summarize_legacy_backlog()
+                board = Board()
+                self.assertTrue(await notifications.deliver_next(board, store))
+                self.assertFalse(await notifications.deliver_next(board, store))
+                self.assertEqual(board.texts, ["Codex 完成\nFresh"])
+                self.assertEqual(store.unseen_count(for_device=True), 17)
+                self.assertFalse(store.get(request)["resolved"])
+                self.assertTrue(store.get(fresh)["shown"])
+
+    def test_legacy_inbox_groups_multiple_recent_pending_alerts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
+            store.add_agent_event("codex", "s", "one", "completed", "One")
+            store.add_agent_event("claude_code", "s", "two", "response", "Two")
+            store.summarize_legacy_backlog()
+            self.assertIsNone(store.next_pending())
+            self.assertEqual(store.unseen_count(for_device=True), 2)
+
+    async def test_poll_summarizes_backlog_only_for_legacy_message_cache_boards(self):
+        from unittest.mock import AsyncMock
+        from deskpet_platform.mcp_server import BoardSession
+
+        class Board:
+            def __init__(self, capabilities):
+                self.channel = type("Channel", (), {"capabilities": capabilities})()
+                self.status = AsyncMock(return_value={"pet_page": 1})
+                self.pending_notice_reads = AsyncMock(return_value=[])
+                self.sync_messages = AsyncMock()
+                self.set_notice_count = AsyncMock()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, caps, expected_summarized in (
+                ("agent-home", {"notices": 1, "message_cache": 1, "agent_home": 1}, False),
+                ("text-only", {"notices": 1, "text_present": 1}, False),
+                ("legacy-cache", {"notices": 1, "message_cache": 1}, True),
+            ):
+                session = BoardSession(root / name / "device.json", no_token_probe=True)
+                session.client = Board(caps)
+                with patch.object(notifications.time, "time", return_value=100):
+                    item = session.notifications.add_agent_event("codex", "s", "old", "completed", "Old")
+                with patch.object(session, "refresh_agent_notifications", AsyncMock()), \
+                     patch("deskpet_platform.mcp_server.asyncio.sleep", side_effect=asyncio.CancelledError):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await session.poll()
+                self.assertEqual(session.notifications.get(item)["shown"], expected_summarized, name)
+
     async def test_hidden_screen_defers_delivery_without_marking_shown(self):
         from deskpet_platform.channel import TextNotVisible
         class Board:
@@ -507,7 +574,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.action = self.text = None
             async def status(self):
-                return {"role_state": "ready", "finish_action": "deliver_result"}
+                return {"role_state": "failed", "role_active_ready": True, "finish_action": "deliver_result"}
             async def list_actions(self):
                 return ["idle", "deliver_result"]
             async def play_role(self, action, duration):
