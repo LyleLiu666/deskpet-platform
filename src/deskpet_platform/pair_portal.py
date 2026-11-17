@@ -3,6 +3,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from math import ceil
 import secrets
+from socketserver import TCPServer
 import threading
 import time
 from urllib.parse import parse_qs
@@ -22,6 +23,13 @@ border-radius:6px;border:1px solid #759088}button{background:#206b58;color:white
 <button>连接搭搭</button><p>配对码只提交到这台电脑，不需要发到聊天里。</p></form></main></html>"""
 PAIRED = "已验证并保存配对信息。可以关闭此页面，在聊天中查看连接状态。"
 NOTICE = "{notice}"
+
+
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # The portal uses a numeric loopback address. A reverse lookup can stall startup.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address
 
 
 class PairPortal:
@@ -111,7 +119,7 @@ class PairPortal:
                     portal.state, portal.device = "paired", result["device"]
                 self.page(200, PAIRED)
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         self.url = f"http://127.0.0.1:{self.server.server_port}{path}"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)

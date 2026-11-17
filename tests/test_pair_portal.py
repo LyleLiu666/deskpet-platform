@@ -4,11 +4,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import unittest
+from unittest.mock import patch
 
 from deskpet_platform.pair_portal import PairPortal
 
 
 class PairPortalTests(unittest.TestCase):
+    def test_opening_a_loopback_portal_does_not_resolve_a_hostname(self):
+        with patch("socket.getfqdn", side_effect=AssertionError("unexpected hostname lookup")):
+            portal = PairPortal(None).start()
+        self.addCleanup(portal.close)
+        self.assertEqual(urllib.parse.urlsplit(portal.url).hostname, "127.0.0.1")
+        with urllib.request.urlopen(portal.url, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+
     def test_pairing_is_local_protected_and_only_finishes_after_verification(self):
         calls = []
 
