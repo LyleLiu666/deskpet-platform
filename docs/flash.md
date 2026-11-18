@@ -15,7 +15,7 @@
 
 空白板可从 [RC1 下载页](https://github.com/LyleLiu666/deskpet-platform/releases/tag/v0.1.0-rc1) 下载 `deskpet-esp32-2432s028-0.1.0-rc.54-factory.zip` 首刷包，并用同页的 `SHA256SUMS-firmware-rc.54.txt` 核对。首次刷写后，如需最新功能，可再按下述方式升级应用。
 
-已使用兼容分区表的小板，可从 [RC6 下载页](https://github.com/LyleLiu666/deskpet-platform/releases/tag/v0.1.0-rc6) 下载最新应用镜像 `firmware-0834cc7.bin`，并用同页的 `SHA256SUMS-firmware.txt` 核对。升级前须核对目标板型及读回的分区表，按发布页和源码材料包中的说明操作。更新后进入[配网与配对](../src/deskpet_platform/manuals/operations.md#手机扫码配网和配对)。
+已使用兼容分区表的小板，可从 [RC6 下载页](https://github.com/LyleLiu666/deskpet-platform/releases/tag/v0.1.0-rc6) 下载公开的应用镜像 `firmware-0834cc7.bin`，并用同页的 `SHA256SUMS-firmware.txt` 核对。升级前须核对目标板型及读回的分区表，按发布页和源码材料包中的说明操作。更新后进入[配网与配对](../src/deskpet_platform/manuals/operations.md#手机扫码配网和配对)。
 
 ## 首次刷机
 
