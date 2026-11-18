@@ -30,7 +30,9 @@ src/deskpet_platform/manuals/operations.md。
 弹出的网页/终端里输入，绝不要让我发到聊天框里。
 
 1. 下载与安装：
-   使用我指定的版本；若未指定，选择 GitHub Releases 上最新发布且提供电脑端安装包的版本。
+   使用我指定的版本；若未指定，打开 https://github.com/LyleLiu666/deskpet-platform/releases ，
+   选择版本号最高且有适配本机桌面包的已发布版本，预览版也在选择范围内。
+   当前推荐版本是 https://github.com/LyleLiu666/deskpet-platform/releases/tag/v0.1.0-rc7 。
    告诉我选了哪个版本；如果是预览版，请注明。优先下载与当前系统、芯片架构匹配的「桌面包」
    （自带预编译测速采集器 AgentSpeedProbe），核对同页 SHA256SUMS.txt 后，解压到
    我的用户持久目录（例如 macOS/Linux 用 ~/.local/share/deskpet-platform，
@@ -111,7 +113,7 @@ src/deskpet_platform/manuals/operations.md。
 
 ### 1. 下载桌面包并解压到固定目录
 
-前往 [搭搭 Releases](https://github.com/LyleLiu666/deskpet-platform/releases) 下载与你电脑系统匹配的桌面包（核对同页 `SHA256SUMS.txt`），解压到一个**长期保留的目录**（不要放在临时目录或经常清理的下载目录）：
+从 [RC7 电脑端预览版](https://github.com/LyleLiu666/deskpet-platform/releases/tag/v0.1.0-rc7) 的附件下载与你的系统和芯片匹配的桌面包，核对同页 `SHA256SUMS.txt`，再解压到一个**长期保留的目录**。其他版本见 [发布列表](https://github.com/LyleLiu666/deskpet-platform/releases)。
 
 | 系统 | 桌面包文件名（`<版本>` 以最新发布的电脑端版本为准） |
 | --- | --- |
