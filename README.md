@@ -191,9 +191,9 @@ claude mcp add --scope user deskpet -- "/绝对路径/.venv/bin/deskpet-platform
 
 手机扫码可在手机上查看本页安装说明；在电脑上打开同一链接并把安装提示词复制给你的 Agent，即可配合手机完成配网和配对。[打开安装步骤](https://github.com/LyleLiu666/deskpet-platform#交给你的-agent-安装)
 
-<img src="docs/assets/start-qr.png" width="240" height="240" alt="DeskPet 安装步骤二维码">
+<img src="https://cdn.jsdelivr.net/gh/LyleLiu666/deskpet-platform@main/docs/assets/start-qr.png" width="240" height="240" alt="DeskPet 安装步骤二维码">
 
-[下载二维码原图](docs/assets/start-qr.png)
+[打开二维码原图](https://cdn.jsdelivr.net/gh/LyleLiu666/deskpet-platform@main/docs/assets/start-qr.png)
 
 ## 许可证与致谢
 
