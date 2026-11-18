@@ -1,25 +1,30 @@
 # DeskPet 操作手册
 
-## 首次连接
+本手册涵盖搭搭（DeskPet）电脑端的首次配网配对、各 Agent 消息提醒接入、实时测速与额度配置、日常屏幕控制及排障方法。Agent 也可在任意时刻通过 `desk_read_manual` 查阅本手册（`operations`）、二次开发手册（`development`）和自定义角色指南（`roles`）。
 
-1. 在电脑本机将对应系统的桌面包解压安装到长期保留的用户目录（不要放在系统临时目录或下载目录；Windows 请在原生 Windows 环境安装，不要装在 WSL 内），准备 Python 3.11 至 3.14 或 uv。在 Agent 中配置 stdio MCP，命令为安装得到的 `deskpet-platform` 绝对路径（Windows 为 `.venv\Scripts\deskpet-platform.exe`），参数为 `mcp`。[macOS Python 下载](https://www.python.org/downloads/macos/) · [Windows Python 下载](https://www.python.org/downloads/windows/)
-2. 若用支持数据传输的 USB 线将搭搭插在电脑上，先用 `deskpet-platform find-usb <串口>` 或 `desk_find_usb_device` 读取并核对该串口上的设备 MAC 与 UUID，再调用 `desk_pair_usb`（将已确认的串口填入 `port`，核对一致的设备 MAC 填入 `expected_identity`）。Windows 请先用手机扫搭搭屏幕上的配网二维码连好 Wi-Fi，再调 `desk_pair_usb` 配对；macOS 和 Linux 也可在 `credentials_file` 中传入本机私有 Wi‑Fi 凭据文件绝对路径同一步配网（文件权限须为 `0600`，JSON 包含 `ssid` 和 `password` 两个字符串，开放网络的密码为空）。
-3. 用 `desk_status` 检查连接，再调用 `desk_show_text`。返回 `shown` 或 `finished` 表示设备报告实际绘制。搭搭已连 Wi-Fi 但电脑局域网暂时无法发现时，也可以先通过 USB 完成配对。若 USB 配网失败，搭搭会尝试恢复原有网络。
+---
 
-### 在 Agent 中注册 MCP
+## 首次连接与配对
 
-以实际安装后的程序绝对路径替换示例路径，在终端分别执行需要的命令。已有同名 `deskpet` 条目时，先检查并更新该条目，不要覆盖其他 MCP 配置。带空格的路径需要保留引号。
+### 1. 安装与在 Agent 中注册 MCP
+
+1. **解压到持久目录**：将对应系统的桌面包解压安装到长期保留的用户目录（例如 macOS / Linux 使用 `~/.local/share/deskpet-platform`，Windows 使用 `%LOCALAPPDATA%\Programs\DeskPetPlatform`；不要放在系统临时目录或定期清理的下载目录。Windows 请在原生 Windows 环境安装，不要装在 WSL 内）。
+2. **准备 Python 环境**：确保已安装 Python 3.11–3.14 或 `uv`（[macOS Python 下载](https://www.python.org/downloads/macos/) · [Windows Python 下载](https://www.python.org/downloads/windows/)），运行安装脚本生成 `.venv`。
+3. **注册 stdio MCP**：将安装后的 `deskpet-platform` 可执行文件**绝对路径**（Windows 为 `.venv\Scripts\deskpet-platform.exe`，路径含空格时需保留引号）注册到你的 Agent。若已有同名 `deskpet` 条目，先检查并更新该条目，切勿覆盖用户的其他 MCP 配置：
 
 ```sh
 codex mcp add deskpet -- "/安装路径/deskpet-platform" mcp
 claude mcp add --scope user deskpet -- "/安装路径/deskpet-platform" mcp
 ```
 
-Windows 路径指向 `.venv\Scripts\deskpet-platform.exe`。未安装兼容测速采集器或选择跳过测速时，在 `mcp` 后加 `--no-token-probe`；这不会替用户安装额外软件。Antigravity、OpenCode、WorkBuddy 等其他支持 stdio MCP 的客户端，在各自的 MCP 配置文件中填入相同的可执行文件绝对路径与参数数组（`["mcp"]` 或 `["mcp", "--no-token-probe"]`）即可。设置后打开新的 Agent 会话，调用 `desk_list_devices` 验证 MCP 已生效。
+- **跳过测速参数**：当系统没有匹配的预编译测速采集器，或用户选择跳过 Token 测速时，在 `mcp` 后加上 `--no-token-probe`（不会替用户额外安装编译工具）。
+- **其他 MCP 客户端**：Antigravity、OpenCode、WorkBuddy 等支持 stdio MCP 的客户端，在各自配置文件中填入相同的可执行文件绝对路径与参数数组（`["mcp"]` 或 `["mcp", "--no-token-probe"]`）。
+- **指定角色素材目录（可选）**：可在 `mcp` 后增加 `--role-dir <角色素材目录的绝对路径>`，供 `desk_list_role_sources` 默认扫描。
+- 配置完成后，**打开新的 Agent 会话**并调用 `desk_list_devices` 验证 MCP 已生效。
 
-### Codex 的写卡等待时间
+### 2. Codex 的写卡等待时间（`tool_timeout_sec`）
 
-用 Codex 通过 Wi-Fi 传输单个 8 MiB 文件时，在 Codex 的 `config.toml` 中为 DeskPet 的 MCP 条目设置 1,200 秒。已登记时，在现有表中补这一项。
+通过 Wi-Fi 向搭搭储存卡传输角色包或大文件（单文件最大可达 8 MiB）耗时较长。使用 Codex 时，请在 Codex 的 `config.toml` 中为 `deskpet` 的 MCP 条目设置 1,200 秒超时（已有表项时在原表中补充该字段），设置后从新会话连接：
 
 ```toml
 [mcp_servers.deskpet]
@@ -28,89 +33,231 @@ args = ["mcp"]
 tool_timeout_sec = 1200
 ```
 
-大文件和批量安装需要按文件大小和数量延长客户端等待时间。设置后从新会话连接。
+大文件或批量安装角色时，其他客户端也应按文件大小相应延长工具调用超时时间。
 
-### 手机扫码配网和配对
+### 3. 给搭搭配网与配对
 
-1. 给搭搭供电。完整显示固件从应用菜单进入 **桌面设置 → Wi-Fi**。参考固件在屏幕未显示配网二维码时，长按屏幕 3 秒打开 Wi-Fi 设置。用手机扫描左侧二维码加入搭搭热点，再扫描右侧二维码打开设置页。选择 2.4 GHz Wi-Fi 并输入密码，列表中找不到网络时可手动输入名称。联网后，让手机和电脑回到与搭搭相同的局域网。
-2. 如果搭搭未插电脑 USB 数据线，调用 `desk_pair_begin` 打开电脑本机配对网页。完整显示固件从应用菜单进入 **桌面设置 → 电脑配对**（参考固件尚未校准触屏时，轻触已联网的搭搭显示配对码）。用手机扫描屏幕上的配对码二维码并复制，粘贴到本机配对网页。自动发现失败时，在原配对页面填写搭搭屏幕显示的局域网 IP 地址，重新输入配对码后重试。也可在本机终端运行 `deskpet-platform pair`，将配对码粘贴到隐藏输入框。
-3. 用 `desk_pair_status` 查看配对页结果，再用 `desk_status` 检查连接。
+1. **手机扫码连 2.4 GHz Wi-Fi**：
+   - 给搭搭通电。首次尚未校准电阻触屏的设备会先引导轻触三个十字准星，完成后进入首页。
+   - 尚未保存 Wi-Fi 时，搭搭首页右侧会直接提示 **点击连接 Wi-Fi**，轻触即可打开配网二维码（也可从应用菜单进入 **桌面设置 → Wi-Fi**；旧版/参考固件在未显示二维码时可长按屏幕 3 秒打开）。
+   - 用手机先扫**左侧二维码**加入搭搭热点，再扫**右侧二维码**打开配网页面，选择 2.4 GHz Wi-Fi 并输入密码（列表找不到时可手动输入网络名称）。联网后，请让电脑与搭搭处于同一局域网。
+2. **与电脑配对（二选一）**：
+   - **方式 A：通过 USB 数据线直接配对（推荐）**
+     若用支持数据传输的 USB 线将搭搭插在电脑上，先运行 `deskpet-platform find-usb <串口>` 或调用 `desk_find_usb_device` 读取并核对该串口上的设备 MAC 与持久 UUID，再调用 `desk_pair_usb`（`port` 填已确认的串口，`expected_identity` 填核对一致的设备 MAC）。
+     - Windows 请先用手机扫码连好 Wi-Fi，再调 `desk_pair_usb` 配对；
+     - macOS 和 Linux 还可在 `credentials_file` 中传入本机私有 Wi-Fi 凭据文件绝对路径，一步完成配网与配对（文件权限须为 `0600`，内容为包含 `ssid` 和 `password` 两个字符串的 JSON，开放网络密码设为空字符串；若 USB 配网失败，搭搭会尝试恢复原有网络）。
+     - 搭搭已连 Wi-Fi 但电脑局域网暂时无法自动发现时，也可先通过 USB 完成配对。
+   - **方式 B：无线扫码配对**
+     若搭搭未插电脑 USB 数据线，调用 `desk_pair_begin` 打开电脑本机配对网页（或在终端运行 `deskpet-platform pair` 将配对码粘贴到隐藏输入框）。
+     - 在已连 Wi-Fi 且未配对的搭搭首页点击 **点击配对电脑**（或进入 **桌面设置 → 电脑配对**；旧版/参考固件轻触屏幕显示配对码）。
+     - 用手机扫描搭搭屏幕上的配对码二维码并复制，粘贴到电脑弹出的本机配对网页中完成验证（切勿将配对码发到 Agent 聊天框）。验证成功后，从首页打开的配对页会自动返回。
+     - 调用 `desk_pair_status` 查看配对结果。
+3. **验证连接与中文显示**：
+   调用 `desk_status` 检查连接状态，再调用 `desk_show_text` 发送短文字；返回 `shown` 或 `finished` 表示设备已实际绘制。搭搭电脑端自带思源黑体同源字体 Noto Sans CJK SC，系统缺少常用中文字体时会自动使用随包字体。验收时请确认屏幕上中文清晰可读、无乱码方块。
 
-运行 `deskpet-platform doctor --client codex` 可查看本机已配对设备、钩子文件、最近触发的事件和该设备保存的显示回执。多个设备时加 `--device-id`。独立接收端使用 `deskpet-platform --config <接收端配置> doctor --client codex --shared-config <原设备配置>`。`--client` 支持 `codex`、`claude_code`、`antigravity`、`opencode`、`workbuddy` 和 `workbuddy_ai`；使用其他 MCP 客户端时无需运行 `doctor`，直接用 `desk_list_devices` 和 `desk_status` 检查连接即可。`doctor` 可在 MCP 连接搭搭时同时运行。写入钩子配置后，仍要在 Agent 界面完成适用的信任或重启步骤，并在新会话触发一次真实提醒。用 `desk_status` 验证当前连接，用 `desk_token_status` 验证实际测速读数。
+### 4. 连接排障
 
-连接显示 `busy` 时，停止另一个控制同一设备的服务或 MCP 实例。连接显示 `offline` 时，先检查设备供电、Wi‑Fi 和配对。运行 MCP 时用工具查状态，终端的独立 `status` 也要临时占用连接。若当前 MCP 观察到连接中断，`desk_status` 的 `last_link_loss` 会保留首个错误、连接恢复时间，以及有新读数送达时的测速恢复时间。单位为毫秒，从该次中断起算。
+- **局域网自动发现失败**：在电脑本机配对页中手动填入搭搭屏幕上显示的局域网 IP 地址，重新输入配对码重试。请排查访客 Wi-Fi、路由器客户端（AP）隔离、VPN 或代理是否阻断了局域网互通。
+- **防火墙与系统局域网权限**：
+  - 当前固件支持由电脑主动向搭搭发起连接；旧版固件仍需由搭搭回连电脑，Windows 上请检查防火墙是否允许安装目录下的 `.venv\Scripts\python.exe` 在当前专用/受信任网络接收入站连接。
+  - macOS 上若 `desk_status` 返回 `local_network_unreachable`，请检查启动 MCP 或常驻服务的客户端/终端是否已在「系统设置 → 隐私与安全性 → 本地网络」中获授权限；插着 USB 数据线时也可传入 `--usb-port <串口>` 或调用 `desk_set_usb_fallback` 继续控制和写卡。
+- **状态显示 `busy` 或 `offline`**：
+  - 一台搭搭同一时间只能被一个控制端连接。显示 `busy` 时，请关闭占用同一台搭搭的其他 MCP 会话或后台进程（在终端独立运行 `deskpet-platform status` 也会临时占用连接）。
+  - 显示 `offline` 时，请先检查搭搭供电、Wi-Fi 状态和配对记录。
+  - 若当前 MCP 观察到连接中断，`desk_status` 的 `last_link_loss` 会记录首个错误、连接恢复耗时（毫秒）以及有新读数送达时的测速恢复耗时。
+- **更换电脑或解绑**：更换电脑前请先确认上一台电脑已断开连接。删除电脑本机凭据会停止本机自动连接；在搭搭端撤销授权请按对应固件菜单操作。
 
-如果搭搭显示已联网但电脑自动发现失败，在配对页填写搭搭屏幕显示的局域网 IP，并确认两台设备互相可达。访客 Wi-Fi、路由器的客户端隔离、VPN 或代理都可能阻断设备间流量。支持电脑主动连接的固件由电脑向搭搭发起连接。旧固件仍需要回连电脑，Windows 上可检查防火墙是否允许安装目录下的 `.venv\Scripts\python.exe` 在当前受信任网络接收入站连接。macOS 上检查 Agent 或终端的局域网权限。
+### 5. 多台搭搭与独立提醒接收端
 
-搭搭电脑端自带思源黑体的同源字体 Noto Sans CJK SC。系统没有常用中文字体时，文字和提醒使用随包字体。验收提醒时，请在屏幕上确认中文清晰可读。
+- **配对多台搭搭**：
+  - 添加第二台及更多搭搭时，在 `desk_pair_usb` 或 `desk_pair_begin` 中传入 `add_device=true`（终端使用 `deskpet-platform pair --add-device`），不会覆盖已有设备的配对记录。
+  - 调用 `desk_list_devices` 可查看本机所有已配对设备（新固件使用设备持久 UUID 作为 `id`；旧固件暂显示 `mac:` 开头标识，升级固件并成功连接后会自动升级为 UUID）。
+  - 只有一台设备时无需指定 `device_id`；配对了多台设备时，查询和控制工具需传入目标设备的 `device_id`（取自列表中的 `id`，未传时会提示选择；终端独立查询使用 `deskpet-platform status --device-id <id>`）。
+  - 给已配对的搭搭通过 USB 重新配置 Wi-Fi 时，在 `desk_pair_usb` 中同时传入该设备的 `device_id`、已确认的串口和 MAC。
+- **登记独立提醒接收端（`receiver-add-usb`）**：
+  - 如果已有默认搭搭，还可用 `receiver-add-usb` 将另一台搭搭登记为独立提醒接收端：它不会改变默认设备，且独立保存自己的消息已读状态（登记时保留旧消息及原有已读状态，不会重新弹出旧提醒；此后消息与已读状态由各设备独立管理）。
+  - 新设备的 MCP 启动时用 `--shared-config` 指向原设备配置，即可共用原提醒和额度来源。
 
-### 多台设备
+---
 
-- 添加另一台时，在 `desk_pair_usb` 或 `desk_pair_begin` 中设置 `add_device=true`；原有设备的配对不会被替换。USB 操作仍需先确认串口对应的设备。
-- 用 `desk_list_devices` 查看本机已配对设备。新固件提供设备自身保存的 UUID；旧固件暂时显示以 `mac:` 开头的身份，更新固件并成功连接后可升级为设备 UUID。
-- 给已配对的小板通过 USB 配置 Wi‑Fi 时，在 `desk_pair_usb` 中传入这台小板的 `device_id`、已确认的串口和 MAC。
-- 只有一台设备时，原有操作可以不指定设备。存在多台时，在查询和控制工具中填写 `device_id`，值取自列表中的 `id`；不填写会提示选择。提醒的启用和关闭也使用这个参数，分别管理每台设备。
-- 在本机终端添加另一台时使用 `deskpet-platform pair --add-device`；独立查询使用 `deskpet-platform status --device-id <列表中的 id>`，并先释放同一设备的 MCP 连接。
+## 消息提醒与各客户端配置
 
-## 日常操作
+### 各客户端提醒启用方式
 
-- `desk_status` 在连接时向小板读取最新状态。储存卡操作期间返回最近一次读数。设备被后台占用时会尝试自动交接；无法发送局域网发现请求时会提示检查网络、路由和系统局域网权限，这些提示不代表已确定故障原因。
-- `desk_show_text` 显示两行以内的短文字，支持电脑字体能够绘制的中文；返回显示回执。
-- 支持 `dashboard_config` 的设备可通过 `desk_dashboard_config` 查看当前数据项目及额度来源，并分别设置速度、额度、电脑状态、自动轮播、天气或额度来源。支持轮播选择的设备还可用 `rotation` 选择速度、额度、电脑状态、天气中的一项或多项，例如 `['quota', 'weather']`；支持轮播间隔的设备可用 `interval_seconds` 分别设为 5、10、20、30 或 60 秒。自动轮播仅包含已选择且当前有数据的项目。没有可用数据时显示已选项目的等待状态。设置保存在设备，重启后继续生效；配置不会切换当前页面。支持提醒来源的设备会在有待应答请求时显示来源名称；多个来源显示「多来源」，超过 99 条显示 `99+`。
-- 如果已有默认小板，也可以用 `receiver-add-usb` 把另一块设备登记为独立提醒接收端：它不改变旧工具的默认设备，独立保存已读状态。登记时保留旧消息及原有已读状态，但不会重新弹出旧提醒；此后的消息和已读状态由各设备独立处理。新设备的 MCP 启动时用 `--shared-config` 指向原设备配置，可共用原提醒和额度来源。提醒钩子会为独立接收端启动后台投递；新设备的实时数据展示需要其电脑端服务运行。
-- 独立接收端可运行 `deskpet-platform --config <新设备配置> receiver-service --shared-config <原设备配置> --token-probe <AgentSpeedProbe>`，持续更新提醒、速度、额度、天气与电脑状态。采集程序可省略，此时速度显示取决于原设备配置目录中是否安装了 AgentSpeedProbe。若提醒投递进程已经连接，持续服务启动后会接管设备；需要控制设备的 MCP 会请求后台服务暂时让出连接，MCP 断开后后台服务恢复。服务不会每天自动退出，但手动启动的进程不会在电脑重启后自行恢复；长期运行仍需配置并验证系统后台服务及所需的局域网权限。
-- 支持 `appearance_config` 的设备可用 `desk_appearance_config` 查看或分别设置主题和壁纸。主题使用 `paper`、`night`、`sage` 或已导入的 JSON 文件名；壁纸使用 `desk_add_photo` 返回的照片标识，或卡上的 `photos/`、`media/`、`wallpapers/` 图片路径，空字符串表示清除。设置保存在设备。屏幕休眠或媒体播放时会拒绝更改；壁纸切换还需要设备停留在工作状态或外观页。
-- 支持独立壁纸的设备可用 `desk_add_wallpaper` 导入图片，指定 1 至 24 位英文字母、数字、下划线或连字符作为名称；返回的 `wallpapers/` 路径可用于 `desk_appearance_config`，也可在设备外观设置中选择。壁纸保存在 TF 卡的独立目录，不加入开机相框的照片轮播。支持列表的设备可用 `desk_list_wallpapers` 分页查询壁纸和可用作壁纸的相册图片及当前选择，返回的 `next_cursor` 可用于查询下一页。支持删除的设备可用 `desk_delete_wallpaper` 删除导入时返回的路径；当前使用的壁纸须先切换，已不存在时返回 `deleted: false`。旧设备会返回不支持。
-- 支持 `attention_summary` 的设备会在消息入口显示仍需应答的请求数量。看过消息不等于已经应答；电脑端收到应答、取消或更新后的有效状态时会同步数量。该提示依赖对应 Agent 的提醒接入，电脑断线或数据过期后隐藏，不代表所有 Agent 的完整运行状态。
-- 设备支持语音时，`desk_speak` 主动朗读不超过 80 字的单行文字，`desk_read_notification` 按编号朗读提醒标题，朗读不会标记提醒为已读。文字仅在主动调用时发送到微软 Edge 在线语音服务；电脑分段临时合成音频，设备仅在内存中接收，每段最长五秒。电脑端的音频转换当前需要 macOS；音乐或视频播放时设备会拒绝朗读。
-- 支持 `message_read_aloud` 的设备可以在提醒详情点「联网朗读」，电脑端会朗读该条标题并回传完成或失败。电脑断开时请求不会自动重播；朗读不影响未读状态。
-- 语音识别功能目前处于开发验证阶段，尚未在目标设备上完成实机验收。它默认关闭；要在测试环境启用，需要为运行电脑端的进程同时设置 `DESKPET_ENABLE_ONLINE_TRANSCRIPTION=1`、`DESKPET_ASR_API_KEY` 和 `DESKPET_ASR_MODEL`（由服务商提供）。电脑端未配置时设备不会开始录音。设备「设置 → 语音识别」会说明录音将发送给硅基流动的在线识别服务，只有主动点开始才录音；结果显示在设备上，不自动发送给 Agent。配置只从进程环境读取，不会由此功能写入文件；真实服务可用性、音频和设备显示尚待实测。
-- `desk_show_image` 接收电脑图片的绝对路径，自动转换后传到储存卡并显示。轻触屏幕或调用 `desk_clear_image` 可返回。
-- `desk_set_brightness` 设置 0–100 的屏幕亮度。设为 0 后触摸屏幕可重新点亮。
-- `desk_calibrate_touch` 在屏幕启动三点校准。按屏幕提示触摸三个标记，校准后 `desk_wait_touch` 返回点击位置。长按 3 秒或调用 `desk_cancel_touch_calibration` 可取消校准。校准后，点击角色可播放该角色提供的 `touched` 动作。
-- MCP 启动命令可在 `mcp` 后增加 `--role-dir <角色素材目录的绝对路径>`。素材目录由你在电脑上选择。`desk_list_role_sources` 查询这个目录里的可安装角色；也可向该工具传入其他角色素材目录的绝对路径。
-- 在终端运行 `deskpet-platform find-usb --device-id 小板UUID /dev/cu.usbserial-1140`，可以列出指定串口上的小板 MAC 和持久 UUID。可传入多个已确认的候选串口，省略 `--device-id` 可查看所有匹配结果。此命令无需配对或启动 MCP，已有 Wi-Fi 控制连接时也可使用。已启动 MCP 时可用 `desk_find_usb_device` 做同样的查询。老固件可能缺少 USB 身份查询，已配对设备的 UUID 仍可从 `desk_list_devices` 查看。
-- MCP 启动时可用 `--usb-port` 指定已确认的备用串口，未接 USB 时仍可启动并使用 Wi-Fi。Wi-Fi 连不上或握手超时时会尝试 USB，可继续控制小板和传卡。备用串口在启动后才出现或被替换时，电脑先比对配对记录中的 MAC 和 UUID，再接入 USB。旧配对尚无 UUID 时，可先让支持 UUID 的小板经 Wi-Fi 完成一次认证或重新配对。无线连通验证通过且当前动作和传输结束后，MCP 会自动切回 Wi-Fi，并保存新地址供下次连接。`desk_status` 可查看当前连接方式。
-- 串口路径改变或需要为第二台设备启用 USB 备用连接时，用 `desk_find_usb_device` 按持久 UUID 找到串口，再调用 `desk_set_usb_fallback(port, device_id)`。电脑核对串口上的 UUID 和 MAC，当前 Wi-Fi 会继续工作。正在使用 USB 控制时须等无线恢复后再更新。备用串口变更在本次 MCP 运行中生效。
-- 用 `desk_select_network` 按网络名称切换已保存的 Wi-Fi。切换会短暂断开无线控制。重连后用 `desk_diagnostics` 核对 `network_switch` 的操作编号及结果，并查看当前网络和卡空间。切换成功后，目标网络成为重启后的首选。目标连不上时，小屏会尝试恢复原连接。网络名称须为有效 UTF‑8，旧固件不支持该命令时可从小屏的 Wi-Fi 设置切换。
-- 储存卡恢复连接后，重新打开角色图鉴或相册以探测介质并在需要时重新挂载。返回角色页会重新加载上次保存的角色。`desk_diagnostics` 的 `card.mount_count` 是本次开机以来成功挂载的次数。
-- `desk_set_view` 可打开角色、应用菜单、时钟、角色图鉴、相册、天气、消息或设置。可把角色、应用菜单、时钟或相册设为默认首页。相册作为默认首页时，开机自动轮播已有照片。
-- `desk_role_preview` 可以试播已安装的角色。用 `start` 并传入角色标识开始，用 `status` 查进度，`cancel` 返回图鉴，`use` 启用正在试播的角色。阶段 0 为待机，1 至 5 为对应档位，6 为爆气。试播播完会自动返回图鉴并恢复原角色。
-- 时钟提供六种表盘。小屏开机联网后会自动校时。MCP 接入时补齐尚未设置的时间或时区，保留已有值。用 `desk_sync_clock` 可主动同步电脑的时间，也可指定时区偏移。
-- 在小屏打开 **桌面设置 → 校时**。在 **日期时间** 页签选择年、月、日、时或分，用 **−**、**+** 调整，再点 **保存**。切到 **时区** 页签可按 15 分钟调整偏移，保存后重启仍有效。点 **取消** 可放弃编辑。参考固件的校时入口是时钟页上的 **Set time**。
-- `desk_clock_edit` 可查看小屏时间并使用同一编辑器。先调用 `desk_set_view(page="clock")` 打开时钟页，再用 `start` 开始，`adjust` 逐项修改，`save` 应用或 `cancel` 放弃。
-- `desk_add_photo` 将本机图片和缩略图一起传到相册。用 `desk_photo_album` 的 `grid` 打开或刷新缩略图，再用 `open` 和返回的照片标识打开照片。`previous` 和 `next` 在网格中翻页，在照片中切图。`play` 和 `pause` 控制轮播，`interval` 保存 5、10 或 15 秒的间隔。完整显示固件的全图页可点左右箭头切图，点中央隐藏或显示按钮，右上角进入轮播设置。支持全屏相册的固件会为照片保留宽或高铺满屏幕的版本，重新导入原图即可为早期照片补齐这个版本。
-- 完整显示固件通过小屏自己的 Wi-Fi 定位，首页右上角显示城市和天气，点按该区域可查看七天预报。断网时预报页会标示缓存。参考固件可用 `desk_set_weather_location` 为选定设备设置地点，保存后由小屏自行刷新。
-- [Open-Meteo](https://open-meteo.com/) 提供当前天气和七天预报，数据采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。DeskPet 将温度四舍五入、将天气代码映射为图标，并缓存最近预报。默认使用的 [免费接口](https://open-meteo.com/en/terms) 用于非商业用途。
-- 本机 MCP 自动读取 Codex 的数字用量。小屏右栏显示 Token 速率、时间、会话数和额度，底部显示近期趋势。用 `desk_set_role_auto` 开关自动档位。控制端断开或 15 秒没有收到数据时，小屏清除旧速率，自动档位回到待机。
-- Token 速度由 `AgentSpeedProbe` 采集。对应系统的桌面包安装后会自动识别随包采集器。可在启动 MCP 或独立接收服务时传入 `--token-probe <程序绝对路径>`，或将采集器放在设备配置目录的默认路径。Windows 依次查找 `bin/AgentSpeedProbe.exe` 和 `bin/AgentSpeed.Probe.exe`，macOS 和 Linux 查找 `bin/AgentSpeedProbe`。预编译包、适用系统和校验方式见公开仓库 README 的「手动安装」。多台设备共用一个采集进程。原项目本身包含实测和按近期速度估算的数据；小屏显示速度与 `t/s`，`desk_token_status` 保留数据状态供查询。使用 `mcp --no-token-probe` 可跳过测速，设备配置目录中已有采集程序时也适用。未配置采集程序时，速度显示不可用。`--token-sessions` 可指定用作额度回退的 Codex 会话目录，不改变测速来源。
-- 当前小屏协议最多传输 9999.9 t/s 和 255 个会话。速度超出范围时暂停更新，会话数超出范围时显示未知；不会把它们截成上限后冒充真实值。完整范围需要后续更新小屏协议。
-- 账号提供积分、重置卡和周额度重置时间时，支持的固件会显示这些数据。周额度以“还剩 N 小时”显示，未满一小时按一小时显示；时间未同步、数据不可用或已过期时不编造倒计时。
-- 在小屏 **桌面设置 → 显示选项** 中可分别开关呼吸灯、CPU 使用率和内存使用率，并用呼吸灯旁的 −、+ 设置完整呼吸周期（1～5 秒、每次 0.5 秒；默认 1.5 秒），选择保存在该设备。CPU 和内存默认关闭，也可用 `desk_computer_metrics` 设置，例如 `cpu=true, memory=true`。省略两个开关可查看当前设置。电脑离线修改的开关会在重连后同步，同期在小屏修改的另一项也会保留。首次开启 CPU 时需等待第二次采样。采样暂缺时显示 `--`。
-- 在设置中打开 **Speed windows**，点按近期或长期一行切换选项，再点 **Save**。也可用 `desk_speed_windows` 查看或同时设置 `recent_seconds` 和 `long_days`。近期可选 2、5、10、30、60 分钟，长期可选 1、3、7 天。选择保存在小屏，重连后电脑按新窗口重新计算自动档位。
-- 要复用原桌面屏项目的多来源 Token 采集器，启动 MCP 时传入 `--token-collector <原项目绝对路径>`。采集结果只包含数字汇总，采集器按原项目支持的来源查找本机记录。账号接口没有有效额度时，MCP 会从本机 Codex 会话记录读取额度。
-- 完整显示固件在主页合并完成提醒和待应答。点通知区，或用 `desk_message_view(mode="list")` 打开小屏列表。新版在后台将列表和详情一起写入 TF 卡，点开时直接读卡。待应答优先排列，每个 Agent 会话显示一条。进入列表后，当时已有的消息统一标为已读，完成记录退出小屏提醒列表，仍可在电脑端查看。已读的待应答留到电脑端回报答复、取消或问题被新一轮取代。断开电脑时仍可查看卡上消息，重连后补交已读回执和更新答复状态。旧版的已读规则随固件版本而异。
-- 参考固件的小屏消息页缓存最近十条提醒。`desk_message_view` 可打开参考固件的小屏列表、翻页和查看详情。`open` 和 `mark_seen` 需要通知编号，标记时须显示该条详情。也可在屏上点详情或弹窗的已读按钮。离线标记在重连后同步回电脑上的小屏提醒记录。
-- 想用一张图或一句话做自己的角色，或先装一个示例，可以用 `desk_read_manual(topic="roles")` 打开自定义角色指南。
-- `desk_check_role` 接收电脑上的角色目录或 role1 ZIP 绝对路径，离线检查资源、命名和格式。`desk_install_role` 使用同一套检查，通过后才传输到储存卡，由小板校验并启用。完整显示固件的图鉴使用 role1 ZIP。`desk_list_roles`、`desk_select_role`、`desk_list_actions` 和 `desk_play_action` 用于查询、切换和播放。安装和切换角色会保留当前页面。需要打开角色页时，用 `desk_set_view` 选择 `role`。
-- 部分角色包还提供五档滑行。自动模式按包内的计时和安全帧在跑动与滑行之间切换。`desk_status` 的 `role.base_action` 显示当前持续动作，也可用 `desk_play_action` 单独播放 `glide_1` 至 `glide_5`。
-- `desk_play_action` 的启动回执包含 `operation` 和 `boot`，可用 `desk_action_status` 查询最近八次动作的播放、完成或中断状态。重启后使用新的回执。
-- role1 的速度或爆气帧读卡失败时，小板会重新打开文件读取一次。如果仍校验失败，该动作会中断，小板会尝试继续播放可用的持续动作或待机。重新选择角色可重试出错动作。
-- `desk_set_role_base` 设置持续播放的角色动作；临时动作结束后回到持续动作。切换角色或重启后恢复该角色默认动作。
-- `desk_upload_files` 可以传输 `desk/` 和 `photos/` 下的文件。写入 `roles/` 使用 `desk_install_role`。
-- 对声明 `photo_jpeg_upload` 的设备，`desk_add_photo` 会保留图片比例并生成适合设备显示的 JPEG，上传后可在设备相册或壁纸列表选择；重复导入相同图片不会覆盖已有文件。声明 `card_restricted_paths` 的设备只接受受限图片、主题和角色路径，不接受普通任意文件，请使用相应导入入口。
-- 支持 `theme_json_upload` 的设备可用 `desk_add_theme` 导入配色 JSON，再从设备「外观 → 更多主题」选择。名称使用 1 至 24 位英文字母、数字、下划线或连字符；设备校验颜色字段和对比度，拒绝无效主题。文件名按名称和内容标识生成，重复导入不会覆盖；更新固件后主题按文件名排序并可翻页浏览。
-- `desk_delete_resource` 可删除 `roles/<角色标识>` 对应的完整角色、`photos/<照片标识>` 对应的照片及缩略图，或 `desk/` 下的单个文件。删除当前角色或试播前保存的角色前，先切换到其他角色。
-- Windows 上可启用 Codex 和 Claude Code 提醒；其他 Agent 的提醒钩子尚未完成验证，当前不会安装。配对和手动控制可继续使用。
-- 每种 Agent 在电脑上启用一次，提醒会发给这套配置中所有已配对的搭搭。每台搭搭各自保存投递与已读状态。在 Agent 里答复，或在支持清除待应答的搭搭上确认清除后，共用这套配置的搭搭都会撤下同一条提醒。离线设备在重连同步时撤下。屏上清除只隐藏这条提醒，Agent 中的问题仍可回答。调亮度、切换角色和查看单台设备的提醒按设备 ID 选择。
-- 更换搭搭电脑端的安装目录后，重新启用对应 Agent 的提醒，可更新同一配对配置的旧钩子。Codex 需重新审核新增命令。
+每种 Agent 在电脑上启用一次，提醒就会投递给当前配置下所有已配对的搭搭。初次配置或新增客户端时，可先调用 `desk_notification_setup` 查看各客户端的支持状态与启用工具：
 
-- 用 `desk_enable_codex_notifications` 启用 Codex 提醒，再到 Codex 的 `/hooks` 或设置中的 Hooks 审核并信任新增条目。工具会返回写入的 `hooks.json` 路径。只有新会话实际触发钩子、且选中的搭搭已显示提醒，才算验证完成。电脑端可用 `desk_list_notifications` 检查是否收到事件。为 MCP 设置 `CODEX_HOME` 后，启用和停用操作都使用该目录。小屏可通过 Wi-Fi 连接时，关闭 MCP 后也可由本机后台进程投递。`desk_list_notifications` 和 `desk_mark_notification_seen` 管理小屏自己的提醒记录。`desk_disable_codex_notifications` 移除本程序的 hook，保留已有提醒。[Codex Hooks 说明](https://developers.openai.com/codex/hooks)
-- 额度来源在小屏「监控设置」中选择：Codex、Claude Code、Antigravity Gemini 或 Antigravity Claude/GPT。Codex 使用其本机账户接口；账号未返回的积分或重置卡显示为空。Claude Code 和 Antigravity CLI 在 macOS 上可分别调用 `desk_set_agent_quota(source="claude_code", enabled=true)` 或 `desk_set_agent_quota(source="antigravity", enabled=true)` 启用采集，再打开对应 Agent 会话。原状态栏命令会保留；调用同一工具并传 `enabled=false` 可移除采集。Windows 上，Claude Code 没有现有自定义状态栏时可以同样启用；如果已有状态栏，程序暂不自动修改，避免使用错误的命令环境。Antigravity 的 Windows 采集尚未验证。启用自定义状态栏可能隐藏 Claude Code 原本显示的部分快捷键提示。Agent 没有提供有效数据、会话未开始、状态栏被其他设置覆盖或数据过期时，小屏显示 `--`，并不代表额度为零。启用 Antigravity 额度采集后，电脑用已登录的官方 CLI 定期读取额度。支持多来源同屏的设备会同时更新各来源，单来源设备在选择 Antigravity 时刷新。停用采集会停止这条轮询。同一套电脑配置下的搭搭共用读数。Antigravity 的模型组映射尚未用真实账户数据验收，桌面应用的额度接口也未验证。
-- 用 `desk_set_claude_notifications` 启用或关闭 Claude Code 提醒。已启用旧版提醒的用户可再次启用以更新钩子。Claude Code 2.1.281 的 macOS 隔离会话验证了完成、提问和答复；Windows 隔离会话验证了完成，提问和答复使用合成事件验证。按 Esc 取消的问题会在下次发送消息或完成一轮时清除。[Claude Code Hooks 说明](https://code.claude.com/docs/en/hooks)
-- 初次配置或新增客户端时，用 `desk_notification_setup` 查看 Codex、Claude Code、Antigravity、OpenCode、WorkBuddy 和 WorkBuddy AI 的提醒配置状态和启用工具。启用 Claude Code 或 Antigravity 额度采集后，工具也会返回该客户端的 `notification_setup`。用户可以按需启用提醒。
-- 用 `desk_set_antigravity_notifications` 启用或关闭 Antigravity 的完成和提问提醒。已启用旧版提醒的用户可再次启用以更新钩子。先开新会话确认屏幕提醒，未加载时再重启客户端。Antigravity CLI 1.5.7 已通过真实完成和提问钩子测试；桌面应用已验证完成提醒，待答复提醒和授权弹窗仍待单独验收。[Antigravity Hooks 说明](https://antigravity.google/docs/hooks)
-- 用 `desk_set_opencode_notifications` 启用或关闭 OpenCode 完成、提问和授权提醒。已安装旧版的用户可再次启用以升级插件，之后重启 OpenCode。中止或删除会话会清除该会话的待应答状态，保留提醒记录。OpenCode 1.18.25 的隔离实例已验证完成、提问、答复和拒绝授权。实机验证拒绝授权只清除对应请求。日常桌面配置仍待验收。[OpenCode V1 插件配置](https://opencode.ai/v1/docs/plugins/)
-- 用 `desk_set_workbuddy_notifications` 启用或关闭 WorkBuddy 的完成、提问和授权提醒。WorkBuddy 使用默认的 `workbuddy`，WorkBuddy AI 使用 `workbuddy_ai`。启用后重启相应应用。提问按请求编号清除。授权按会话轮次合并，并在该轮结束时清除。两版内置 CLI 已通过完成提醒测试，WorkBuddy 5.1.5 另通过授权提示和拒绝后清除的实机测试。桌面应用及 WorkBuddy AI 授权仍待验收。
+| 客户端 | 启用 / 管理工具 | 启用后生效方式与平台说明 |
+| --- | --- | --- |
+| **Codex** | `desk_enable_codex_notifications`（停用：`desk_disable_codex_notifications`） | 启用后进入 Codex 的 `/hooks` 或设置中的 Hooks 审核并信任新增条目，再开新会话验证。支持 macOS / Linux / Windows。设置 `CODEX_HOME` 环境变量后，启用与停用均作用于该目录。[Codex Hooks 说明](https://developers.openai.com/codex/hooks) |
+| **Claude Code** | `desk_set_claude_notifications(enabled=true/false)` | 直接打开新的 Claude Code 会话验证。支持 macOS / Linux / Windows。按 `Esc` 取消的提问会在下次发送消息或完成一轮对话时自动清除。[Claude Code Hooks 说明](https://code.claude.com/docs/en/hooks) |
+| **Antigravity** | `desk_set_antigravity_notifications(enabled=true/false)` | 先开新会话确认屏幕提醒，若未加载再重启客户端。支持 macOS / Linux（Windows 暂未启用）。[Antigravity Hooks 说明](https://antigravity.google/docs/hooks) |
+| **OpenCode** | `desk_set_opencode_notifications(enabled=true/false)` | 启用或升级插件后**重启 OpenCode**。中止或删除会话会清除该会话的待应答状态并保留历史记录。支持 macOS / Linux（Windows 暂未启用）。[OpenCode V1 插件配置](https://opencode.ai/v1/docs/plugins/) |
+| **WorkBuddy / WorkBuddy AI** | `desk_set_workbuddy_notifications(enabled=true/false, edition="workbuddy" \| "workbuddy_ai")` | 启用后**重启对应的 WorkBuddy 应用**。提问按请求编号清除，授权请求按会话轮次合并并在该轮结束时清除。支持 macOS / Linux（Windows 暂未启用）。 |
 
-用 `desk_read_manual` 可以查看操作手册（`operations`）、二次开发手册（`development`）和自定义角色指南（`roles`）。更换电脑前请确认上一台已断开。删除本机凭据会停止本机自动连接，设备端撤销授权需按对应固件的流程操作。
+- **更换安装目录后更新钩子**：如果移动了搭搭电脑端的安装目录，重新调用一次对应客户端的启用工具即可自动更新旧钩子路径（Codex 更新后需重新在 `/hooks` 审核信任）。
+- **真实提醒验收与 `doctor` 诊断**：
+  - 写入钩子配置并完成信任/重启后，必须**新开一个会话**真实触发一次回复完成，并在搭搭屏幕上确认弹出提醒，才算验收通过（手动调用 `desk_show_text` 只验证设备连接，不代表钩子已生效）。
+  - 可用 `desk_list_notifications` 查看电脑端是否收到提醒事件；也可在终端运行 `deskpet-platform doctor --client <客户端>`（可选 `codex`、`claude_code`、`antigravity`、`opencode`、`workbuddy`、`workbuddy_ai`；多设备加 `--device-id`，独立接收端加 `--config <接收端配置> --shared-config <原设备配置>`）核对已配对设备、钩子文件、最近触发事件与设备显示回执。`doctor` 可在 MCP 连接搭搭期间同时运行。
+  - 当搭搭可通过 Wi-Fi 连接时，即使关闭了 MCP 会话，提醒钩子也会通过本机后台进程自动把提醒投递到搭搭屏幕上。
+
+### 屏幕消息列表、待应答计数与多设备同步
+
+- **待应答角标与来源显示**：
+  - 支持 `attention_summary` 的固件会在消息入口显示当前仍需用户拍板或回答的请求数量；支持提醒来源显示的固件还会标出来源客户端名称（多个客户端同时等待时显示「多来源」，超过 99 条显示 `99+`）。
+  - 注意：「在屏幕上查看过消息」不等于「已在 Agent 中回复」。当电脑端收到用户的实际答复、取消操作或新一轮对话更新后，待应答数量会自动同步扣减；电脑断线或数据过期后角标自动隐藏。
+- **查看与管理屏幕消息**：
+  - 搭搭首页合并展示「完成提醒」与「待应答提醒」。轻触屏幕通知区，或调用 `desk_message_view(mode="list")` 可打开屏幕消息列表。
+  - 固件在后台将消息列表与详情写入 TF 卡，点开时直接读卡，因此断开电脑时仍可翻阅卡上消息，重连后自动同步已读回执与答复状态。
+  - 待应答消息在列表中优先置顶（每个 Agent 会话显示最新一条）。进入列表后，当时已有的消息会统一标为已读：已读的「完成提醒」会退出屏幕提醒列表（仍可在电脑端通过 `desk_list_notifications` 查看），而已读的「待应答提醒」会保留到你在 Agent 中完成答复、取消或在屏幕上手动清除为止。
+  - **多台搭搭同步撤下**：当你已在 Agent 里回答了问题，或在支持清除待应答的搭搭屏幕上确认清除后，共用同一套配置的搭搭都会同步撤下该条待应答提醒（离线设备在重连后同步撤下；在屏幕上手动清除仅隐藏屏幕提醒，不影响你在电脑 Agent 中继续回答）。
+  - **电脑端提醒管理**：`desk_list_notifications` 和 `desk_mark_notification_seen` 仅管理搭搭自己的提醒记录，不会修改 Agent 客户端本身的未读状态。（旧版/参考固件在内存中缓存最近 10 条提醒，支持用 `desk_message_view` 的 `open`、`previous`、`next`、`mark_seen` 远程翻页、查看详情和标记已读）。
+
+---
+
+## 实时测速、Agent 额度与电脑状态监控
+
+### 1. Token 速度采集（`AgentSpeedProbe`）
+
+- **自动识别随包采集器**：搭搭首页右栏实时显示 Token 输出速率（`t/s`）、时间、活跃会话数与额度，底部折线图显示近期速度趋势。各系统桌面包已内置预编译的 `AgentSpeedProbe`，安装后默认自动启用，多台搭搭共用同一个采集进程。
+- **自定义或关闭采集器**：
+  - 也可在启动 MCP 或后台服务时通过 `--token-probe <程序绝对路径>` 指定采集器，或将采集器放入设备配置目录的 `bin/` 下（优先于随包版本：Windows 依次查找 `bin/AgentSpeedProbe.exe` 和 `bin/AgentSpeed.Probe.exe`，macOS 和 Linux 查找 `bin/AgentSpeedProbe`）。
+  - 启动时传入 `mcp --no-token-probe` 可关闭测速（配对、屏幕控制与消息提醒照常工作）。
+  - 若需兼容旧版多来源采集目录，可在启动时传入 `--token-collector <目录绝对路径>`（不能与 `--token-probe` 同时指定）；`--token-sessions` 可单独指定用作额度回退的 Codex 会话目录。
+- **测速查询与协议上限**：
+  - 调用 `desk_token_status` 可读取最近一次发送到搭搭的 Token 速率、趋势、会话数与额度状态。
+  - 控制端断开或连续 15 秒无数据送达时，搭搭会自动清除旧速率并将角色切回待机。
+  - 当前通信协议上限为 `9999.9 t/s` 和 `255` 个会话；超出范围时暂停更新或显示未知，绝不会截断成上限值冒充真实数据。
+- **自动档位与自适应比较窗口**：
+  - 调用 `desk_set_role_auto(enabled=true/false)` 可开启或关闭角色随 Token 速率自动换档。
+  - 在搭搭设置中打开 **Speed windows**（或调用 `desk_speed_windows`）可查看或同时修改自适应档位的近期窗口（`recent_seconds`：可选 120、300、600、1800、3600 秒，即 2/5/10/30/60 分钟）和长期窗口（`long_days`：可选 1、3、7 天）。设置保存在搭搭上，重连后电脑按新窗口计算自动档位。
+
+### 2. 额度来源配置（Codex / Claude Code / Antigravity）
+
+在搭搭屏幕的「监控设置」中（或通过 `desk_dashboard_config`）可选择要显示的额度来源：`Codex`、`Claude Code`、`Antigravity Gemini` 或 `Antigravity Claude/GPT`：
+
+- **Codex**：电脑端 MCP 自动读取本机 Codex 账户接口（接口无有效额度时回退读取本机 Codex 会话记录）。账号提供积分、重置卡和周额度重置时间时会在屏幕展示（周额度以「还剩 N 小时」显示，不满 1 小时按 1 小时计；时间未同步、数据不可用或已过期时不会编造倒计时）。
+- **Claude Code 与 Antigravity**：
+  - 调用 `desk_set_agent_quota(source="claude_code", enabled=true)` 或 `desk_set_agent_quota(source="antigravity", enabled=true)` 启用采集（传 `enabled=false` 可移除采集并恢复原设置），随后打开对应 Agent 会话即可。
+  - **Claude Code**：通过状态栏脚本采集，会保留你原有的自定义状态栏命令（Windows 上若检测到已有自定义状态栏，为避免命令环境冲突暂不自动修改；启用状态栏可能会隐藏 Claude Code 默认的部分快捷键提示）。
+  - **Antigravity**：电脑端通过已登录的官方 CLI 定期轮询额度（macOS 已支持，Windows 采集与桌面应用额度接口尚待验证；支持多来源同屏的固件会同时更新各来源，单来源固件在选中 Antigravity 时刷新，停用采集即停止轮询）。
+  - 当 Agent 尚未产生有效数据、会话未开始、状态栏被覆盖或数据过期时，屏幕显示 `--`（表示暂无数据，不代表额度为零）。
+
+### 3. 监控面板轮播与电脑 CPU / 内存显示
+
+- **监控面板配置（`desk_dashboard_config`）**：
+  - 支持 `dashboard_config` 的固件可调用 `desk_dashboard_config` 查看或分别设置当前显示的数据项（`metric`：`speed` 速度、`quota` 额度、`computer` 电脑状态、`auto` 自动轮播、`weather` 天气）与额度来源（`quota_source`）。
+  - 支持轮播选择的固件可通过 `rotation` 勾选参与自动轮播的一项或多项（如 `['quota', 'weather']`），并用 `interval_seconds` 设置轮播间隔（可选 5、10、20、30 或 60 秒）。自动轮播仅切换已勾选且当前有数据的项目；无可用数据时显示等待状态。设置保存在设备中，重启后继续生效。
+- **电脑 CPU / 内存与呼吸灯（`desk_computer_metrics`）**：
+  - 在搭搭屏幕 **桌面设置 → 显示选项** 中，可分别开关呼吸灯、电脑 CPU 使用率和内存使用率，并用呼吸灯旁的 **−**、**+** 调节完整呼吸周期（1～5 秒，步进 0.5 秒，默认 1.5 秒）。
+  - 电脑端也可调用 `desk_computer_metrics(cpu=true, memory=true)` 查看或修改开关（默认关闭；首次开启 CPU 需等待第二次采样，采样暂缺时显示 `--`）。离线修改的开关会在重连后自动双向同步。
+
+### 4. 后台常驻服务（关闭 Agent 窗口后持续更新）
+
+- 如果希望在关闭所有 Agent 窗口期间，桌上的搭搭依然持续刷新 Token 速度、CPU / 内存、额度、天气与提醒，可在终端运行：
+  ```sh
+  deskpet-platform service
+  ```
+  （跳过测速可加 `--no-token-probe`，也可传 `--usb-port`）。
+- **自动无感交接**：当你打开任意 Agent 的 MCP 会话需要控制搭搭时，`service` 会自动让出连接；当你关闭 Agent 会话后，`service` 会自动恢复接管。
+- **独立提醒接收端常驻服务**：独立接收端可运行 `deskpet-platform --config <新设备配置> receiver-service --shared-config <原设备配置> --token-probe <AgentSpeedProbe>`。
+- 注意：手动启动的终端进程不会在电脑重启后自动恢复；如需开机自启，请配置系统后台服务并确保其具备局域网访问权限（macOS 候选 `launchd` 方案见仓库 `tools/macos/README.md`）。
+
+---
+
+## 角色、外观主题、壁纸与相册
+
+### 1. 角色管理与动作播放
+
+- **制作与安装指南**：想要体验内置的 `Pocket Bot`、安装现成 `.zip` 角色包或制作自定义角色，请调用 `desk_read_manual(topic="roles")` 阅读[自定义角色指南](roles.md)。
+- **离线检查与安装**：
+  - `desk_list_role_sources(directory=...)`：扫描本机目录中的可安装角色包。
+  - `desk_check_role(source=..., preview_dir=...)`：离线检查角色目录或 `role1` ZIP 的资源完整性、命名、首页活动范围与多帧稳定性，传入 `preview_dir` 可输出 320 × 240 首页合成预览动图与互动总览。
+  - `desk_install_role(source=...)`：执行同一套严格校验，通过后加密传输到搭搭储存卡并启用（安装和切换角色不会打断当前屏幕页面；需切到角色主页时调用 `desk_set_view(page="role")`）。
+- **查询、切换、试播与动作控制**：
+  - `desk_list_roles` / `desk_select_role(identity=...)`：列出卡上已安装角色或切换到指定角色。
+  - `desk_role_preview`：在图鉴中试播已安装角色（`mode="start"` 开始试播，依次演示阶段 0 待机、1～5 五档速度、6 爆气；`status` 查看当前阶段；`use` 将正在试播的角色直接设为当前角色；`cancel` 或播完后自动返回图鉴并恢复原角色）。
+  - `desk_list_actions` / `desk_play_action(action=..., duration_ms=...)`：查询当前角色支持的动作并临时播放；启动回执包含 `operation` 与 `boot`，可用 `desk_action_status` 查询最近 8 次动作的播放、完成或中断状态。
+  - `desk_set_role_base(action=...)`：设置持续播放的基础动作（临时动作结束后会回到该持续动作；切换角色或重启后恢复默认）。
+  - **五档滑行（`glide_1` ～ `glide_5`）**：包含 DNC1 v3 滑行片段的角色包在自动模式下会按包内计时与安全帧在「跑动」与「滑行」间自然轮换，`desk_status` 的 `role.base_action` 会显示当前持续动作，也可通过 `desk_play_action` 单独调用。
+  - **读卡容错**：播放速度或爆气帧若遇储存卡读取失败，搭搭会自动重开文件重试一次；若仍校验失败则中断该动作并回退到可用的持续动作或待机，重新选择该角色即可重试。
+
+### 2. 外观主题与独立壁纸
+
+- **查看与切换主题 / 壁纸（`desk_appearance_config`）**：
+  - 支持 `appearance_config` 的固件可调用 `desk_appearance_config` 查看或分别设置主题（`theme`：内置 `paper`、`night`、`sage` 或已导入的主题 JSON 文件名）和壁纸（`wallpaper`：`desk_add_photo` 返回的照片标识，或卡上的 `photos/`、`media/`、`wallpapers/` 路径；传空字符串 `""` 清除壁纸）。
+  - 设置保存在设备中。屏幕休眠或播放媒体期间会拒绝修改；切换壁纸时设备需处于工作台首页或外观设置页。
+- **导入自定义配色主题（`desk_add_theme`）**：
+  - 支持 `theme_json_upload` 的固件可用 `desk_add_theme(source=..., name=...)` 导入配色 JSON（名称使用 1～24 位英文字母、数字、下划线或连字符）。设备会自动校验颜色字段与对比度，拒绝不合规主题；文件名按名称与内容哈希生成，重复导入不会覆盖旧文件。导入后可在设备「外观 → 更多主题」中翻页选择。
+- **管理独立壁纸（`desk_add_wallpaper` / `desk_list_wallpapers` / `desk_delete_wallpaper`）**：
+  - `desk_add_wallpaper(source=..., name=...)` 将图片导入 TF 卡的独立 `wallpapers/` 目录（名称规则同上），可用作背景壁纸，且**不会**混入开机相框的照片轮播。
+  - `desk_list_wallpapers(cursor=...)` 分页查询所有可用壁纸、可作壁纸的相册图片及当前选中项（用返回的 `next_cursor` 查下一页）。
+  - `desk_delete_wallpaper(path=...)` 删除已导入的独立壁纸（当前正在使用的壁纸需先切换后再删除）。
+
+### 3. 离线相册与储存卡文件管理
+
+- **导入与控制相册（`desk_add_photo` / `desk_photo_album`）**：
+  - `desk_add_photo(source=...)` 将电脑图片转换后连同缩略图一起传入搭搭相册（支持 `photo_jpeg_upload` 的固件会保留原图比例生成高质量 JPEG，也可在壁纸列表中选用；支持全屏相册的固件会同时生成铺满宽或高的版本，早期照片重新导入原图即可补齐；重复导入相同图片不会覆盖已有文件）。
+  - `desk_photo_album` 控制屏幕相册：`grid` 打开或刷新缩略图网格，`open` 传入照片标识打开大图，`previous` / `next` 在网格中翻页或在大图中切图，`play` / `pause` 控制自动轮播，`interval` 设置轮播间隔（5、10 或 15 秒）。在搭搭全图页也可轻触左右箭头切图、轻触中央隐藏/显示按钮、点右上角进入轮播设置。
+- **底层文件上传与资源删除（`desk_upload_files` / `desk_delete_resource`）**：
+  - `desk_upload_files` 仅用于向储存卡 `desk/` 或 `photos/` 传输底层受支持文件（声明 `card_restricted_paths` 的固件只接受合规的专用导入入口，不接受任意文件；安装角色必须用 `desk_install_role`，导入相册图片请用 `desk_add_photo`）。
+  - 支持 `card_delete` 的固件可用 `desk_delete_resource(path=...)` 删除 `roles/<角色标识>` 整套角色、`photos/<照片标识>` 照片及缩略图，或 `desk/` 下的单个文件（删除当前正在使用或试播前保存的角色前，请先切换到其他角色）。
+
+---
+
+## 页面切换、时钟、天气与屏幕控制
+
+- **页面切换与默认首页（`desk_set_view`）**：
+  - 调用 `desk_set_view(page=...)` 可打开角色工作台（`role`）、应用菜单（`home`）、时钟（`clock`）、角色图鉴（`roles`）、相册（`photos`）、天气（`weather`）、消息列表（`messages`）或设置（`settings`）。
+  - 传入 `make_default=true` 可将 `role`、`home`、`clock` 或 `photos` 设为开机默认首页（将相册设为默认首页时，开机自动轮播相册照片）。
+- **时钟表盘与校时（`desk_sync_clock` / `desk_clock_edit`）**：
+  - 时钟页提供 6 种表盘（可通过 `desk_set_view(page="clock", clock_face=0..5)` 选择）。搭搭开机联网后会自动校时，MCP 连接时也会自动补齐尚未设置的时间或时区。
+  - 调用 `desk_sync_clock` 可主动用电脑时间校准搭搭（可指定 `offset_minutes` 时区偏移）。
+  - 在搭搭屏幕进入 **桌面设置 → 校时**（旧版/参考固件为时钟页上的 **Set time**），可在 **日期时间** 页签用 **−**、**+** 调整年/月/日/时/分并点 **保存**，在 **时区** 页签按 15 分钟步进调整时区偏移。电脑端也可先打开时钟页，再用 `desk_clock_edit`（`start` → `adjust` → `save` / `cancel`）远程操作同一编辑器。
+- **天气与七天预报**：
+  - 搭搭联网后通过自身 Wi-Fi 自动定位，在首页右上角显示城市与当前天气，轻触该区域可查看七天预报（断网时预报页会标示缓存；旧版/参考固件可调用 `desk_set_weather_location` 手动设定经纬度与英文地名）。
+  - 天气与七天预报数据由 [Open-Meteo](https://open-meteo.com/) 提供，采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可；默认使用的[免费接口](https://open-meteo.com/en/terms)仅供非商业用途。
+- **短文字、临时图片、屏幕亮度与触摸校准**：
+  - `desk_show_text(text=...)`：在屏幕显示两行以内的短文字（支持中英文），返回显示回执。
+  - `desk_show_image(source=...)`：将电脑图片自动转换后传到储存卡并全屏展示；轻触屏幕或调用 `desk_clear_image` 返回原页面。
+  - `desk_set_brightness(level=0..100)`：设置并保存屏幕亮度；设为 `0` 会关闭背光，轻触屏幕即可重新点亮。
+  - `desk_calibrate_touch`：在屏幕上启动三点触摸校准（按提示依次点击三个十字标记；长按 3 秒或调用 `desk_cancel_touch_calibration` 可取消并保留原校准）。完成校准后，`desk_wait_touch` 可读取点击位置，轻触屏幕上的角色区域也会本地触发角色的 `touched` 互动动作。
+
+---
+
+## 语音朗读与语音交互（实验功能）
+
+### 1. 文字与提醒朗读
+
+- **主动朗读**：在支持语音的设备上，`desk_speak(text=...)` 可朗读不超过 80 字的单行文字；`desk_read_notification(identity=...)` 可按编号朗读指定提醒的标题（不会改变提醒的已读状态）。
+- **屏幕点按朗读**：支持 `message_read_aloud` 的固件可在提醒详情页点击「联网朗读」，由电脑端合成并播放该条标题（电脑断线时不会自动重播）。
+- **隐私与平台说明**：文字仅在主动触发朗读时发送至微软 Edge 在线语音服务，由电脑分段临时合成音频（每段最长 5 秒），设备仅在内存中接收播放，不会写入储存卡。电脑端音频转换当前需要 macOS 环境；设备正在播放音乐或视频时会拒绝朗读。
+
+### 2. 语音识别、唤醒对话与工具授权
+
+语音识别与对话功能目前处于开发验证阶段。普通「开始录音」会将录音传给电脑识别并在屏幕显示结果；「语音唤醒」还会将识别出的文字发给对话模型，并将模型回复合成为语音在搭搭上播放。
+
+- **配置语音识别服务（在电脑端进程环境变量中三选一，同时开启多种会停用识别）**：
+  1. **阿里云百炼（华北 2 · 北京）**：设置 `DESKPET_ENABLE_DASHSCOPE_TRANSCRIPTION=1` 和 `DASHSCOPE_API_KEY`（可选 `DASHSCOPE_WORKSPACE_ID`），电脑通过 WebSocket 调用 `paraformer-realtime-v2` 实时识别。
+  2. **硅基流动**：设置 `DESKPET_ENABLE_ONLINE_TRANSCRIPTION=1`、`DESKPET_ASR_API_KEY` 和 `DESKPET_ASR_MODEL`。
+  3. **本地 whisper.cpp 识别**：设置 `DESKPET_ENABLE_LOCAL_TRANSCRIPTION=1`，并用绝对路径配置 `DESKPET_LOCAL_ASR_CLI`、`DESKPET_LOCAL_ASR_MODEL` 和 `DESKPET_LOCAL_ASR_VAD_MODEL`（需支持 stdin 与 VAD），录音在电脑本机通过内存管道完成识别。
+- **配置语音唤醒对话模型**：在电脑端额外设置 `LLM_BETA_OPENAI_BASE_URL`、`LLM_BETA_OPENAI_API_KEY` 和 `LLM_BETA_OPENAI_MODEL`。
+  - 对话服务支持 JSON 模式时，可设置 `LLM_BETA_OPENAI_TOOL_FORMAT=json`。模型判断用户要执行的操作，电脑按当前设备授权决定是否调用。服务支持推理开关时，可用 `LLM_BETA_OPENAI_ENABLE_THINKING=false` 缩短对话等待。
+- **昵称与语音工具授权（`desk_voice_names` / `desk_voice_tools`）**：
+  - `desk_voice_names` 可查看或修改保存在搭搭上的用户昵称与设备昵称（用户昵称可为空；修改昵称不会改变唤醒词）。
+  - `desk_voice_tools` 查看或修改某台已配对搭搭的语音工具授权（默认全部关闭；传入完整的 `enabled` 列表替换当前授权，传空列表 `[]` 撤销全部）。可授权项包括：查看设备状态 `device_status`、查看角色动作 `list_role_actions`、显示工作台并播放角色动作 `play_role_action`。授权后语音助手可按用户语音指令直接调用，无需逐次确认；变更授权后会在下次对话时重建工具列表并清空旧对话上下文。
+  - 授权列表的 `device_supported` 显示当前设备是否支持该项。调用前会复查授权。动作回执报告已开始或未开始，失败时会提示未授权、设备忙碌或连接等原因。
+
+---
+
+## 网络切换、储存卡诊断与 USB 备用连接
+
+- **切换已保存的 Wi-Fi（`desk_select_network`）**：
+  - 调用 `desk_select_network(ssid=...)` 可按网络名称（有效 UTF-8）切换到搭搭已保存的其他 Wi-Fi（旧版固件不支持此命令时请直接在屏幕 Wi-Fi 设置中切换）。
+  - 切换过程会短暂断开无线连接；重连后可调用 `desk_diagnostics` 核对 `network_switch` 的操作编号与结果。切换成功后目标网络会成为重启后的首选网络；若目标网络无法连接，搭搭会自动尝试恢复原网络。
+- **储存卡状态与重挂载（`desk_diagnostics`）**：
+  - `desk_diagnostics` 可查看当前连接、已保存网络、重启原因及储存卡空间，`card.mount_count` 记录本次开机以来储存卡成功挂载的次数。
+  - 若储存卡接触恢复后需重新挂载，在屏幕上重新打开「角色图鉴」或「相册」即可触发介质探测与挂载，随后返回角色页会重新加载上次保存的角色。
+- **USB 身份查询与无线断连备用串口（`--usb-port` / `desk_set_usb_fallback`）**：
+  - 在终端运行 `deskpet-platform find-usb --device-id <设备UUID> /dev/cu.usbserial-1140`（或在 MCP 中调用 `desk_find_usb_device`），可在不抢占现有 Wi-Fi 控制连接的前提下，读取指定串口上的设备 MAC 与持久 UUID（省略 `--device-id` 可列出所有候选串口的匹配结果）。
+  - 启动 MCP 时可通过 `--usb-port <串口>` 指定备用串口（启动时未插 USB 也能正常用 Wi-Fi 启动）；运行期间若串口路径改变或需为第二台设备设置备用串口，可先用 `desk_find_usb_device` 查出串口，再调用 `desk_set_usb_fallback(port=..., device_id=...)`（需在无线连接正常时更新）。
+  - 配置备用串口后，一旦 Wi-Fi 连接中断或握手超时，电脑会核对串口设备的 MAC 与 UUID 并自动切到 USB 继续控制和写卡；待无线连通恢复且当前传输结束后，MCP 会自动切回 Wi-Fi 并保存新的局域网地址。当前使用的传输方式（`wifi` 或 `usb`）可通过 `desk_status` 的 `transport` 字段查看。

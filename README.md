@@ -4,7 +4,7 @@
 
 - **看着它干活**：角色动作随实时 Token 输出速度换档，还能顺手看额度、电脑 CPU / 内存、时钟、天气和相册。
 - **做完了叫你**：Agent 跑完长任务，或者停下来等你拍板、回答问题时，搭搭会在桌面上弹出提醒。
-- **自己换角色**：可以先装内置生成的示例角色体验，也可以用一张参考图让 Agent 帮你定制专属角色。
+- **自己换角色**：可以先装内置生成的示例角色体验，也可以安装现成的 `.zip` 角色包，或者让具备生图能力的 Agent 帮你定制专属角色。
 
 如果你手里是**已刷好固件的搭搭**，直接往下看开始安装即可；如果是刚买的空白开发板（仅兼容 **ESP32-2432S028 双 USB 版**：ST7789 屏幕、XPT2046 触摸、4 MiB Flash），请先按[刷机说明](docs/flash.md)刷入首刷包。
 
@@ -51,15 +51,15 @@ src/deskpet_platform/manuals/operations.md。
 2. 配网与配对：
    用 desk_list_devices 检查是否已有配对（已有则复用对应 device_id，新加另一台搭搭
    时传 add_device=true；空白开发板先按 docs/flash.md 核对板型与首刷包）。
-   若搭搭还没连 Wi-Fi，请引导我在搭搭上打开 Wi-Fi 二维码（菜单「桌面设置 → Wi-Fi」
-   或参考固件长按屏幕 3 秒），用手机扫左右两个码连上 2.4 GHz Wi-Fi，并确认电脑和
-   搭搭在同一个可互访的局域网里。
+   若搭搭还没连 Wi-Fi，请引导我在搭搭上打开 Wi-Fi 二维码（新板首页直接点「点击连接 Wi-Fi」，
+   或进菜单「桌面设置 → Wi-Fi」，参考固件长按屏幕 3 秒），用手机扫左右两个码连上
+   2.4 GHz Wi-Fi，并确认电脑和搭搭在同一个可互访的局域网里。
    配对方式二选一：
    - 如果搭搭正用 USB 数据线插在电脑上，优先用 find-usb（或 desk_find_usb_device）
      确认串口和身份，再调 desk_pair_usb 直接配对，省去手传长配对码（注意 Windows
      不支持通过 USB credentials_file 配网，仍先用手机扫码连 Wi-Fi）。
-   - 如果搭搭没插电脑 USB，调 desk_pair_begin 打开本机配对网页，引导我在搭搭
-     「桌面设置 → 电脑配对」用手机扫码复制配对码，粘贴到刚才弹出的本机网页里。
+   - 如果搭搭没插电脑 USB，调 desk_pair_begin 打开本机配对网页，引导我在搭搭首页
+     点「点击配对电脑」（或进「桌面设置 → 电脑配对」）用手机扫码复制配对码，粘贴到刚才弹出的本机网页里。
    最后用 desk_status 确认已连上。连不上时先问我屏幕显示什么，再按手册排查局域网
    隔离、VPN/代理、macOS 局域网权限或旧固件所需的 Windows 防火墙设置。
 
@@ -98,13 +98,16 @@ src/deskpet_platform/manuals/operations.md。
 
 ## 给搭搭加一个角色
 
-搭搭固件出厂不预装角色素材。连好 MCP 之后，直接用日常说话的方式吩咐你的 Agent 就行：
+搭搭出厂固件不预装角色素材。连好 MCP 之后，直接用日常说话的方式吩咐你的 Agent 就行：
 
-- **想先看它动起来**：「帮我在搭搭上装一个 Pocket Bot 示例角色，我想在图鉴里看看效果。」（无需准备图片，几秒生成并传到储存卡）
-- **想做自己的角色**：「照着我发的这张图做一只奶油色小猫，平时眨眼、点它挥爪，先在电脑上给我看一段跑动预览。」
-- **已有现成角色包**：「帮我把下载文件夹里的角色 ZIP 装到搭搭上。」
+- **想先装个官方示例看它动起来**（无需准备图片，也无需 Agent 具备生图能力）：
+  > 帮我生成内置的 Pocket Bot 示例角色并装到搭搭上，装好后在搭搭屏幕上打开「角色图鉴」试播一下。
+- **已有现成的角色 `.zip` 包**（无需 Agent 具备生图能力）：
+  > 帮我检查一下下载目录里的「小企鹅.zip」角色包是否符合规范，确认没问题后装到我的搭搭上，并在「角色图鉴」里确认能找到它。
+- **想定制全新的专属角色**（**需你使用的 Agent 具备生图能力 / 接入生图工具**；若 Agent 无生图能力，你也可以自己准备好透明 PNG 序列帧交给它打包）：
+  > 请先调用 `desk_read_manual(topic="roles")` 阅读自定义角色指南。帮我制作一只「奶油色小猫」角色（或参考我附上的图片）：平时乖巧眨眼，随打字速度加快从慢走变成开心奔跑，点击屏幕时挥爪，任务完成时跳起来庆祝。请先生成角色造型与基础循环动作，用 `desk_check_role` 导出电脑上的 320 × 240 首页合成预览图给我确认；等我满意后再补齐全部动作并安装到搭搭上。
 
-更多对话示例、制作尺寸与验收要求见[自定义角色指南](src/deskpet_platform/manuals/roles.md)（Agent 也可直接调用 `desk_read_manual(topic="roles")` 读取）。
+更多对话示例、画布尺寸与防抖验收要求见[自定义角色指南](src/deskpet_platform/manuals/roles.md)（Agent 也可直接调用 `desk_read_manual(topic="roles")` 读取）。
 
 ## 手动安装
 
@@ -112,7 +115,7 @@ src/deskpet_platform/manuals/operations.md。
 
 ### 1. 下载桌面包并解压到固定目录
 
-打开 [电脑端预览版下载](https://github.com/LyleLiu666/deskpet-platform/releases?q=prerelease%3Atrue)，在最新预览版下展开 **Assets（附件）**，按下表下载与你的系统和芯片匹配的桌面包。核对同一版本的 `SHA256SUMS.txt`，再解压到一个**长期保留的目录**。
+打开 [电脑端预览版下载](https://github.com/LyleLiu666/deskpet-platform/releases?q=prerelease%3Atrue)，在最新预览版下展开 **Assets（附件）**，按下表下载与你的系统和芯片匹配的桌面包。核对同一版本的 `SHA256SUMS.txt`，再解压到一个**长期保留的目录**（不要放在临时目录或经常清理的下载目录）：
 
 | 系统 | 桌面包文件名（`<版本>` 以所选预览版为准） |
 | --- | --- |
@@ -165,11 +168,11 @@ claude mcp add --scope user deskpet -- "/绝对路径/.venv/bin/deskpet-platform
 
 ### 4. 给搭搭联网并完成配对
 
-1. **连 Wi-Fi**：给搭搭通电，打开屏幕上的 Wi-Fi 配网二维码（菜单「桌面设置 → Wi-Fi」，参考固件长按屏幕 3 秒），用手机先扫左码连热点、再扫右码选 2.4 GHz Wi-Fi 填密码。完成后让电脑和搭搭处在同一局域网。
+1. **连 Wi-Fi**：给搭搭通电，打开屏幕上的 Wi-Fi 配网二维码（首页点「点击连接 Wi-Fi」，或从菜单进入「桌面设置 → Wi-Fi」，参考固件长按屏幕 3 秒），用手机先扫左码连热点、再扫右码选 2.4 GHz Wi-Fi 填密码。完成后让电脑和搭搭处在同一局域网。
 2. **配对连接**（一台搭搭同一时间只能被一个程序连接）：
    - **插着电脑 USB 数据线时**：用 MCP 的 `desk_find_usb_device`（或终端 `deskpet-platform find-usb <串口>`）确认串口与设备身份，再调 `desk_pair_usb` 即可配对（macOS / Linux 还可通过 `0600` 私有凭据文件同一步配网）。
-   - **无线供电时**：在 Agent 里调用 `desk_pair_begin` 打开本机配对网页（或在终端运行 `deskpet-platform pair`），到搭搭「桌面设置 → 电脑配对」用手机扫码复制配对码，粘贴到本机完成验证。
-3. **验证连接与测速**：在 Agent 中调用 `desk_status` 检查连接，跑一次对话后可用 `desk_token_status` 查看测速读数。支持的固件还可开启电脑 CPU / 内存使用率显示（默认关闭），或用 `desk_list_role_sources`、`desk_check_role`、`desk_install_role` 检查并安装本地角色包。
+   - **无线供电时**：在 Agent 里调用 `desk_pair_begin` 打开本机配对网页（或在终端运行 `deskpet-platform pair`），点搭搭首页「点击配对电脑」（或进「桌面设置 → 电脑配对」）用手机扫码复制配对码，粘贴到本机完成验证。
+3. **验证连接与持续更新**：在 Agent 中调用 `desk_status` 检查连接，跑一次对话后可用 `desk_token_status` 查看测速读数。关闭 Agent 窗口期间仍希望屏幕持续刷新速度、CPU / 内存、额度和天气时，可在后台运行 `.venv/bin/deskpet-platform service`（打开新 Agent 会话需要控制搭搭时会自动交接，关闭后自动恢复）。支持的固件还可开启电脑 CPU / 内存使用率显示（默认关闭），或用 `desk_list_role_sources`、`desk_check_role`、`desk_install_role` 检查并安装本地角色包。
 
 ### 5. 开启消息提醒并在新会话验证
 
