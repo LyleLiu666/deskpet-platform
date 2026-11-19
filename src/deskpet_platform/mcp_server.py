@@ -1161,7 +1161,8 @@ class BoardSession:
                         burst.update(snapshot["gear"], burst_now)
                         burst.report(frame.sample_id, snapshot["rate10"], speed_state, snapshot["gear"], burst_now)
                         if client is not None and client.channel.capabilities.get("speed_burst") == 1:
-                            snapshot = {**snapshot, **burst.wire(burst_now)}
+                            level = style["overall"] if style and style.get("calibrated") else 0
+                            snapshot = {**snapshot, **burst.wire(burst_now), "speed_level": level}
                         rates = runtime.history.recent_rates(metric_version, int(now))
                         allowance = self.codex_allowance
                         current = [row for row in allowance.get("quotas", []) if row[2] > now]
