@@ -1,0 +1,102 @@
+import asyncio
+import io
+from pathlib import Path
+import shutil
+import struct
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from zipfile import ZipFile
+
+from PIL import Image
+
+from deskpet_platform.channel import AckTimeout, DeviceError
+from deskpet_platform.client import Client
+from deskpet_platform.mcp_server import BoardSession
+from deskpet_platform.role_example import create_role_example
+from deskpet_platform.role_sources import select_role_source
+
+
+SMALL = {"card_transfer": 1, "role_actions": 1, "role_zip_motion": 1, "role1_required": 1}
+LARGE = dict(SMALL, role_photo_motion=1, role_video_timeline=1, role_burst_audio=1)
+
+
+class MultiBoardContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_device_info_is_opt_in_and_checks_geometry(self):
+        client = object.__new__(Client)
+        client._operation = asyncio.Lock()
+        client.channel = SimpleNamespace(capabilities={}, send=AsyncMock())
+        self.assertIsNone(await client.device_info())
+        client.channel.send.assert_not_awaited()
+        client.channel.capabilities = {"device_info": 1}
+        info = {"board": "synthetic-large", "chip": "esp32s3", "profile": "synthetic-video",
+                "partition_id": "synthetic-dual-ota", "screen": [480, 320], "modules": ["core", "role_video"]}
+        client.channel.send.return_value = dict(info, seq=1)
+        self.assertEqual(await client.device_info(), info)
+        client.channel.send.assert_awaited_once_with("device_info")
+        client.channel.send.return_value = dict(info, screen=[480, True])
+        with self.assertRaisesRegex(DeviceError, "invalid_device_info"):
+            await client.device_info()
+
+    async def test_status_survives_a_failed_device_info_query_and_caches_the_answer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json")
+            info = {"board": "synthetic-small", "chip": "esp32", "profile": "synthetic-core",
+                    "partition_id": "synthetic-single", "screen": [320, 240], "modules": ["core"]}
+            session.client = SimpleNamespace(
+                channel=SimpleNamespace(capabilities={"device_info": 1}), status=AsyncMock(return_value={}),
+                device_info=AsyncMock(side_effect=AckTimeout("ack_timeout: device_info; seq=2")), close=AsyncMock())
+            status = await session.get_status()
+            self.assertNotEqual(status["connection"], "offline")
+            self.assertEqual(status["device_info_error"], "ack_timeout")
+            self.assertIsNotNone(session.client)
+            session.client.close.assert_not_awaited()
+            session.client.device_info = AsyncMock(return_value=info)
+            self.assertEqual((await session.get_status())["device_info"], info)
+            self.assertEqual((await session.get_status())["device_info"], info)
+            session.client.device_info.assert_awaited_once()
+
+    async def test_selects_one_role_for_both_boards_and_rejects_before_storage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lite, video = root / "base.zip", root / "rich.zip"
+            create_role_example(str(lite))
+            with ZipFile(lite) as source, ZipFile(video, "w") as target:
+                for name in source.namelist():
+                    target.writestr(name, source.read(name))
+                image = io.BytesIO()
+                Image.new("RGB", (320, 480)).save(image, "JPEG")
+                photo = image.getvalue()
+                heads = struct.pack("<4s4H", b"RSC2", 480, 320, 19, 1)
+                tracks = b"".join(struct.pack("<4H", index, 1, 50, 0) for index in range(19))
+                refs = bytes(38)
+                start = len(heads + tracks + refs) + 8
+                target.writestr("scene-frames.bin", heads + tracks + refs +
+                                struct.pack("<II", start, start + len(photo)) + photo)
+                target.writestr("burst-audio.pcm", bytes(3200))
+
+            identity = "user-pocket-bot"
+            self.assertEqual(select_role_source(root, identity, SMALL)["path"], str(lite))
+            self.assertEqual(select_role_source(root, identity, LARGE)["path"], str(video))
+            self.assertEqual(select_role_source(root, identity, LARGE, "lite")["path"], str(lite))
+            duplicate = root / "second-rich.zip"
+            shutil.copyfile(video, duplicate)
+            self.assertEqual(select_role_source(root, identity, LARGE)["reason"], "conflicting_role_variants")
+            duplicate.unlink()
+            blocked = select_role_source(root, identity, SMALL, "video-burst")
+            self.assertEqual(blocked["reason"], "no_compatible_variant")
+            self.assertIn("role_burst_audio", blocked["missing_capabilities"])
+            lite.unlink()
+            self.assertEqual(select_role_source(root, identity, SMALL)["reason"], "no_compatible_variant")
+
+            session = BoardSession(root / "device.json")
+            session.client = SimpleNamespace(channel=SimpleNamespace(capabilities=SMALL))
+            session._upload_card_file = AsyncMock()
+            rejected = await session.install_role(str(video))
+            self.assertEqual(rejected["reason"], "role_photo_motion_not_supported")
+            session._upload_card_file.assert_not_awaited()
+            session.client.channel.capabilities = dict(LARGE, role_burst_audio=0)
+            rejected = await session.install_role(str(video))
+            self.assertEqual(rejected["reason"], "role_burst_audio_not_supported")
+            session._upload_card_file.assert_not_awaited()

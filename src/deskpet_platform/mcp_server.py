@@ -16,7 +16,6 @@ from pathlib import Path
 import tempfile
 import time
 import sqlite3
-import struct
 from typing import Any, Literal, get_args
 import webbrowser
 
@@ -30,6 +29,7 @@ from .adaptive_speed.runtime import AdaptiveRuntime
 from .agent_speed_probe import AgentSpeedProbe, find_installed_probe
 from .card_upload import MAX_FILE_BYTES, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
+from .device_lock import DeviceBusyError
 from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS, DASHBOARD_ROTATION, DASHBOARD_INTERVALS, _appearance_theme, _appearance_wallpaper
 from .codex_hook import configure_codex_hooks, configure_hooks, hook_command
 from .codex_quota import fetch_quota
@@ -47,8 +47,11 @@ from .quota_capture import QuotaStore
 from .quota_projection import ANTIGRAVITY_WINDOWS, SOURCES, project_quota
 from .role_example import create_role_example
 from .reference_collector import ReferenceCollector
-from .role_sources import list_role_sources
+from .role_requirements import inspect_role_requirements
+from .role_sources import list_role_sources, select_role_source
 from .role_staging import prepare_role_source
+from .speed_burst import SpeedBurst
+from .role_install import valid_identity
 from .token_metrics import TokenMetrics
 from .usb_setup import probe_usb
 from .usb_link import UsbLink, UsbPort, find_usb_devices, read_usb_identity
@@ -116,6 +119,7 @@ class BoardSession:
         self.identity_registry = None
         self.usb_port = UsbPort.register(usb_port, allow_missing=True) if usb_port is not None else None
         self.client = None
+        self.device_info = None
         self.session_open_epoch = None
         self.next_wifi_probe = 0.0
         self.snapshot = {"connection": "starting"}
@@ -379,9 +383,22 @@ class BoardSession:
             else:
                 notification_error = self.snapshot.get("notification_error")
                 self.record_status(heartbeat)
+                await self.attach_device_info()
                 if notification_error is not None:
                     self.snapshot["notification_error"] = notification_error
             return self.snapshot.copy()
+
+    async def attach_device_info(self):
+        client = self.client
+        if client.channel.capabilities.get("device_info") != 1:
+            return
+        if self.device_info is None or self.device_info[0] is not client:
+            try:
+                self.device_info = (client, await client.device_info())
+            except LINK_ERRORS as error:
+                self.snapshot["device_info_error"] = getattr(error, "code", None) or str(error).split(":", 1)[0]
+                return
+        self.snapshot["device_info"] = self.device_info[1]
 
     async def poll(self):
         sampled_client, heartbeat = None, {}
@@ -1052,6 +1069,7 @@ class BoardSession:
         last_connected_at = None
         last_windows = None
         last_frame = None
+        burst = SpeedBurst()
         next_publish = 0.0
 
         async def publish(client, windows, snapshot, adaptive, sampled_at, captured_at, state, style, rates):
@@ -1139,6 +1157,11 @@ class BoardSession:
                         await runtime.tick()
                         style = runtime.wire()
                         snapshot["gear"] = (style or {}).get("current", 0)
+                        burst_now = int(time.monotonic() * 1000)
+                        burst.update(snapshot["gear"], burst_now)
+                        burst.report(frame.sample_id, snapshot["rate10"], speed_state, snapshot["gear"], burst_now)
+                        if client is not None and client.channel.capabilities.get("speed_burst") == 1:
+                            snapshot = {**snapshot, **burst.wire(burst_now)}
                         rates = runtime.history.recent_rates(metric_version, int(now))
                         allowance = self.codex_allowance
                         current = [row for row in allowance.get("quotas", []) if row[2] > now]
@@ -1471,35 +1494,6 @@ class BoardSession:
             future.cancel()
             raise TimeoutError("pairing_timeout") from None
 
-    @asynccontextmanager
-    async def _card_display_batch(self, client, *, enabled=True):
-        if not enabled or client.channel.capabilities.get("card_batch_display") != 1:
-            yield
-            return
-        batch = secrets.token_hex(8)
-
-        async def renew():
-            while True:
-                await asyncio.sleep(8)
-                current = self.client
-                if current is not None:
-                    with suppress(*LINK_ERRORS):
-                        await current.set_card_batch(batch, opened=True)
-
-        keeper = None
-        try:
-            await client.set_card_batch(batch, opened=True)
-            keeper = asyncio.create_task(renew())
-            yield
-        finally:
-            if keeper:
-                keeper.cancel()
-                with suppress(asyncio.CancelledError):
-                    await keeper
-            if self.client is not None:
-                with suppress(*LINK_ERRORS):
-                    await self.client.set_card_batch(batch, opened=False)
-
     async def upload_files(self, items, *, expected_client=None):
         if not 1 <= len(items) <= 100:
             raise ValueError("请选择 1 至 100 个文件。")
@@ -1565,7 +1559,13 @@ class BoardSession:
         self.snapshot = {"connection": "connecting"}
         try:
             async with asyncio.timeout_at(deadline):
-                self.client = await self.open_wifi(previous.config)
+                while self.client is None:
+                    try:
+                        self.client = await self.open_wifi(previous.config)
+                    except DeviceBusyError:
+                        if not request_worker_yield(self.path):
+                            raise
+                        await asyncio.sleep(.25)
         except LINK_ERRORS:
             self.snapshot = {"connection": "offline"}
             raise
@@ -1660,6 +1660,40 @@ class BoardSession:
                 if error.code != "card_busy" or delay == 15:
                     raise
 
+    @asynccontextmanager
+    async def _card_display_batch(self, client, *, enabled=True):
+        if not enabled or client.channel.capabilities.get("card_batch_display") != 1:
+            yield
+            return
+        batch = secrets.token_hex(8)
+        stopped = asyncio.Event()
+
+        async def renew():
+            while not stopped.is_set():
+                try:
+                    await asyncio.wait_for(stopped.wait(), 8)
+                    return
+                except TimeoutError:
+                    current = self.client
+                    if current is not None:
+                        with suppress(*LINK_ERRORS):
+                            await current.set_card_batch(batch, opened=True)
+
+        keeper = None
+        try:
+            await client.set_card_batch(batch, opened=True)
+            keeper = asyncio.create_task(renew())
+            yield
+        finally:
+            if keeper:
+                # Cancelling an in-flight command invalidates its connection.
+                # Let a renewal finish before releasing the lease or activating.
+                stopped.set()
+                await keeper
+            if self.client is not None:
+                with suppress(*LINK_ERRORS):
+                    await self.client.set_card_batch(batch, opened=False)
+
     async def _install_role_bundle(self, bundle):
         async with self.storage_lock:
             client = self.client
@@ -1668,40 +1702,10 @@ class BoardSession:
             capabilities = client.channel.capabilities
             if any(capabilities.get(name) != 1 for name in ("card_transfer", "role_actions")):
                 return {"status": "unsupported"}
-            if bundle.portable and capabilities.get("role_zip_motion") != 1:
-                return {"status": "unsupported", "reason": "role_zip_motion_not_supported"}
-            if any(item.relative == "scene-frames.bin" for item in bundle.files) and capabilities.get("role_photo_motion") != 1:
-                return {"status": "unsupported", "reason": "role_photo_motion_not_supported"}
-            if any(item.relative == "burst-audio.pcm" for item in bundle.files) and capabilities.get("role_burst_audio") != 1:
-                return {"status": "unsupported", "reason": "role_burst_audio_not_supported"}
-            for item in bundle.files:
-                if item.relative == "scene-frames.bin" and capabilities.get("role_video_timeline") != 1:
-                    with item.source.open("rb") as stream:
-                        if stream.read(4) == b"RSC2":
-                            return {"status": "unsupported", "reason": "role_video_timeline_not_supported"}
-            if any(item.relative == "background-hd.565" for item in bundle.files) and capabilities.get("role_hd_background") != 1:
-                return {"status": "unsupported", "reason": "role_hd_background_not_supported"}
-            if bundle.portable and capabilities.get("role_large_frames") != 1:
-                frames = next(item.source for item in bundle.files if item.relative == "pet-v2/frames.bin")
-                with frames.open("rb") as stream:
-                    header = stream.read(10)
-                timeline = next(item.source for item in bundle.files if item.relative == "pet-v2/timeline-v2.bin")
-                data = timeline.read_bytes()
-                anchors = (struct.unpack_from("<hh", data, offset + 12)
-                           for offset in range(20, len(data), 80))
-                if (len(header) != 10 or struct.unpack_from("<HH", header, 6) != (176, 160) or
-                        any(anchor != (88, 159) for anchor in anchors)):
-                    return {"status": "unsupported", "reason": "role_large_frames_not_supported"}
-            if bundle.portable and capabilities.get("role_large_motion") != 1:
-                motion = next(item.source for item in bundle.files if item.relative == "motion-v2.bin")
-                with motion.open("rb") as stream:
-                    header = stream.read(10)
-                if len(header) != 10 or struct.unpack_from("<HH", header, 6) != (184, 192):
-                    return {"status": "unsupported", "reason": "role_large_motion_not_supported"}
-            # Full display builds before role1_required already advertised pet_view.
-            role1_required = capabilities.get("role1_required", capabilities.get("pet_view") is True)
-            if not bundle.portable and role1_required == 1:
-                return {"status": "unsupported", "reason": "role1_required"}
+            missing = inspect_role_requirements(bundle).missing(capabilities)
+            if missing:
+                flag = missing[0]
+                return {"status": "unsupported", "reason": flag if flag == "role1_required" else flag + "_not_supported"}
             async with self._card_display_batch(client):
                 completed = []
                 try:
@@ -2339,9 +2343,13 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         return await session.delete_resource(path)
 
     @server.tool()
-    def desk_list_role_sources(directory: str | None = None) -> dict[str, Any]:
+    async def desk_list_role_sources(directory: str | None = None, device_id: str | None = None) -> dict[str, Any]:
         """查询电脑上的角色候选目录，无需连接搭搭；可覆盖启动时配置的绝对路径，安装时会完整校验。"""
-        return list_role_sources(directory if directory is not None else role_dir)
+        client = None
+        if device_id is not None or len(sessions.registry.list()) < 2:
+            client = sessions.resolve(device_id).client
+        capabilities = client.channel.capabilities.copy() if client is not None else None
+        return await asyncio.to_thread(list_role_sources, directory if directory is not None else role_dir, capabilities)
 
     @server.tool()
     async def desk_create_role_example(destination: str) -> dict[str, str]:
@@ -2386,9 +2394,20 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         return result
 
     @server.tool()
-    async def desk_install_role(source: str, device_id: str | None = None) -> dict[str, Any]:
-        """先在电脑上校验角色包，成功后才传到搭搭储存卡并启用。图鉴角色使用 role1 ZIP。可用 desk_check_role 单独检查。source 是绝对路径。"""
+    async def desk_install_role(source: str, device_id: str | None = None,
+                                variant: str | None = None) -> dict[str, Any]:
+        """先在电脑上校验角色包，成功后才传到搭搭储存卡并启用。图鉴角色使用 role1 ZIP。可用 desk_check_role 单独检查。source 是绝对路径或已配置角色素材目录中的角色 ID；按 ID 安装时可指定 variant。"""
         session = sessions.resolve(device_id)
+        if not Path(source).is_absolute() and valid_identity(source):
+            if session.client is None:
+                return {"status": "not_connected", "connection": session.snapshot}
+            selected = await asyncio.to_thread(
+                select_role_source, role_dir, source, session.client.channel.capabilities.copy(), variant)
+            if selected["status"] != "ok":
+                return selected
+            source = selected["path"]
+        elif variant is not None:
+            return {"status": "invalid", "reason": "variant_requires_role_id"}
         return await session.install_role(source)
 
     @server.tool()

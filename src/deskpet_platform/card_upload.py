@@ -80,13 +80,15 @@ class CardRelay:
                     self.send_error(404)
                     return
                 try:
-                    self.connection.settimeout(15)
+                    self.connection.settimeout(30)
                     self.send_response(200)
                     self.send_header("Content-Type", "application/octet-stream")
                     self.send_header("Content-Length", str(relay.encrypted.stat().st_size))
                     self.end_headers()
                     with relay.encrypted.open("rb") as stream:
-                        shutil.copyfileobj(stream, self.wfile, length=128 * 1024)
+                        # sendall times out on an entire chunk. Keep chunks small
+                        # so a slow TF card can still make steady progress.
+                        shutil.copyfileobj(stream, self.wfile, length=8 * 1024)
                 except OSError:
                     pass
 

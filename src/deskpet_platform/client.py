@@ -93,6 +93,27 @@ class Client:
             fields = {"compact": True} if compact and self.channel.capabilities.get("compact_status") == 1 else {}
             return await self.channel.send("heartbeat", **fields)
 
+    async def device_info(self):
+        if self.channel.capabilities.get("device_info") != 1:
+            return None
+        async with self._operation:
+            reply = await self.channel.send("device_info")
+        names = ("board", "chip", "profile", "partition_id")
+        if not isinstance(reply, dict) or any(
+            not isinstance(reply.get(name), str) or not reply[name].strip() for name in names
+        ):
+            raise DeviceError("invalid_device_info")
+        screen, modules = reply.get("screen"), reply.get("modules")
+        if (not isinstance(screen, list) or len(screen) != 2 or
+                any(type(dimension) is not int or dimension < 1 for dimension in screen) or
+                not isinstance(modules, list) or
+                any(not isinstance(module, str) or not module.strip() for module in modules) or
+                len(set(modules)) != len(modules)):
+            raise DeviceError("invalid_device_info")
+        fields = (*names, "screen", "modules", "firmware_version", "build_revision",
+                  "ota_slots", "active_slot", "boot_slot", "ota_state", "bootloader_rollback")
+        return {field: reply[field] for field in fields if field in reply}
+
     async def render_metrics(self, *, reset=False):
         if self.channel.capabilities.get("render_metrics") != 1:
             raise DeviceError("render_metrics_not_supported")

@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 from pathlib import Path
+import socketserver
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -14,9 +15,10 @@ import zlib
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from PIL import Image
 
-from deskpet_platform.card_upload import BACKGROUND_RECEIPT_GRACE, MAX_FILE_BYTES, transfer_timeout, upload_file
+from deskpet_platform.card_upload import BACKGROUND_RECEIPT_GRACE, MAX_FILE_BYTES, CardRelay, transfer_timeout, upload_file
 from deskpet_platform.channel import AckTimeout, Channel, CommandRejected
 from deskpet_platform.client import Client
+from deskpet_platform.device_lock import DeviceBusyError
 from deskpet_platform.mcp_server import BoardSession, CardFile
 from deskpet_platform.pairing import DeviceConfig
 
@@ -60,6 +62,34 @@ class CardUploadTests(unittest.IsolatedAsyncioTestCase):
             session.client=SimpleNamespace(channel=SimpleNamespace(capabilities={'wallpaper_delete':1}),
                                            delete_wallpaper=AsyncMock(return_value={'deleted':False}))
             self.assertEqual(await session.delete_wallpaper(path),{'path':path,'deleted':False})
+
+    async def test_relay_sends_large_files_in_chunks_small_enough_to_make_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "data.bin"
+            payload = bytes(range(256)) * 1024
+            source.write_bytes(payload)
+            socket_writes = []
+            server_class = socketserver._SocketWriter
+            original_write = server_class.write
+
+            def slow_write(writer, data):
+                socket_writes.append(len(data))
+                # A slow card can drain only a small window before a socket
+                # send would time out, even if the receiver keeps reading.
+                if len(data) > 16 * 1024:
+                    raise TimeoutError("simulated slow card")
+                return original_write(writer, data)
+
+            relay = CardRelay("127.0.0.1", source).start()
+            try:
+                with patch.object(server_class, "write", slow_write):
+                    def download():
+                        with urllib.request.urlopen(relay.url, timeout=2) as response:
+                            return response.read()
+                    self.assertEqual(await asyncio.to_thread(download), payload)
+                self.assertGreater(len(socket_writes), 1)
+            finally:
+                await asyncio.to_thread(relay.close)
 
     def test_background_deadline_accounts_for_large_slow_writes(self):
         for size, deadline in ((1024**2, 300), (8 * 1024**2, 1084), (MAX_FILE_BYTES, 16444)):
@@ -500,6 +530,68 @@ class CardUploadTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(session.client, recovered)
             original.close.assert_awaited_once()
             self.assertEqual(recovered.upload_file.await_count, 2)
+
+    async def test_role_batch_waits_for_in_flight_renewal_before_closing(self):
+        renewal_started, allow_reply, leave = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def set_card_batch(batch, *, opened):
+            calls.append((batch, opened))
+            if len(calls) == 2:
+                renewal_started.set()
+                await allow_reply.wait()
+
+        async def elapse(_event, _deadline):
+            _event.close()
+            raise TimeoutError
+
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json")
+            session.client = SimpleNamespace(channel=SimpleNamespace(capabilities={"card_batch_display": 1}),
+                                             set_card_batch=set_card_batch)
+
+            async def transfer():
+                async with session._card_display_batch(session.client):
+                    await leave.wait()
+
+            with patch("deskpet_platform.mcp_server.asyncio.wait_for", side_effect=elapse):
+                task = asyncio.create_task(transfer())
+                try:
+                    async with asyncio.timeout(2):
+                        await renewal_started.wait()
+                        leave.set()
+                        await asyncio.sleep(0)
+                        self.assertFalse(task.done())
+                        self.assertEqual(len(calls), 2)
+                        allow_reply.set()
+                        await task
+                finally:
+                    if not task.done():
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+
+        self.assertEqual(calls, [(calls[0][0], True), (calls[0][0], True), (calls[0][0], False)])
+
+    async def test_transfer_reconnect_yields_only_to_the_known_notification_worker(self):
+        config = DeviceConfig("02:00:00:00:00:01", bytes(32))
+        for notification_worker in (True, False):
+            with self.subTest(notification_worker=notification_worker), tempfile.TemporaryDirectory() as directory:
+                session = BoardSession(Path(directory) / "device.json")
+                original, recovered = Client(config), Client(config)
+                session.client = original
+                original.close = AsyncMock()
+                open_wifi = AsyncMock(side_effect=[DeviceBusyError("device_busy"), recovered])
+                deadline = asyncio.get_running_loop().time() + 5
+                with patch.object(session, "open_wifi", open_wifi), patch(
+                    "deskpet_platform.mcp_server.request_worker_yield", return_value=notification_worker
+                ) as request_yield, patch("deskpet_platform.mcp_server.asyncio.sleep", AsyncMock()):
+                    if notification_worker:
+                        self.assertIs(await session._reconnect_card_wifi(original, deadline), recovered)
+                    else:
+                        with self.assertRaises(DeviceBusyError):
+                            await session._reconnect_card_wifi(original, deadline)
+                request_yield.assert_called_once_with(session.path)
+                self.assertEqual(open_wifi.await_count, 2 if notification_worker else 1)
 
     async def test_receipt_upload_survives_repeated_reconnect_errors_without_new_fetch(self):
         with tempfile.TemporaryDirectory() as directory:
