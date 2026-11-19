@@ -31,7 +31,7 @@
 
 同一个 `manifest.json` 角色 ID 可以对应多个设备版本。将各版放入 `--role-dir` 指定的目录，电脑端依据包内的实际资源判断所需能力。`desk_list_role_sources` 保留逐文件的 `roles`，同时在 `catalog` 按角色 ID 展示可用版本。按 ID 调用 `desk_install_role` 会优先选择当前设备可播放的版本，也可指定 `variant`。兼容级别从高到低依次为 `video-burst`、`video`、`photo`、`hd`、`lite`。
 
-同级有多个候选时返回 `conflicting_role_variants`，可提供具体文件路径安装。设备缺少所需能力时返回 `no_compatible_variant`，并列出缺失能力和各候选适用的板型，供选择其他版本。
+同级有多个候选时返回 `conflicting_role_variants`，可提供具体文件路径安装。设备缺少所需能力时返回 `no_compatible_variant`，并列出缺失能力和各候选所需的能力，供选择其他版本。
 
 - **解压目录与备份恢复**：解压后的 `role1` 目录也可直接作为 `source` 安装。从储存卡备份恢复角色时，可直接传入 `roles/<角色 ID>/<版本>` 对应的版本目录（角色 ID 从清单读取）。目录可附带 `actions.txt`、`events.json`、`event.txt` 和 `background.565`；会话完成触发的动作优先取 `events.json`，其次读取固件保存的 `event.txt`（内容为 `-\n` 时表示仅显示文字提醒）。
 - **单独更新图鉴行**：如需单独更新已安装角色的图鉴显示行，可将 `320 × 68` 小端 RGB565 文件上传至储存卡的 `desk/role-catalog/<角色标识>.565`（白底，左侧放头像，右侧排角色名与储存卡标记，最右端留给固件绘制选中标记）。若无此文件或字节长度不符，图鉴默认使用角色包内的 `row.565`。

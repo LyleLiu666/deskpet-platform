@@ -11,7 +11,7 @@ from zipfile import ZipFile
 
 from PIL import Image
 
-from deskpet_platform.channel import DeviceError
+from deskpet_platform.channel import AckTimeout, DeviceError
 from deskpet_platform.client import Client
 from deskpet_platform.mcp_server import BoardSession
 from deskpet_platform.role_example import create_role_example
@@ -30,14 +30,32 @@ class MultiBoardContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await client.device_info())
         client.channel.send.assert_not_awaited()
         client.channel.capabilities = {"device_info": 1}
-        info = {"board": "es3c35p", "chip": "esp32s3", "profile": "es3c35p-video-burst",
-                "partition_id": "es3c35p-5m-ota-v1", "screen": [480, 320], "modules": ["core", "role_video"]}
+        info = {"board": "synthetic-large", "chip": "esp32s3", "profile": "synthetic-video",
+                "partition_id": "synthetic-dual-ota", "screen": [480, 320], "modules": ["core", "role_video"]}
         client.channel.send.return_value = dict(info, seq=1)
         self.assertEqual(await client.device_info(), info)
         client.channel.send.assert_awaited_once_with("device_info")
         client.channel.send.return_value = dict(info, screen=[480, True])
         with self.assertRaisesRegex(DeviceError, "invalid_device_info"):
             await client.device_info()
+
+    async def test_status_survives_a_failed_device_info_query_and_caches_the_answer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json")
+            info = {"board": "synthetic-small", "chip": "esp32", "profile": "synthetic-core",
+                    "partition_id": "synthetic-single", "screen": [320, 240], "modules": ["core"]}
+            session.client = SimpleNamespace(
+                channel=SimpleNamespace(capabilities={"device_info": 1}), status=AsyncMock(return_value={}),
+                device_info=AsyncMock(side_effect=AckTimeout("ack_timeout: device_info; seq=2")), close=AsyncMock())
+            status = await session.get_status()
+            self.assertNotEqual(status["connection"], "offline")
+            self.assertEqual(status["device_info_error"], "ack_timeout")
+            self.assertIsNotNone(session.client)
+            session.client.close.assert_not_awaited()
+            session.client.device_info = AsyncMock(return_value=info)
+            self.assertEqual((await session.get_status())["device_info"], info)
+            self.assertEqual((await session.get_status())["device_info"], info)
+            session.client.device_info.assert_awaited_once()
 
     async def test_selects_one_role_for_both_boards_and_rejects_before_storage(self):
         with tempfile.TemporaryDirectory() as directory:

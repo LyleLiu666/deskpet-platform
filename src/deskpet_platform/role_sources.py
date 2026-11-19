@@ -67,7 +67,6 @@ def list_role_sources(directory, capabilities=None):
             missing[:0] = [flag for flag in ("card_transfer", "role_actions") if capabilities.get(flag) != 1]
         entry["variants"].append({
             "path": role["path"], "variant": requirements.variant, "requires": list(requirements.requires),
-            "supported_boards": list(requirements.supported_boards),
             "compatible": not missing if capabilities is not None else None,
             "missing_capabilities": missing,
         })
@@ -100,5 +99,4 @@ def select_role_source(directory, identity, capabilities, variant=None):
                 "available_variants": winners}
     missing = sorted({flag for choice in choices for flag in choice["missing_capabilities"]})
     return {"status": "unsupported", "reason": "no_compatible_variant", "role_id": identity,
-            "missing_capabilities": missing, "available_variants": entry["variants"],
-            "supported_boards": sorted({board for choice in choices for board in choice["supported_boards"]})}
+            "missing_capabilities": missing, "available_variants": entry["variants"]}

@@ -106,6 +106,7 @@ class BoardSession:
         self.identity_registry = None
         self.usb_port = UsbPort.register(usb_port, allow_missing=True) if usb_port is not None else None
         self.client = None
+        self.device_info = None
         self.session_open_epoch = None
         self.next_wifi_probe = 0.0
         self.snapshot = {"connection": "starting"}
@@ -342,7 +343,6 @@ class BoardSession:
                 return self.snapshot.copy()
             try:
                 heartbeat = await self.client.status()
-                device_info = await self.client.device_info() if self.client.channel.capabilities.get("device_info") == 1 else None
             except CommandRejected as error:
                 await self.record_status_rejection(error)
             except LINK_ERRORS as error:
@@ -350,11 +350,22 @@ class BoardSession:
             else:
                 notification_error = self.snapshot.get("notification_error")
                 self.record_status(heartbeat)
-                if device_info is not None:
-                    self.snapshot["device_info"] = device_info
+                await self.attach_device_info()
                 if notification_error is not None:
                     self.snapshot["notification_error"] = notification_error
             return self.snapshot.copy()
+
+    async def attach_device_info(self):
+        client = self.client
+        if client.channel.capabilities.get("device_info") != 1:
+            return
+        if self.device_info is None or self.device_info[0] is not client:
+            try:
+                self.device_info = (client, await client.device_info())
+            except LINK_ERRORS as error:
+                self.snapshot["device_info_error"] = getattr(error, "code", None) or str(error).split(":", 1)[0]
+                return
+        self.snapshot["device_info"] = self.device_info[1]
 
     async def poll(self):
         sampled_client, heartbeat = None, {}

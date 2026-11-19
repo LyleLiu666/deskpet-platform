@@ -16,12 +16,6 @@ class RoleRequirements:
     requires: tuple[str, ...]
     requires_legacy_compatible: bool = False
 
-    @property
-    def supported_boards(self):
-        if self.variant == "lite":
-            return ("es3c35p",) if self.requires_legacy_compatible else ("esp32-2432s028", "es3c35p")
-        return ("es3c35p",)
-
     def missing(self, capabilities):
         missing = [flag for flag in self.requires if capabilities.get(flag) != 1]
         if self.requires_legacy_compatible and capabilities.get(
