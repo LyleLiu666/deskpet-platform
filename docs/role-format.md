@@ -12,7 +12,7 @@
 
 ## 1. 标准 `role1` ZIP 角色包
 
-搭搭图鉴使用标准的 `role1` ZIP 角色包。`desk_install_role` 可直接安装 `.zip` 文件或解压后的同结构目录。ZIP 包内必须按以下路径和精确大小写包含 7 个必需文件（可选附带 `background-hd.565`）：
+搭搭图鉴使用标准的 `role1` ZIP 角色包。`desk_install_role` 可直接安装 `.zip` 文件或解压后的同结构目录。ZIP 包内按以下路径和精确大小写包含 7 个必需文件。
 
 | 包内路径 | 是否必需 | 规格与用途 |
 | --- | --- | --- |
@@ -24,8 +24,14 @@
 | `pet-v2/frames.bin` | 必需 | `PET1` 格式的互动动作透明帧文件（标准尺寸 `176 × 160`）。 |
 | `pet-v2/timeline-v2.bin` | 必需 | `PTL1` v2（或 `timeline-v3.bin`）时间轴文件，定义各互动动作的帧序列、时长与锚点。 |
 | `background-hd.565` | 可选 | 预先按屏幕构图裁切的 `480 × 320` 小端 RGB565 高清背景（恰好 307,200 字节）。需固件声明 `role_hd_background` 能力（工作台使用该背景并叠加暗角，图鉴预览仍使用 `land.bin`；不支持的设备在传输前即会拒绝并返回 `role_hd_background_not_supported`）。 |
+| `scene-frames.bin` | 可选 | 屏幕原尺寸照片帧，使用 `RSC1` 或 `RSC2`（独立视频时间轴）。需固件声明 `role_photo_motion`，`RSC2` 还需声明 `role_video_timeline`。 |
+| `burst-audio.pcm` | 可选 | `RSC2` 角色的 `dance_burst` 配乐。16 kHz、16 位、有符号小端单声道 PCM，最多 160,000 字节。需固件声明 `role_burst_audio`。 |
 
 ### 解压目录、卡上备份恢复与图鉴行覆盖
+
+同一个 `manifest.json` 角色 ID 可以对应多个设备版本。将各版放入 `--role-dir` 指定的目录，电脑端依据包内的实际资源判断所需能力。`desk_list_role_sources` 保留逐文件的 `roles`，同时在 `catalog` 按角色 ID 展示可用版本。按 ID 调用 `desk_install_role` 会优先选择当前设备可播放的版本，也可指定 `variant`。兼容级别从高到低依次为 `video-burst`、`video`、`photo`、`hd`、`lite`。
+
+同级有多个候选时返回 `conflicting_role_variants`，可提供具体文件路径安装。设备缺少所需能力时返回 `no_compatible_variant`，并列出缺失能力和各候选适用的板型，供选择其他版本。
 
 - **解压目录与备份恢复**：解压后的 `role1` 目录也可直接作为 `source` 安装。从储存卡备份恢复角色时，可直接传入 `roles/<角色 ID>/<版本>` 对应的版本目录（角色 ID 从清单读取）。目录可附带 `actions.txt`、`events.json`、`event.txt` 和 `background.565`；会话完成触发的动作优先取 `events.json`，其次读取固件保存的 `event.txt`（内容为 `-\n` 时表示仅显示文字提醒）。
 - **单独更新图鉴行**：如需单独更新已安装角色的图鉴显示行，可将 `320 × 68` 小端 RGB565 文件上传至储存卡的 `desk/role-catalog/<角色标识>.565`（白底，左侧放头像，右侧排角色名与储存卡标记，最右端留给固件绘制选中标记）。若无此文件或字节长度不符，图鉴默认使用角色包内的 `row.565`。

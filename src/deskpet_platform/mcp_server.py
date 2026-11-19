@@ -15,7 +15,6 @@ from pathlib import Path
 import tempfile
 import time
 import sqlite3
-import struct
 from typing import Any, Literal, get_args
 import webbrowser
 
@@ -46,8 +45,10 @@ from .quota_capture import QuotaStore
 from .quota_projection import ANTIGRAVITY_WINDOWS, SOURCES, project_quota
 from .role_example import create_role_example
 from .reference_collector import ReferenceCollector
-from .role_sources import list_role_sources
+from .role_requirements import inspect_role_requirements
+from .role_sources import list_role_sources, select_role_source
 from .role_staging import prepare_role_source
+from .role_install import valid_identity
 from .token_metrics import TokenMetrics
 from .usb_setup import probe_usb
 from .usb_link import UsbLink, UsbPort, find_usb_devices, read_usb_identity
@@ -339,6 +340,7 @@ class BoardSession:
                 return self.snapshot.copy()
             try:
                 heartbeat = await self.client.status()
+                device_info = await self.client.device_info() if self.client.channel.capabilities.get("device_info") == 1 else None
             except CommandRejected as error:
                 await self.record_status_rejection(error)
             except LINK_ERRORS as error:
@@ -346,6 +348,8 @@ class BoardSession:
             else:
                 notification_error = self.snapshot.get("notification_error")
                 self.record_status(heartbeat)
+                if device_info is not None:
+                    self.snapshot["device_info"] = device_info
                 if notification_error is not None:
                     self.snapshot["notification_error"] = notification_error
             return self.snapshot.copy()
@@ -1436,29 +1440,10 @@ class BoardSession:
             capabilities = client.channel.capabilities
             if any(capabilities.get(name) != 1 for name in ("card_transfer", "role_actions")):
                 return {"status": "unsupported"}
-            if bundle.portable and capabilities.get("role_zip_motion") != 1:
-                return {"status": "unsupported", "reason": "role_zip_motion_not_supported"}
-            if bundle.portable and capabilities.get("role_large_frames") != 1:
-                frames = next(item.source for item in bundle.files if item.relative == "pet-v2/frames.bin")
-                with frames.open("rb") as stream:
-                    header = stream.read(10)
-                timeline = next(item.source for item in bundle.files if item.relative == "pet-v2/timeline-v2.bin")
-                data = timeline.read_bytes()
-                anchors = (struct.unpack_from("<hh", data, offset + 12)
-                           for offset in range(20, len(data), 80))
-                if (len(header) != 10 or struct.unpack_from("<HH", header, 6) != (176, 160) or
-                        any(anchor != (88, 159) for anchor in anchors)):
-                    return {"status": "unsupported", "reason": "role_large_frames_not_supported"}
-            if bundle.portable and capabilities.get("role_large_motion") != 1:
-                motion = next(item.source for item in bundle.files if item.relative == "motion-v2.bin")
-                with motion.open("rb") as stream:
-                    header = stream.read(10)
-                if len(header) != 10 or struct.unpack_from("<HH", header, 6) != (184, 192):
-                    return {"status": "unsupported", "reason": "role_large_motion_not_supported"}
-            # Full display builds before role1_required already advertised pet_view.
-            role1_required = capabilities.get("role1_required", capabilities.get("pet_view") is True)
-            if not bundle.portable and role1_required == 1:
-                return {"status": "unsupported", "reason": "role1_required"}
+            missing = inspect_role_requirements(bundle).missing(capabilities)
+            if missing:
+                flag = missing[0]
+                return {"status": "unsupported", "reason": flag if flag == "role1_required" else flag + "_not_supported"}
             completed = []
             try:
                 for item in bundle.files:
@@ -2080,9 +2065,13 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         return await session.delete_resource(path)
 
     @server.tool()
-    def desk_list_role_sources(directory: str | None = None) -> dict[str, Any]:
+    async def desk_list_role_sources(directory: str | None = None, device_id: str | None = None) -> dict[str, Any]:
         """查询电脑上的角色候选目录，无需连接小板；可覆盖启动时配置的绝对路径，安装时会完整校验。"""
-        return list_role_sources(directory if directory is not None else role_dir)
+        client = None
+        if device_id is not None or len(sessions.registry.list()) < 2:
+            client = sessions.resolve(device_id).client
+        capabilities = client.channel.capabilities.copy() if client is not None else None
+        return await asyncio.to_thread(list_role_sources, directory if directory is not None else role_dir, capabilities)
 
     @server.tool()
     async def desk_create_role_example(destination: str) -> dict[str, str]:
@@ -2104,9 +2093,20 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
                 "actions": list(bundle.actions), "files": [item.relative for item in bundle.files]}
 
     @server.tool()
-    async def desk_install_role(source: str, device_id: str | None = None) -> dict[str, Any]:
-        """先在电脑上校验角色包，成功后才传到小板储存卡并启用。图鉴角色使用 role1 ZIP。可用 desk_check_role 单独检查。source 是绝对路径。"""
+    async def desk_install_role(source: str, device_id: str | None = None,
+                                variant: str | None = None) -> dict[str, Any]:
+        """先在电脑上校验角色包，成功后才传到小板储存卡并启用。图鉴角色使用 role1 ZIP。可用 desk_check_role 单独检查。source 是绝对路径或已配置角色素材目录中的角色 ID；按 ID 安装时可指定 variant。"""
         session = sessions.resolve(device_id)
+        if not Path(source).is_absolute() and valid_identity(source):
+            if session.client is None:
+                return {"status": "not_connected", "connection": session.snapshot}
+            selected = await asyncio.to_thread(
+                select_role_source, role_dir, source, session.client.channel.capabilities.copy(), variant)
+            if selected["status"] != "ok":
+                return selected
+            source = selected["path"]
+        elif variant is not None:
+            return {"status": "invalid", "reason": "variant_requires_role_id"}
         return await session.install_role(source)
 
     @server.tool()
