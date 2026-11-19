@@ -9,6 +9,7 @@ from importlib.resources import files
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,6 +29,7 @@ from .adaptive_speed.runtime import AdaptiveRuntime
 from .agent_speed_probe import AgentSpeedProbe, find_installed_probe
 from .card_upload import MAX_FILE_BYTES, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
+from .device_lock import DeviceBusyError
 from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS, DASHBOARD_ROTATION, DASHBOARD_INTERVALS, _appearance_theme, _appearance_wallpaper
 from .codex_hook import configure_codex_hooks, configure_hooks, hook_command
 from .codex_quota import fetch_quota
@@ -1337,7 +1339,13 @@ class BoardSession:
         self.snapshot = {"connection": "connecting"}
         try:
             async with asyncio.timeout_at(deadline):
-                self.client = await self.open_wifi(previous.config)
+                while self.client is None:
+                    try:
+                        self.client = await self.open_wifi(previous.config)
+                    except DeviceBusyError:
+                        if not request_worker_yield(self.path):
+                            raise
+                        await asyncio.sleep(.25)
         except LINK_ERRORS:
             self.snapshot = {"connection": "offline"}
             raise
@@ -1432,6 +1440,40 @@ class BoardSession:
                 if error.code != "card_busy" or delay == 15:
                     raise
 
+    @asynccontextmanager
+    async def _card_display_batch(self, client):
+        if client.channel.capabilities.get("card_batch_display") != 1:
+            yield
+            return
+        batch = secrets.token_hex(8)
+        stopped = asyncio.Event()
+
+        async def renew():
+            while not stopped.is_set():
+                try:
+                    await asyncio.wait_for(stopped.wait(), 8)
+                    return
+                except TimeoutError:
+                    current = self.client
+                    if current is not None:
+                        with suppress(*LINK_ERRORS):
+                            await current.set_card_batch(batch, opened=True)
+
+        keeper = None
+        try:
+            await client.set_card_batch(batch, opened=True)
+            keeper = asyncio.create_task(renew())
+            yield
+        finally:
+            if keeper:
+                # Cancelling an in-flight command invalidates its connection.
+                # Let a renewal finish before releasing the lease or activating.
+                stopped.set()
+                await keeper
+            if self.client is not None:
+                with suppress(*LINK_ERRORS):
+                    await self.client.set_card_batch(batch, opened=False)
+
     async def _install_role_bundle(self, bundle):
         async with self.storage_lock:
             client = self.client
@@ -1446,11 +1488,12 @@ class BoardSession:
                 return {"status": "unsupported", "reason": flag if flag == "role1_required" else flag + "_not_supported"}
             completed = []
             try:
-                for item in bundle.files:
-                    destination = f"roles/{bundle.identity}/{bundle.version}/{item.relative}"
-                    client, transfer = await self._upload_card_file(
-                        client, destination, item.source, expected_sha256=item.sha256)
-                    completed.append(transfer)
+                async with self._card_display_batch(client):
+                    for item in bundle.files:
+                        destination = f"roles/{bundle.identity}/{bundle.version}/{item.relative}"
+                        client, transfer = await self._upload_card_file(
+                            client, destination, item.source, expected_sha256=item.sha256)
+                        completed.append(transfer)
             except LINK_ERRORS as error:
                 await self._drop_failed_upload(client)
                 return {"status": "transfer_failed", "completed": completed, "reason": str(error)}
@@ -1521,6 +1564,8 @@ class BoardSession:
                 return {"action": action, "status": "unsupported", "available_actions": actions}
             result = await self.client.play_role(actions.index(action), duration_ms or 0)
             reply = {"action": action, "status": result.get("action_status", "unknown")}
+            if isinstance(result.get("reason"), str):
+                reply["reason"] = result["reason"]
             if "operation" in result:
                 reply.update(operation=result["operation"], boot=result["boot"])
             return reply

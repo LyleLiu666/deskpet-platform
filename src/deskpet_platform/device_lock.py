@@ -6,6 +6,10 @@ from pathlib import Path
 from .file_lock import acquire
 
 
+class DeviceBusyError(RuntimeError):
+    """The board already has a host-side owner."""
+
+
 class DeviceLock:
     def __init__(self,identity,root=None):
         if root:
@@ -23,7 +27,7 @@ class DeviceLock:
         try:acquire(self.file.fileno(), blocking=False)
         except BlockingIOError:
             self.file.close();self.file=None
-            raise RuntimeError('device_busy: another owner holds device lock') from None
+            raise DeviceBusyError('device_busy: another owner holds device lock') from None
         return self
     def __exit__(self,*exc):
         if self.file:self.file.close();self.file=None

@@ -532,6 +532,17 @@ class Client:
             if error.code != "unsupported_command":
                 raise
 
+    async def set_card_batch(self, batch, *, opened):
+        if not isinstance(batch, str) or not re.fullmatch(r"[0-9a-f]{16}", batch):
+            raise ValueError("Invalid card batch ID")
+        if self.channel.capabilities.get("card_batch_display") != 1:
+            return False
+        command = "card_batch_begin" if opened else "card_batch_end"
+        reply = await self.channel.send(command, batch=batch, timeout=5)
+        if reply.get("batch_open") is not opened:
+            raise DeviceError("invalid_card_batch_reply")
+        return True
+
     async def upload_file(self, path, source, *, expected_sha256=None, resume=None):
         """Transfer one file to the board's card, reporting a verified write."""
         if self.channel.capabilities.get("card_transfer") != 1:
