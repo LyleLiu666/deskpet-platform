@@ -50,6 +50,7 @@ from .reference_collector import ReferenceCollector
 from .role_requirements import inspect_role_requirements
 from .role_sources import list_role_sources, select_role_source
 from .role_staging import prepare_role_source
+from .speed_burst import SpeedBurst
 from .role_install import valid_identity
 from .token_metrics import TokenMetrics
 from .usb_setup import probe_usb
@@ -867,6 +868,7 @@ class BoardSession:
         last_connected_at = None
         last_windows = None
         last_frame = None
+        burst = SpeedBurst()
         next_publish = 0.0
 
         async def publish(client, windows, snapshot, adaptive, sampled_at, captured_at, state, style, rates):
@@ -954,6 +956,11 @@ class BoardSession:
                         await runtime.tick()
                         style = runtime.wire()
                         snapshot["gear"] = (style or {}).get("current", 0)
+                        burst_now = int(time.monotonic() * 1000)
+                        burst.update(snapshot["gear"], burst_now)
+                        burst.report(frame.sample_id, snapshot["rate10"], speed_state, snapshot["gear"], burst_now)
+                        if client is not None and client.channel.capabilities.get("speed_burst") == 1:
+                            snapshot = {**snapshot, **burst.wire(burst_now)}
                         rates = runtime.history.recent_rates(metric_version, int(now))
                         allowance = self.codex_allowance
                         current = [row for row in allowance.get("quotas", []) if row[2] > now]
