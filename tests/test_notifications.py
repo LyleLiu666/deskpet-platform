@@ -630,6 +630,39 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((board.actions_played, board.messages_shown), (4, 2))
             self.assertIsNone(store.next_pending())
 
+    async def test_unavailable_action_does_not_retry_while_delivering_text(self):
+        class Channel:
+            capabilities = {"role_actions": 1}
+
+        class Board:
+            channel = Channel()
+            actions_played = 0
+            messages_shown = 0
+
+            async def status(self):
+                return {"role_state": "ready", "finish_action": "finish"}
+
+            async def list_actions(self):
+                return ["idle", "finish"]
+
+            async def play_role(self, action, duration):
+                self.actions_played += 1
+                return {"action_status": "unavailable", "reason": "music_active"}
+
+            async def show_text(self, _text):
+                self.messages_shown += 1
+                return {"status": "shown"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
+            store.add_codex_event({"hook_event_name": "Stop", "session_id": "s", "turn_id": "t"})
+            board = Board()
+            self.assertTrue(await notifications.deliver_next(board, store))
+            self.assertEqual((board.actions_played, board.messages_shown), (1, 1))
+            self.assertIsNone(store.next_pending())
+            self.assertFalse(await notifications.deliver_next(board, store))
+            self.assertEqual((board.actions_played, board.messages_shown), (1, 1))
+
     async def test_role_action_and_shown_receipt_are_used_without_private_content(self):
         class Channel:
             capabilities = {"role_actions": 1}

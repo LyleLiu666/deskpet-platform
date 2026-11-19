@@ -512,6 +512,10 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                 await session.record_link_error(RuntimeError('device_busy: held'))
             self.assertEqual((await session.get_status())['connection'], 'busy')
             self.assertIn('稍后', (await session.get_status())['next_step'])
+            self.assertIn('其他会话', (await session.get_status())['next_step'])
+            with patch('deskpet_platform.mcp_server.request_worker_yield', return_value=False):
+                await session.record_link_error(RuntimeError('device_busy: held'))
+            self.assertIn('其他程序', (await session.get_status())['next_step'])
 
     async def test_expired_control_session_is_dropped_and_poll_can_reconnect(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1131,7 +1135,12 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                                                  "desk_set_claude_notifications", "desk_set_antigravity_notifications",
                                                  "desk_set_agent_quota", "desk_notification_setup",
                                                  "desk_set_opencode_notifications", "desk_set_workbuddy_notifications",
-                                     "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view", "desk_speak", "desk_read_notification", "desk_dashboard_config", "desk_appearance_config", "desk_add_theme", "desk_add_wallpaper", "desk_delete_wallpaper", "desk_list_wallpapers"})
+                                     "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view", "desk_speak", "desk_read_notification", "desk_voice_names", "desk_voice_tools", "desk_dashboard_config", "desk_appearance_config", "desk_add_theme", "desk_add_wallpaper", "desk_delete_wallpaper", "desk_list_wallpapers"})
+                        self.assertIn("昵称不会改变唤醒词", tools["desk_voice_names"].description)
+                        voice_tools = await session.call_tool("desk_voice_tools")
+                        self.assertFalse(voice_tools.isError)
+                        self.assertEqual(voice_tools.structuredContent['status'],'not_paired')
+                        self.assertEqual(voice_tools.structuredContent['enabled'],[])
                         for name in ("desk_list_devices", "desk_notification_setup", "desk_read_manual", "desk_list_wallpapers"):
                             self.assertIs(tools[name].annotations.readOnlyHint, True)
                             self.assertIs(tools[name].annotations.openWorldHint, False)
@@ -1248,3 +1257,19 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(repr(KEY), repr(config))
         with self.assertRaises(ValueError):
             DeviceConfig.from_code(code, "8.8.8.8")
+
+    async def test_play_role_forwards_unavailable_status_and_reason(self):
+        class FakeClient:
+            async def list_actions(self):
+                return ["idle", "dance_burst"]
+
+            async def play_role(self, action, duration_ms):
+                return {"action_status": "unavailable", "reason": "music_active"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json", no_token_probe=True)
+            session.client = FakeClient()
+            reply = await session.play_role("dance_burst", None)
+            self.assertEqual(reply, {
+                "action": "dance_burst", "status": "unavailable", "reason": "music_active",
+            })

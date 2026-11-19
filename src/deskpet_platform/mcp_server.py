@@ -9,6 +9,7 @@ from importlib.resources import files
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 from pathlib import Path
@@ -53,7 +54,19 @@ from .usb_setup import probe_usb
 from .usb_link import UsbLink, UsbPort, find_usb_devices, read_usb_identity
 from .weather import fetch_relay_weather, fetch_weather
 from .speech import SpeechTooLong, split_speech, synthesize_speech, validate_text
-from .transcription import configured_service, transcribe_to_device
+from .transcription import (
+    DashScopeTranscription,
+    LocalTranscription,
+    TranscriptionError,
+    configured_service,
+    transcribe_dashscope_pcm,
+    transcribe_local_pcm,
+    transcribe_pcm,
+    transcribe_to_device,
+)
+from .voice_agent import configured_chat_backend
+from .voice_conversation import create_device_conversation
+from .voice_permissions import VOICE_TOOLS, VoicePermissions
 from .wifi_link import NO_DEVICE_REPLY_HELP, probe_board
 
 Manual = Literal["operations", "development", "roles"]
@@ -111,6 +124,13 @@ class BoardSession:
         self.screen_speech_task = None
         self.capture_task = None
         self.capture_service = configured_service(os.environ)
+        self.voice_backend = configured_chat_backend(os.environ)
+        self.voice_conversation = None
+        self.voice_session_id = None
+        self.voice_permissions = VoicePermissions(path)
+        self.voice_tool_snapshot = frozenset()
+        self.voice_active_ticket = None
+        self.voice_active_client = None
         self.storage_lock = asyncio.Lock()
         self.loop = None
         self.touches = asyncio.Queue(maxsize=32)
@@ -151,9 +171,20 @@ class BoardSession:
         self.computer_metrics_changed = asyncio.Event()
         self.computer_preference_client = None
 
+    def _detach_voice_conversation(self):
+        conversation, self.voice_conversation = self.voice_conversation, None
+        self.voice_tool_snapshot = frozenset()
+        return conversation
+
     async def drop(self):
+        # Detach before awaiting cleanup so old work cannot target a replacement connection.
+        client, self.client = self.client, None
         if self.capture_task and not self.capture_task.done():self.capture_task.cancel()
         self.capture_task=None
+        conversation = self._detach_voice_conversation()
+        self.voice_session_id = None
+        self.voice_active_ticket=None
+        self.voice_active_client=None
         if self.screen_speech_task and not self.screen_speech_task.done():self.screen_speech_task.cancel()
         self.screen_speech_task=None
         self.token_snapshot = None
@@ -161,10 +192,12 @@ class BoardSession:
         self.computer_preference_client = None
         self.attention_client = None
         self.session_open_epoch = None
-        if self.client is not None:
-            client, self.client = self.client, None
-            self.dropped_touches += getattr(client.channel, "dropped_events", 0)
-            await client.close()
+        try:
+            if conversation is not None:await conversation.end()
+        finally:
+            if client is not None:
+                self.dropped_touches += getattr(client.channel, "dropped_events", 0)
+                await client.close()
 
     async def _drop_failed_upload(self, client):
         async with self.lock:
@@ -308,7 +341,7 @@ class BoardSession:
                                and isinstance(cause, OSError) and cause.errno in
                                (errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EACCES, errno.EPERM))
         if busy:
-            next_step = '正在等待后台服务让出设备，请稍后重试。' if handoff else '设备正被其他程序使用，请关闭该程序后重试。'
+            next_step = '已请求后台服务让出设备，请稍后重试；若持续占用，请关闭连接此设备的其他会话或程序。' if handoff else '设备正被其他程序使用，请关闭该程序后重试。'
         elif network_unreachable:
             next_step = '无法访问局域网，请检查网络连接、路由和系统的局域网权限。'
         elif isinstance(error, OSError) and str(error) == 'wifi_device_absent':
@@ -553,64 +586,186 @@ class BoardSession:
             fields = ("view", "cached_count", "cached_unread", "page", "pages", "messages", "message")
             return {"status": "ok", **{key: reply[key] for key in fields if key in reply}}
 
-    async def speak(self,text):
+    async def speak(self,text, *, read_ticket=None):
         text=validate_text(text)
+        return await self._speak_text(text,read_ticket=read_ticket)
+
+    async def speak_voice_reply(self,text, *, capture_ticket=None):
+        """Read a bounded assistant reply as one interruptible, serialized operation."""
+        try:
+            if not isinstance(text,str) or len(text.encode('utf-8'))>8192:
+                raise ValueError
+            if any((ord(char)<32 and char not in '\n\r\t') or ord(char)==127 for char in text):
+                raise ValueError
+            text=' '.join(text.split())
+            if not text:raise ValueError
+        except (ValueError,UnicodeError):
+            raise ValueError('语音回复为空或格式无效。') from None
+        return await self._speak_text(text,capture_ticket=capture_ticket,expected_client=self.voice_active_client)
+
+    async def _speak_text(self,text, *, read_ticket=None,capture_ticket=None,expected_client=None):
+        speech_request={}
+        if read_ticket is not None:speech_request['read_ticket']=read_ticket
+        if capture_ticket is not None:speech_request['capture_ticket']=capture_ticket
         async with self.speech_lock:
             async with self.lock:
                 client=self.client
-                if client is None:return {"status":"not_connected","connection":self.snapshot}
+                if client is None or (expected_client is not None and client is not expected_client):
+                    return {"status":"not_connected","connection":self.snapshot}
                 if client.channel.capabilities.get("speech_pcm")!=1:return {"status":"unsupported"}
+                if read_ticket is not None and client.channel.capabilities.get("read_speech_ticket")!=1:
+                    return {"status":"read_cancel_not_supported"}
             parts=split_speech(text);duration=0
             while parts:
                 part=parts.pop(0)
                 if not part.strip():continue
+                async with self.lock:
+                    if self.client is not client:return {"status":"not_connected","connection":self.snapshot}
                 try:pcm=await synthesize_speech(part)
                 except SpeechTooLong:
                     if len(part)<2:raise
                     middle=len(part)//2;parts[0:0]=[part[:middle],part[middle:]];continue
                 async with self.lock:
                     if self.client is not client:return {"status":"not_connected","connection":self.snapshot}
-                    result=await client.play_speech_pcm(pcm)
+                    result=await client.play_speech_pcm(pcm,**speech_request)
                 duration+=result['duration_ms']
             return {"status":"finished","duration_ms":duration}
 
-    async def read_notification(self,identity):
+    async def read_notification(self,identity, *, read_ticket=None):
         item=await asyncio.to_thread(self.notifications.get,identity)
         if item is None:return {"status":"not_found"}
-        return await self.speak(item['title'])
+        return await self.speak(item['title'],read_ticket=read_ticket) if read_ticket is not None else await self.speak(item['title'])
 
     async def refresh_capture(self, client):
         capabilities = client.channel.capabilities
-        if not self.capture_service or capabilities.get('capture_pull') != 1 or capabilities.get('transcript_display') != 1:
+        if (client is not self.client or not self.capture_service or capabilities.get('capture_pull') != 1 or
+                capabilities.get('transcript_display') != 1 or capabilities.get('capture_transcript_ticket') != 1 or
+                capabilities.get('capture_cancel_poll') != 1):
             return
         if self.capture_task and not self.capture_task.done():
             return
-        metadata = await client.poll_capture()
-        ticket = metadata.get('ticket') if isinstance(metadata, dict) else None
+        voice_ready=(self.voice_backend is not None and capabilities.get('voice_names')==1 and capabilities.get('speech_pcm')==1)
+        metadata = await client.poll_capture(voice_ready=voice_ready) if capabilities.get('capture_mode')==1 else await client.poll_capture()
+        if client is not self.client or (self.capture_task and not self.capture_task.done()):
+            return
+        if not isinstance(metadata, dict):
+            return
+        if capabilities.get('capture_voice_session') == 1:
+            session_id = metadata.get('voice_session')
+            if type(session_id) is not int or not 0 <= session_id <= 0xffffffff:
+                return
+            if session_id != self.voice_session_id:
+                conversation = self._detach_voice_conversation()
+                self.voice_session_id = session_id
+                if conversation is not None:
+                    await conversation.end()
+                    if (client is not self.client or self.voice_session_id != session_id or
+                            (self.capture_task and not self.capture_task.done())):
+                        return
+        ticket = metadata.get('ticket')
         if type(ticket) is not int or not 0 < ticket <= 0xffffffff:
             return
         self.capture_task = asyncio.create_task(self._screen_capture(client, metadata))
 
     async def _screen_capture(self, client, metadata):
+        if client is not self.client:
+            return
         ticket = metadata['ticket']
+        capabilities = client.channel.capabilities
         received = False
         success = False
+        failure = 'recognition'
+        mode=metadata.get('mode','transcript')
+        mode_valid=(mode in ('transcript','voice') and
+                    (('mode' not in metadata and client.channel.capabilities.get('capture_mode')!=1) or
+                     ('mode' in metadata and client.channel.capabilities.get('capture_mode')==1)))
+        if mode == 'voice' and capabilities.get('capture_voice_session') == 1:
+            mode_valid = mode_valid and self.voice_session_id == metadata.get('voice_session') and bool(self.voice_session_id)
         try:
+            if not mode_valid or (mode=='voice' and self.voice_backend is None):
+                if mode_valid and mode=='voice':failure='model'
+                await client.discard_capture(ticket);received=True;return
             pcm = await client.receive_capture(metadata)
             received = True
             if self.client is not client:
                 return
-            key, model = self.capture_service
-            await transcribe_to_device(client, pcm, api_key=key, model=model)
-            success = True
+            service = self.capture_service
+            async def process():
+                nonlocal failure
+                if isinstance(service, LocalTranscription):
+                    text=await transcribe_local_pcm(pcm,service)
+                elif isinstance(service, DashScopeTranscription):
+                    text=await transcribe_dashscope_pcm(pcm,service)
+                else:
+                    key, model = service
+                    if mode!='voice':
+                        await transcribe_to_device(client,pcm,api_key=key,model=model,capture_ticket=ticket);return
+                    text=await transcribe_pcm(pcm,api_key=key,model=model)
+                if self.client is not client:raise DeviceError('connection_changed')
+                if mode!='voice':
+                    await client.queue_transcript(text,capture_ticket=ticket);return
+                if not isinstance(text,str) or not text.strip():raise ValueError('empty_transcript')
+                failure='model';await client.capture_progress(ticket,'thinking')
+                if self.client is not client:raise DeviceError('connection_changed')
+                enabled=self.voice_permissions.enabled()
+                if client.channel.capabilities.get('role_actions')!=1:enabled=enabled-{'list_role_actions','play_role_action'}
+                elif client.channel.capabilities.get('capture_voice_role')!=1:enabled=enabled-{'play_role_action'}
+                if self.voice_conversation is not None and enabled!=self.voice_tool_snapshot:
+                    conversation=self._detach_voice_conversation()
+                    await conversation.end()
+                    if self.client is not client:raise DeviceError('connection_changed')
+                if self.voice_conversation is None:
+                    def authorize(name):
+                        return self.client is client and name in self.voice_permissions.enabled()
+                    conversation=await create_device_conversation(self,self.voice_backend,enabled_tools=enabled,authorize=authorize,
+                        permission_lock=self.voice_permissions.lock,voice_role_action=self.voice_role_action)
+                    if self.client is not client:
+                        await conversation.end()
+                        raise DeviceError('connection_changed')
+                    self.voice_conversation=conversation
+                    self.voice_tool_snapshot=enabled
+                async def speak_reply(reply_text):
+                    nonlocal failure
+                    failure='playback';await client.capture_progress(ticket,'speaking')
+                    if self.client is not client:raise DeviceError('connection_changed')
+                    if capabilities.get('capture_speech_ticket')==1:
+                        return await self.speak_voice_reply(reply_text,capture_ticket=ticket)
+                    return await self.speak_voice_reply(reply_text)
+                self.voice_active_ticket=ticket;self.voice_active_client=client
+                try:reply=await self.voice_conversation.turn(text,speak_reply=speak_reply)
+                finally:
+                    if self.voice_active_client is client and self.voice_active_ticket==ticket:
+                        self.voice_active_ticket=None;self.voice_active_client=None
+                if reply.agent.confirmation is not None or not reply.playback or reply.playback.get('status')!='finished':
+                    raise RuntimeError('voice_reply_incomplete')
+                failure='recognition';await client.queue_transcript(text,capture_ticket=ticket)
+            task=asyncio.create_task(process())
+            try:
+                while not task.done():
+                    done,_=await asyncio.wait({task},timeout=.5)
+                    if done:break
+                    if self.client is not client or not await asyncio.wait_for(client.capture_active(ticket),timeout=3):return
+                await task
+                success = True
+            finally:
+                if not task.done():task.cancel()
+                with suppress(asyncio.CancelledError,Exception):await task
         except asyncio.CancelledError:
             raise
+        except TranscriptionError as exc:
+            if str(exc)=='no_speech' and capabilities.get('capture_no_speech')==1:
+                failure='no_speech'
         except Exception:
             pass  # Never log credentials, recorded audio or remote response bodies.
         finally:
+            if self.client is client and mode=='voice' and not success and self.voice_conversation is not None:
+                conversation=self._detach_voice_conversation()
+                with suppress(Exception):await conversation.end()
             if received and self.client is client:
                 with suppress(OSError, DeviceError, asyncio.TimeoutError):
-                    await client.capture_result(ticket, success)
+                    if not success and (failure=='no_speech' or (mode=='voice' and mode_valid)):
+                        await client.capture_result(ticket,False,failure=failure)
+                    else:await client.capture_result(ticket, success)
 
     async def refresh_read_request(self,client):
         request=await client.read_request_take()
@@ -623,7 +778,7 @@ class BoardSession:
 
     async def _screen_speech(self,client,identity,ticket):
         try:
-            result=await self.read_notification(identity)
+            result=await self.read_notification(identity,read_ticket=ticket)
             success=result.get('status')=='finished'
         except asyncio.CancelledError:
             raise
@@ -727,6 +882,53 @@ class BoardSession:
                 return {"status": "unsupported"}
             await self.client.set_view(page, make_default=make_default, clock_face=clock_face)
             return {"status": "shown", "page": page}
+
+    async def voice_names(self, *, user_name=None, device_name=None):
+        from .voice_names import validate_voice_name
+        async with self.lock:
+            if self.client is None:return {'status':'not_connected','connection':self.snapshot}
+            if self.client.channel.capabilities.get('voice_names')!=1:return {'status':'unsupported'}
+            reply=await self.client.voice_names(user_name=user_name,device_name=device_name)
+            try:
+                user=validate_voice_name(reply.get('user_name'),empty_ok=True)
+                device=validate_voice_name(reply.get('device_name'),empty_ok=False)
+            except (ValueError,AttributeError):raise DeviceError('invalid_voice_names_reply') from None
+            if ((user_name is not None and user!=user_name) or
+                    (device_name is not None and device!=device_name)):
+                raise DeviceError('voice_names_not_confirmed')
+            return {'status':'ok','user_name':user,'device_name':device}
+
+    async def voice_tool_settings(self, enabled=None):
+        """Inspect or explicitly replace this pairing's voice tool permissions."""
+        async with self.storage_lock:
+            if enabled is not None:
+                async with self.voice_permissions.lock():self.voice_permissions.update(enabled)
+            active,status=self.voice_permissions.inspect()
+        capabilities=self.client.channel.capabilities if self.client is not None else None
+        def supported(name):
+            if capabilities is None:return None
+            if name=='device_status':return True
+            if name=='list_role_actions':return capabilities.get('role_actions')==1
+            return capabilities.get('role_actions')==1 and capabilities.get('capture_voice_role')==1
+        return {'status':status,'enabled':sorted(active),'available':[{'name':name,'description':description,
+                'requires_confirmation':False,'device_supported':supported(name)} for name,description in VOICE_TOOLS.items()]}
+
+    async def voice_role_action(self, action, duration_ms):
+        """Show the role and play only while this exact voice request is active."""
+        ticket=self.voice_active_ticket
+        expected=self.voice_active_client
+        if ticket is None:return {'status':'busy'}
+        async with self.lock:
+            client=self.client
+            if client is None or client is not expected:return {'status':'not_connected'}
+            if client.channel.capabilities.get('capture_voice_role')!=1 or client.channel.capabilities.get('role_actions')!=1:return {'status':'unsupported'}
+            actions=await client.list_actions()
+            if action not in actions:return {'status':'unsupported','action':action,'available_actions':actions}
+            await client.capture_role_view(ticket)
+            result=await client.capture_role_play(ticket,actions.index(action),duration_ms or 0)
+            reply={'status':result['action_status'],'action':action}
+            if isinstance(result.get('reason'),str) and result['reason']:reply['reason']=result['reason']
+            return reply
 
     async def dashboard_config(self,metric,source,rotation=None,interval=None):
         if sum(value is not None for value in (metric,source,rotation,interval))>1:
@@ -1269,6 +1471,35 @@ class BoardSession:
             future.cancel()
             raise TimeoutError("pairing_timeout") from None
 
+    @asynccontextmanager
+    async def _card_display_batch(self, client, *, enabled=True):
+        if not enabled or client.channel.capabilities.get("card_batch_display") != 1:
+            yield
+            return
+        batch = secrets.token_hex(8)
+
+        async def renew():
+            while True:
+                await asyncio.sleep(8)
+                current = self.client
+                if current is not None:
+                    with suppress(*LINK_ERRORS):
+                        await current.set_card_batch(batch, opened=True)
+
+        keeper = None
+        try:
+            await client.set_card_batch(batch, opened=True)
+            keeper = asyncio.create_task(renew())
+            yield
+        finally:
+            if keeper:
+                keeper.cancel()
+                with suppress(asyncio.CancelledError):
+                    await keeper
+            if self.client is not None:
+                with suppress(*LINK_ERRORS):
+                    await self.client.set_card_batch(batch, opened=False)
+
     async def upload_files(self, items, *, expected_client=None):
         if not 1 <= len(items) <= 100:
             raise ValueError("请选择 1 至 100 个文件。")
@@ -1297,16 +1528,17 @@ class BoardSession:
                             client.channel.capabilities.get('theme_json_upload')==1 and re.fullmatch(r'themes/[A-Za-z0-9][A-Za-z0-9_-]{0,23}-[0-9a-f]{16}\.json',path))
                 if any(not supported(path) for _,path in checked):
                     raise ValueError('此设备请用 desk_add_photo 导入图片、desk_add_wallpaper 导入壁纸、desk_add_theme 导入主题，或用 desk_install_role 安装角色。')
-            completed = []
-            for source, path in checked:
-                try:
-                    client, transfer = await self._upload_card_file(client, path, source)
-                    completed.append(transfer)
-                except LINK_ERRORS as error:
-                    await self._drop_failed_upload(client)
-                    return {"status": "failed", "completed": completed,
-                            "failed": {"path": path, "reason": str(error)}}
-            return {"status": "completed", "completed": completed}
+            async with self._card_display_batch(client, enabled=len(checked) > 1):
+                completed = []
+                for source, path in checked:
+                    try:
+                        client, transfer = await self._upload_card_file(client, path, source)
+                        completed.append(transfer)
+                    except LINK_ERRORS as error:
+                        await self._drop_failed_upload(client)
+                        return {"status": "failed", "completed": completed,
+                                "failed": {"path": path, "reason": str(error)}}
+                return {"status": "completed", "completed": completed}
 
     async def delete_resource(self, path):
         async with self.storage_lock, self.lock:
@@ -1438,6 +1670,17 @@ class BoardSession:
                 return {"status": "unsupported"}
             if bundle.portable and capabilities.get("role_zip_motion") != 1:
                 return {"status": "unsupported", "reason": "role_zip_motion_not_supported"}
+            if any(item.relative == "scene-frames.bin" for item in bundle.files) and capabilities.get("role_photo_motion") != 1:
+                return {"status": "unsupported", "reason": "role_photo_motion_not_supported"}
+            if any(item.relative == "burst-audio.pcm" for item in bundle.files) and capabilities.get("role_burst_audio") != 1:
+                return {"status": "unsupported", "reason": "role_burst_audio_not_supported"}
+            for item in bundle.files:
+                if item.relative == "scene-frames.bin" and capabilities.get("role_video_timeline") != 1:
+                    with item.source.open("rb") as stream:
+                        if stream.read(4) == b"RSC2":
+                            return {"status": "unsupported", "reason": "role_video_timeline_not_supported"}
+            if any(item.relative == "background-hd.565" for item in bundle.files) and capabilities.get("role_hd_background") != 1:
+                return {"status": "unsupported", "reason": "role_hd_background_not_supported"}
             if bundle.portable and capabilities.get("role_large_frames") != 1:
                 frames = next(item.source for item in bundle.files if item.relative == "pet-v2/frames.bin")
                 with frames.open("rb") as stream:
@@ -1459,34 +1702,35 @@ class BoardSession:
             role1_required = capabilities.get("role1_required", capabilities.get("pet_view") is True)
             if not bundle.portable and role1_required == 1:
                 return {"status": "unsupported", "reason": "role1_required"}
-            completed = []
-            try:
-                for item in bundle.files:
-                    destination = f"roles/{bundle.identity}/{bundle.version}/{item.relative}"
-                    client, transfer = await self._upload_card_file(
-                        client, destination, item.source, expected_sha256=item.sha256)
-                    completed.append(transfer)
-            except LINK_ERRORS as error:
-                await self._drop_failed_upload(client)
-                return {"status": "transfer_failed", "completed": completed, "reason": str(error)}
-            async with self.lock:
-                if self.client is not client:
-                    return {"status": "activation_unconfirmed", "role": bundle.identity, "reason": "connection_changed"}
+            async with self._card_display_batch(client):
+                completed = []
                 try:
-                    try:
-                        await client.prepare_role(bundle.identity, bundle.version, bundle.actions, bundle.finish_action)
-                    except CommandRejected as error:
-                        result = {"status": "activation_failed", "role": bundle.identity,
-                                  "stage": "prepare", "reason": str(error)}
-                    else:
-                        result = await self.wait_role(bundle.identity)
+                    for item in bundle.files:
+                        destination = f"roles/{bundle.identity}/{bundle.version}/{item.relative}"
+                        client, transfer = await self._upload_card_file(
+                            client, destination, item.source, expected_sha256=item.sha256)
+                        completed.append(transfer)
                 except LINK_ERRORS as error:
-                    if self.client is not None and not self.client.channel.online:
-                        await self.drop()
-                        self.snapshot = {"connection": "offline"}
-                    return {"status": "activation_unconfirmed", "role": bundle.identity, "reason": str(error)}
-            result.update(version=bundle.version, files=len(completed))
-            return result
+                    await self._drop_failed_upload(client)
+                    return {"status": "transfer_failed", "completed": completed, "reason": str(error)}
+                async with self.lock:
+                    if self.client is not client:
+                        return {"status": "activation_unconfirmed", "role": bundle.identity, "reason": "connection_changed"}
+                    try:
+                        try:
+                            await client.prepare_role(bundle.identity, bundle.version, bundle.actions, bundle.finish_action)
+                        except CommandRejected as error:
+                            result = {"status": "activation_failed", "role": bundle.identity,
+                                      "stage": "prepare", "reason": str(error)}
+                        else:
+                            result = await self.wait_role(bundle.identity)
+                    except LINK_ERRORS as error:
+                        if self.client is not None and not self.client.channel.online:
+                            await self.drop()
+                            self.snapshot = {"connection": "offline"}
+                        return {"status": "activation_unconfirmed", "role": bundle.identity, "reason": str(error)}
+                result.update(version=bundle.version, files=len(completed))
+                return result
 
     async def select_role(self, identity):
         async with self.storage_lock, self.lock:
@@ -1536,6 +1780,8 @@ class BoardSession:
                 return {"action": action, "status": "unsupported", "available_actions": actions}
             result = await self.client.play_role(actions.index(action), duration_ms or 0)
             reply = {"action": action, "status": result.get("action_status", "unknown")}
+            if isinstance(result.get("reason"), str) and result["reason"]:
+                reply["reason"] = result["reason"]
             if "operation" in result:
                 reply.update(operation=result["operation"], boot=result["boot"])
             return reply
@@ -1826,9 +2072,10 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
                      "OpenCode、WorkBuddy 和 WorkBuddy AI 的提醒支持、配置状态和启用工具。"
                      "向用户说明可以为日常使用的客户端启用提醒，按用户选择配置。"
                      "配置 Agent 额度后，按工具返回的 notification_setup 提示说明对应的提醒接入。"
-                     "用户想给小板添加、制作或安装角色时，先读 desk_read_manual(topic=roles)。"
-                     "制作完整角色时按指南的角色交付标准准备素材和验收。"
-                     "可以在电脑上生成体验角色包，或将已有的角色包安装到指定小板的储存卡。",
+                     "用户想给搭搭添加、制作或安装角色时，先读 desk_read_manual(topic=roles)。"
+                     "从描述或参考图生成全新角色动画需当前 Agent 具备生图能力（或由用户提供序列帧素材/使用代码绘制），"
+                     "制作时按指南先用 desk_check_role 导出 320x240 首页预览供用户确认，再补齐动作与安装验收。"
+                     "也可在电脑上生成内置 Pocket Bot 体验角色包，或将已有角色包安装到指定搭搭的储存卡。",
     )
 
     async def add_pairing(config, registration=None):
@@ -1858,19 +2105,19 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool()
     async def desk_find_usb_device(ports: list[str], device_id: str | None = None) -> dict[str, Any]:
-        """读取指定 USB 小板的持久 UUID 和 MAC，可按 UUID 查当前串口。查询无需配对，不接管控制。"""
+        """读取指定 USB 串口上搭搭设备的持久 UUID 和 MAC，可按 UUID 查当前串口。查询无需配对，不接管控制。"""
         return await asyncio.to_thread(find_usb_devices, ports, device_id)
 
     @server.tool()
     async def desk_set_usb_fallback(port: str, device_id: str) -> dict[str, Any]:
-        """为已配对的小板更新本次 MCP 运行中的备用串口。传入持久 UUID 和查到的串口。保留当前 Wi-Fi 控制。"""
+        """为已配对的搭搭更新本次 MCP 运行中的备用串口。传入持久 UUID 和查到的串口。保留当前 Wi-Fi 控制。"""
         if not valid_device_uuid(device_id):
-            raise ValueError("请提供已配对小板的持久 UUID。")
+            raise ValueError("请提供已配对设备的持久 UUID。")
         return await sessions.resolve(device_id).set_usb_fallback(port, device_id)
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
     def desk_read_manual(topic: Manual = "operations") -> str:
-        """读取操作手册、SDK 二次开发手册或自定义角色指南。制作、体验或安装角色请选择 roles。无需连接小板。"""
+        """读取操作手册、SDK 二次开发手册或自定义角色指南。制作、体验或安装角色请选择 roles。无需连接搭搭。"""
         return read_manual(topic)
 
     @server.resource("deskpet://manual/operations")
@@ -1885,7 +2132,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.resource("deskpet://manual/roles", name="添加自定义角色", mime_type="text/markdown")
     def roles_manual() -> str:
-        """给小板添加角色的对话示例、可运行样例和制作步骤。"""
+        """给搭搭添加角色的对话示例、可运行样例和制作步骤。"""
         return read_manual("roles")
 
     @server.tool()
@@ -1930,6 +2177,18 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         """打开指定页面，可保存默认首页，或选择时钟表盘 0 到 5。"""
         session = sessions.resolve(device_id)
         return await session.set_view(page, make_default, clock_face)
+
+    @server.tool()
+    async def desk_voice_names(user_name: str | None = None, device_name: str | None = None,
+                               device_id: str | None = None) -> dict[str, Any]:
+        """查看或修改保存在搭搭上的用户和设备昵称。用户昵称可为空；昵称不会改变唤醒词。"""
+        return await sessions.resolve(device_id).voice_names(user_name=user_name,device_name=device_name)
+
+    @server.tool()
+    async def desk_voice_tools(enabled: list[Literal['device_status','list_role_actions','play_role_action']] | None = None,
+                               device_id: str | None = None) -> dict[str, Any]:
+        """查看语音助手可用工具；传入完整 enabled 列表替换授权，空列表撤销全部。无需逐次确认；仅按用户语音请求调用。"""
+        return await sessions.resolve(device_id).voice_tool_settings(enabled)
 
     @server.tool()
     async def desk_dashboard_config(
@@ -2067,7 +2326,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool()
     async def desk_upload_files(files: list[CardFile], device_id: str | None = None) -> dict[str, Any]:
-        """将普通文件传到小板储存卡的 desk/ 或 photos/。source 是绝对路径。角色资源请用 desk_install_role。"""
+        """将普通文件传到搭搭储存卡的 desk/ 或 photos/。source 是绝对路径。角色资源请用 desk_install_role。"""
         if any(item.path.startswith("roles/") for item in files):
             raise ValueError("请用 desk_install_role 校验并安装角色资源。")
         session = sessions.resolve(device_id)
@@ -2081,31 +2340,54 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool()
     def desk_list_role_sources(directory: str | None = None) -> dict[str, Any]:
-        """查询电脑上的角色候选目录，无需连接小板；可覆盖启动时配置的绝对路径，安装时会完整校验。"""
+        """查询电脑上的角色候选目录，无需连接搭搭；可覆盖启动时配置的绝对路径，安装时会完整校验。"""
         return list_role_sources(directory if directory is not None else role_dir)
 
     @server.tool()
     async def desk_create_role_example(destination: str) -> dict[str, str]:
-        """在本机生成用于体验安装和图鉴播放的 Pocket Bot 技术样例。destination 为新的 ZIP 文件绝对路径。无需连接小板。"""
+        """在本机生成用于体验安装和图鉴播放的 Pocket Bot 技术样例。destination 为新的 ZIP 文件绝对路径。无需连接搭搭。"""
         return await asyncio.to_thread(create_role_example, destination)
 
     @server.tool()
-    async def desk_check_role(source: str) -> dict[str, Any]:
-        """在电脑上检查角色资源是否齐全、命名和格式是否正确。source 是角色目录或 role1 ZIP 的绝对路径。无需连接小板。"""
+    async def desk_check_role(source: str, preview_dir: str | None = None) -> dict[str, Any]:
+        """在电脑上检查角色资源、首页活动范围与多帧主体稳定性；可选输出 320x240 首页合成与互动预览。source 和 preview_dir 均为绝对路径。无需连接搭搭。"""
+        from .role_install import prepare_role
+        from .role_layout import inspect_role_layout, render_role_home_previews
+        from .role_staging import stage_role
+
+        if preview_dir is not None and not Path(preview_dir).expanduser().is_absolute():
+            return {"status": "invalid", "reason": "请提供用于输出预览图的本机目录绝对路径。"}
+        layout = None
+        previews = None
         with tempfile.TemporaryDirectory(prefix="deskpet-role-check-") as directory:
             try:
-                bundle = await asyncio.to_thread(prepare_role_source, source, directory)
+                staged = await asyncio.to_thread(stage_role, source, directory)
+                bundle = await asyncio.to_thread(prepare_role, staged)
+                if bundle.portable:
+                    layout = await asyncio.to_thread(inspect_role_layout, staged)
+                    if preview_dir is not None:
+                        previews = await asyncio.to_thread(render_role_home_previews, staged, preview_dir)
             except ValueError as error:
                 return {"status": "invalid", "reason": str(error)}
             except OSError:
                 return {"status": "invalid", "reason": "无法读取或暂存角色资源，请检查本机文件权限和可用空间。"}
-        return {"status": "valid", "role": bundle.identity, "version": bundle.version,
-                "format": "role1" if bundle.portable else "PET1",
-                "actions": list(bundle.actions), "files": [item.relative for item in bundle.files]}
+        result: dict[str, Any] = {
+            "status": "valid",
+            "role": bundle.identity,
+            "version": bundle.version,
+            "format": "role1" if bundle.portable else "PET1",
+            "actions": list(bundle.actions),
+            "files": [item.relative for item in bundle.files],
+        }
+        if layout is not None:
+            result["layout"] = layout
+        if previews is not None:
+            result["previews"] = previews
+        return result
 
     @server.tool()
     async def desk_install_role(source: str, device_id: str | None = None) -> dict[str, Any]:
-        """先在电脑上校验角色包，成功后才传到小板储存卡并启用。图鉴角色使用 role1 ZIP。可用 desk_check_role 单独检查。source 是绝对路径。"""
+        """先在电脑上校验角色包，成功后才传到搭搭储存卡并启用。图鉴角色使用 role1 ZIP。可用 desk_check_role 单独检查。source 是绝对路径。"""
         session = sessions.resolve(device_id)
         return await session.install_role(source)
 
@@ -2309,7 +2591,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool()
     async def desk_list_notifications(limit: int = 30, device_id: str | None = None) -> dict[str, Any]:
-        """查看桌面屏自己的会话提醒，不读取或修改 Codex 的未读状态。"""
+        """查看搭搭自己的会话提醒，不读取或修改客户端的未读状态。"""
         session = sessions.resolve(device_id)
         await asyncio.to_thread(session.notifications.sync)
         items = await asyncio.to_thread(session.notifications.list, limit)
@@ -2331,13 +2613,13 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         identity: int | None = None,
         device_id: str | None = None,
     ) -> dict[str, Any]:
-        """用 list 打开小屏提醒列表。完整显示固件在小屏上翻页和打开详情。参考固件也支持远程翻页、查看和标记，open 和 mark_seen 需要通知编号。"""
+        """用 list 打开屏幕提醒列表。标准固件在搭搭屏幕上直接翻页和打开详情；旧版/参考固件支持远程翻页、查看和标记，open 和 mark_seen 需要通知编号。"""
         session = sessions.resolve(device_id)
         return await session.message_view(mode, identity)
 
     @server.tool()
     async def desk_mark_notification_seen(identity: int, device_id: str | None = None) -> dict[str, Any]:
-        """只标记桌面屏的一条提醒为已查看，不改变 Codex 里的未读状态。"""
+        """只标记搭搭的一条提醒为已查看，不改变客户端里的未读状态。"""
         session = sessions.resolve(device_id)
         return {"updated": await asyncio.to_thread(session.notifications.mark_seen, identity)}
 

@@ -9,7 +9,8 @@ import zlib
 
 from .card_upload import MAX_FILE_BYTES, validate_path
 from .role_archive import (
-    INTERACTIONS, ROLE1_MOTION, ROLE1_ZIP_FILES, validate_manifest, validate_motion, validate_resource_names,
+    INTERACTIONS, ROLE1_MOTION, ROLE1_ZIP_FILES, ROLE1_OPTIONAL_FILES, ROLE1_BURST_AUDIO,
+    validate_photo_motion, validate_manifest, validate_motion, validate_resource_names,
     validate_resource_size,
 )
 
@@ -99,7 +100,7 @@ def role1_directory_identity(root):
 def validate_role1_directory(root, filenames):
     expected = dict(ROLE1_ZIP_FILES)
     expected[ROLE1_MOTION] = expected.pop("motion.bin")
-    validate_resource_names(filenames, expected.keys(), optional=(*ROLE_METADATA_FILES, "background.565"))
+    validate_resource_names(filenames, expected.keys(), optional=(*ROLE_METADATA_FILES, "background.565", *ROLE1_OPTIONAL_FILES))
     for name, limit in expected.items():
         validate_resource_size(name, (root / name).stat().st_size, limit)
     if not _declares_role1(root):
@@ -219,7 +220,24 @@ def prepare_role(source):
             raise ValueError("角色目录缺少必需资源 pet-v2/timeline-v2.bin 或 pet-v2/timeline-v3.bin。")
     if "background.565" in filenames and (root / "background.565").stat().st_size != 320 * 240 * 2:
         raise ValueError("角色资源 background.565 必须为 153600 字节。")
+    if "background-hd.565" in filenames:
+        validate_resource_size("background-hd.565", (root / "background-hd.565").stat().st_size,
+                               ROLE1_OPTIONAL_FILES["background-hd.565"])
     action_count = validate_action_pack(root / "pet-v2", portable=portable)
+    timed_video = False
+    if "scene-frames.bin" in filenames:
+        if not portable:
+            raise ValueError("原屏照片帧需要 role1 角色。")
+        with (root / "pet-v2/frames.bin").open("rb") as frames, (root / ROLE1_MOTION).open("rb") as motion:
+            frames.seek(12)
+            motion.seek(12)
+            timed_video = validate_photo_motion(root / "scene-frames.bin", int.from_bytes(frames.read(4), "little"),
+                                                int.from_bytes(motion.read(2), "little"), action_count + len(motion_actions))
+    if ROLE1_BURST_AUDIO in filenames:
+        if not timed_video or "dance_burst" not in motion_actions:
+            raise ValueError("爆发舞步的音乐需要带有 dance_burst 的视频角色。")
+        validate_resource_size(ROLE1_BURST_AUDIO, (root / ROLE1_BURST_AUDIO).stat().st_size,
+                               ROLE1_OPTIONAL_FILES[ROLE1_BURST_AUDIO])
     expected_actions = INTERACTIONS[:action_count] + motion_actions if portable else None
     action_count += len(motion_actions)
     action_file = root / "actions.txt"

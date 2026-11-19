@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import unittest
 import zlib
 from unittest.mock import AsyncMock
@@ -36,6 +37,34 @@ class CapturePullTests(unittest.IsolatedAsyncioTestCase):
                     await self.client(send).receive_capture({'ticket': 1, 'bytes': 2, 'crc32': crc})
                 self.assertEqual([call.args[0] for call in send.await_args_list[-2:]], ['capture_finish', 'capture_result'])
                 self.assertFalse(send.await_args.kwargs['success'])
+
+    async def test_receive_base64_uses_larger_chunks_only_when_advertised(self):
+        pcm = bytes(range(256)) * 7
+        async def reply(kind, **fields):
+            if kind != 'capture_chunk':
+                return {}
+            self.assertEqual(fields['encoding'], 'base64')
+            offset = fields['offset']
+            return {'data': base64.b64encode(pcm[offset:offset + 720]).decode('ascii')}
+        send = AsyncMock(side_effect=reply)
+        client = self.client(send)
+        client.channel.capabilities['capture_chunk_b64'] = 1
+        result = await client.receive_capture({'ticket': 7, 'bytes': len(pcm), 'crc32': zlib.crc32(pcm)})
+        self.assertEqual(result, pcm)
+        offsets = [c.kwargs['offset'] for c in send.await_args_list if c.args[0] == 'capture_chunk']
+        self.assertEqual(offsets, [0, 720, 1440])
+
+    async def test_invalid_base64_releases_capture(self):
+        for raw in ('%%%=', 'YQ==', 'YQBi', 'YWI'):
+            async def reply(kind, **_fields):
+                return {'data': raw} if kind == 'capture_chunk' else {}
+            send = AsyncMock(side_effect=reply)
+            client = self.client(send)
+            client.channel.capabilities['capture_chunk_b64'] = 1
+            with self.assertRaisesRegex(DeviceError, 'invalid_capture_data'):
+                await client.receive_capture({'ticket': 7, 'bytes': 2, 'crc32': zlib.crc32(b'ab')})
+            self.assertEqual([c.args[0] for c in send.await_args_list[-2:]],
+                             ['capture_finish', 'capture_result'])
 
     async def test_other_commands_can_run_between_chunks(self):
         pcm = b'x' * 768
@@ -84,3 +113,40 @@ class CapturePullTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(DeviceError):
             await self.client(send, False).receive_capture({'ticket': 1, 'bytes': 2, 'crc32': 0})
         send.assert_not_awaited()
+
+    async def test_discard_releases_capture_without_reading_audio(self):
+        send=AsyncMock(return_value={'ok':True});client=self.client(send)
+        await client.discard_capture(7)
+        send.assert_awaited_once_with('capture_finish',ticket=7)
+
+    async def test_voice_readiness_is_sent_only_to_supporting_devices(self):
+        send=AsyncMock(return_value={});client=self.client(send)
+        await client.poll_capture(voice_ready=True);send.assert_awaited_with('capture_poll')
+        client.channel.capabilities['capture_mode']=1
+        await client.poll_capture(voice_ready=True);send.assert_awaited_with('capture_poll',voice_ready=True)
+
+    async def test_voice_role_waits_until_visible_then_uses_ticket(self):
+        states=iter(['pending','visible'])
+        async def reply(kind,**fields):
+            if kind=='capture_role_view':return {'role_view':next(states)}
+            if kind=='capture_role_play':return {'action_status':'started'}
+            return {}
+        send=AsyncMock(side_effect=reply);client=self.client(send);client.channel.capabilities['capture_voice_role']=1
+        await client.capture_role_view(7,poll_interval=0)
+        self.assertEqual((await client.capture_role_play(7,3,1000))['action_status'],'started')
+        self.assertEqual([c.args[0] for c in send.await_args_list],['capture_role_view','capture_role_view','capture_role_play'])
+        self.assertEqual(send.await_args.kwargs,{'ticket':7,'action':3,'duration_ms':1000})
+
+    async def test_voice_role_accepts_unavailable_status_with_reason(self):
+        send=AsyncMock(return_value={'action_status':'unavailable','reason':'music_active'})
+        client=self.client(send);client.channel.capabilities['capture_voice_role']=1
+        reply=await client.capture_role_play(7,3,0)
+        self.assertEqual(reply,{'action_status':'unavailable','reason':'music_active'})
+
+    async def test_voice_role_rejects_invalid_status_and_parameters(self):
+        send=AsyncMock(return_value={'role_view':'wrong'});client=self.client(send)
+        with self.assertRaises(DeviceError):await client.capture_role_view(7)
+        client.channel.capabilities['capture_voice_role']=1
+        with self.assertRaises(DeviceError):await client.capture_role_view(7,poll_interval=0)
+        for values in ((0,3,0),(7,256,0),(7,3,1),(7,True,0)):
+            with self.assertRaises(ValueError):await client.capture_role_play(*values)

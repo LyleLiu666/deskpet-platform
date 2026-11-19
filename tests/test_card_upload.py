@@ -22,6 +22,34 @@ from deskpet_platform.pairing import DeviceConfig
 
 
 class CardUploadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_terminal_failure_retries_the_same_file_with_a_new_relay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'frame.bin'
+            source.write_bytes(b'frame data')
+            channel = Mock()
+            channel.send = AsyncMock(side_effect=[
+                {'transfer_status': 'pending', 'seq': 7},
+                CommandRejected('card_transfer_failed'),
+                {'transfer_status': 'pending', 'seq': 8},
+                {'stored': True},
+            ])
+            first = Mock(served=True, url='first-relay')
+            second = Mock(served=True, url='second-relay')
+            with patch('deskpet_platform.card_upload.CardRelay') as factory:
+                factory.return_value.start.side_effect = [first, second]
+                result = await upload_file(channel, '127.0.0.1', bytes(32),
+                                           'roles/sample/r-0000000000000000/frame.bin',
+                                           source, background=True)
+            self.assertEqual(result['bytes'], len(b'frame data'))
+            self.assertEqual([call.args[0] for call in channel.send.await_args_list],
+                             ['card_fetch', 'card_fetch_status', 'card_fetch', 'card_fetch_status'])
+            sent = [call.kwargs for call in channel.send.await_args_list if call.args[0] == 'card_fetch']
+            self.assertEqual([fields['url'] for fields in sent], ['first-relay', 'second-relay'])
+            self.assertEqual([{key:value for key,value in fields.items() if key != 'url'} for fields in sent],
+                             [{key:value for key,value in sent[0].items() if key != 'url'}] * 2)
+            first.close.assert_called_once()
+            second.close.assert_called_once()
+
     async def test_wallpaper_delete_reports_missing_and_unsupported(self):
         with tempfile.TemporaryDirectory() as directory:
             session=BoardSession(Path(directory)/'device.json')

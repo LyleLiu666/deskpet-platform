@@ -156,6 +156,65 @@ class RoleInstallTests(unittest.TestCase):
 
 
 class RoleInstallFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transfer_display_spans_entire_install_and_closes_on_error(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                archive = make_archive(root)
+                session = BoardSession(root / "device.json")
+                events = []
+
+                async def batch(batch_id, *, opened):
+                    events.append(("begin" if opened else "end", batch_id))
+                    return True
+
+                async def upload(path, source, *, expected_sha256):
+                    events.append(("file", path))
+                    if failed and len(events) == 3:
+                        raise CommandRejected("card_transfer_failed", "card_verify")
+                    return {}
+
+                async def prepare(*args):
+                    events.append(("activate", args[0]))
+
+                async def status():
+                    events.append(("ready", "user-test"))
+                    return {"role_state": "ready", "role_id": "user-test", "role_persisted": True}
+
+                bundle = prepare_role_source(archive, root / "expected")
+                async def confirmed_status():
+                    response = await status()
+                    response["role_id"] = bundle.identity
+                    return response
+
+                session.client = SimpleNamespace(
+                    channel=SimpleNamespace(online=True, capabilities={
+                        "card_transfer": 1, "role_actions": 1, "role_zip_motion": 1,
+                        "card_batch_display": 1,
+                    }),
+                    set_card_batch=batch, upload_file=upload, prepare_role=prepare, status=confirmed_status,
+                )
+                result = await session.install_role(archive)
+                self.assertEqual(result["status"], "transfer_failed" if failed else "ready")
+                self.assertEqual(events[0][0], "begin")
+                self.assertEqual(events[-1], ("end", events[0][1]))
+                self.assertEqual([name for name, _ in events[1:-1]],
+                                 ["file", "file"] if failed else
+                                 ["file"] * len(bundle.files) + ["activate", "ready"])
+
+    async def test_screen_background_requires_device_capability_before_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);archive=make_archive(root)
+            with ZipFile(archive,'a') as package:
+                package.writestr('background-hd.565',bytes(480*320*2))
+            session=BoardSession(root/'device.json')
+            board=SimpleNamespace(channel=SimpleNamespace(capabilities={
+                'card_transfer':1,'role_actions':1,'role_zip_motion':1}),
+                upload_file=AsyncMock(),prepare_role=AsyncMock())
+            session.client=board
+            self.assertEqual(await session.install_role(archive),{'status':'unsupported','reason':'role_hd_background_not_supported'})
+            board.upload_file.assert_not_awaited()
+
     async def test_larger_motion_requires_device_capability_before_upload(self):
         from test_role_archive import make_archive, make_motion
         with tempfile.TemporaryDirectory() as directory:

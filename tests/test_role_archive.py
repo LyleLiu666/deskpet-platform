@@ -65,6 +65,29 @@ def make_archive(directory, *, extra=None, link=False, motion=None, width=176, h
 
 
 class RoleArchiveTests(unittest.TestCase):
+    def test_optional_screen_background_is_validated_and_versioned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);archive=make_archive(root)
+            original=prepare_role_source(archive,root/'old')
+            with ZipFile(archive,'a') as package:
+                package.writestr('background-hd.565',bytes(480*320*2))
+            upgraded=prepare_role_source(archive,root/'new')
+            self.assertIn('background-hd.565',[item.relative for item in upgraded.files])
+            self.assertNotEqual(original.version,upgraded.version)
+            self.assertEqual((original.identity,original.actions,original.finish_action),(upgraded.identity,upgraded.actions,upgraded.finish_action))
+            self.assertEqual(next(item.source.stat().st_size for item in upgraded.files if item.relative=='background-hd.565'),480*320*2)
+            (root/'new'/'user-archive'/'background-hd.565').write_bytes(b'bad')
+            with self.assertRaisesRegex(ValueError,'background-hd'):
+                prepare_role(root/'new'/'user-archive')
+
+    def test_invalid_screen_background_is_rejected_before_extraction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);archive=make_archive(root)
+            with ZipFile(archive,'a') as package:package.writestr('background-hd.565',b'bad')
+            with self.assertRaisesRegex(ValueError,'background-hd'):
+                stage_role(archive,root/'rejected')
+            self.assertFalse((root/'rejected').exists())
+
     def test_larger_motion_keeps_the_same_clips_and_actions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

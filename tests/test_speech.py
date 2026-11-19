@@ -1,10 +1,13 @@
 import unittest
 import asyncio
+import wave
 from unittest.mock import AsyncMock,patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from aiohttp import ClientConnectionError
 from deskpet_platform.mcp_server import BoardSession
-from deskpet_platform.speech import validate_text, split_speech, SpeechTooLong
+from deskpet_platform.speech import validate_text, split_speech, synthesize_speech, SpeechTooLong
 
 class Speech(unittest.IsolatedAsyncioTestCase):
     def test_input_bounds(self):
@@ -19,6 +22,32 @@ class Speech(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(0<len(part)<=12 for part in parts))
         self.assertEqual(split_speech('abcdefghijkl，后续'),['abcdefghijk','l，','后续'])
 
+    async def test_synthesis_retries_a_transient_connection_failure(self):
+        pcm = b'\x01\x00\x02\x00'
+        first_save = AsyncMock(side_effect=ClientConnectionError())
+        second_save = AsyncMock()
+
+        async def convert(*args, **kwargs):
+            with wave.open(args[-1], 'wb') as target:
+                target.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+                target.writeframes(pcm)
+            return SimpleNamespace(wait=AsyncMock(), returncode=0)
+
+        with patch('edge_tts.Communicate', side_effect=[
+            SimpleNamespace(save=first_save),
+            SimpleNamespace(save=second_save),
+        ]), patch('deskpet_platform.speech.asyncio.create_subprocess_exec', side_effect=convert):
+            self.assertEqual(await synthesize_speech('测试'), pcm)
+        first_save.assert_awaited_once()
+        second_save.assert_awaited_once()
+
+    async def test_synthesis_reports_failure_after_two_attempts(self):
+        save = AsyncMock(side_effect=ClientConnectionError('remote failure'))
+        with patch('edge_tts.Communicate', return_value=SimpleNamespace(save=save)):
+            with self.assertRaisesRegex(RuntimeError, '在线语音合成暂时不可用'):
+                await synthesize_speech('测试')
+        self.assertEqual(save.await_count, 2)
+
     async def test_no_network_when_board_unavailable(self):
         with TemporaryDirectory() as directory:
             session=BoardSession(Path(directory)/'device.json',no_token_probe=True)
@@ -28,6 +57,15 @@ class Speech(unittest.IsolatedAsyncioTestCase):
             session.client=type('Board',(),{'channel':type('Channel',(),{'capabilities':{}})()})()
             with patch('deskpet_platform.mcp_server.synthesize_speech',new_callable=AsyncMock) as synth:
                 self.assertEqual((await session.speak('测试'))['status'],'unsupported')
+            synth.assert_not_awaited()
+
+    async def test_screen_read_without_cancel_support_fails_before_synthesis(self):
+        with TemporaryDirectory() as directory:
+            session=BoardSession(Path(directory)/'device.json',no_token_probe=True)
+            session.client=type('Board',(),{'channel':type('Channel',(),{'capabilities':{'speech_pcm':1}})()})()
+            with patch('deskpet_platform.mcp_server.synthesize_speech',new_callable=AsyncMock) as synth:
+                result=await session.speak('测试',read_ticket=7)
+            self.assertEqual(result['status'],'read_cancel_not_supported')
             synth.assert_not_awaited()
 
     async def test_explicit_request_synthesizes_and_plays(self):
@@ -85,3 +123,49 @@ class Speech(unittest.IsolatedAsyncioTestCase):
             with patch('deskpet_platform.mcp_server.synthesize_speech',side_effect=synth):
                 await asyncio.gather(session.speak('abcdefghijklm'),session.speak('第二条'))
             self.assertEqual(spoken,['abcdefghijkl','m','第二条'])
+
+    async def test_voice_reply_reads_long_multiline_text_in_order(self):
+        with TemporaryDirectory() as directory:
+            session=BoardSession(Path(directory)/'device.json',no_token_probe=True)
+            client=type('Board',(),{})();client.channel=type('Channel',(),{'capabilities':{'speech_pcm':1}})()
+            client.play_speech_pcm=AsyncMock(return_value={'status':'finished','duration_ms':1});session.client=client
+            text='长回答'*50+'\n第二段。'
+            async def synth(part):return part.encode()
+            with patch('deskpet_platform.mcp_server.synthesize_speech',side_effect=synth):
+                result=await session.speak_voice_reply(text)
+            self.assertEqual(result['status'],'finished')
+            self.assertEqual(b''.join(call.args[0] for call in client.play_speech_pcm.await_args_list).decode(),text.replace('\n',' '))
+
+    async def test_voice_reply_cancellation_stops_further_playback(self):
+        with TemporaryDirectory() as directory:
+            session=BoardSession(Path(directory)/'device.json',no_token_probe=True)
+            client=type('Board',(),{})();client.channel=type('Channel',(),{'capabilities':{'speech_pcm':1}})()
+            entered=asyncio.Event()
+            async def play(_data):entered.set();await asyncio.Event().wait()
+            client.play_speech_pcm=AsyncMock(side_effect=play);session.client=client
+            with patch('deskpet_platform.mcp_server.synthesize_speech',new_callable=AsyncMock,return_value=b'12') as synth:
+                task=asyncio.create_task(session.speak_voice_reply('回答'*50))
+                await entered.wait();task.cancel()
+                with self.assertRaises(asyncio.CancelledError):await task
+                self.assertEqual(synth.await_count,1)
+                self.assertEqual(client.play_speech_pcm.await_count,1)
+
+    async def test_voice_reply_rejects_invalid_or_excessive_text(self):
+        with TemporaryDirectory() as directory:
+            session=BoardSession(Path(directory)/'device.json',no_token_probe=True)
+            for text in ('  \n  ', 'a\x00b', '字'*2731, '\ud800', None):
+                with self.assertRaises(ValueError):await session.speak_voice_reply(text)
+
+    async def test_voice_reply_stops_if_board_disconnects_between_parts(self):
+        with TemporaryDirectory() as directory:
+            session=BoardSession(Path(directory)/'device.json',no_token_probe=True)
+            client=type('Board',(),{})();client.channel=type('Channel',(),{'capabilities':{'speech_pcm':1}})()
+            async def play(_data):
+                session.client=None
+                return {'status':'finished','duration_ms':1}
+            client.play_speech_pcm=AsyncMock(side_effect=play);session.client=client
+            with patch('deskpet_platform.mcp_server.synthesize_speech',new_callable=AsyncMock,return_value=b'12') as synth:
+                result=await session.speak_voice_reply('回答'*50)
+            self.assertEqual(result['status'],'not_connected')
+            self.assertEqual(client.play_speech_pcm.await_count,1)
+            self.assertEqual(synth.await_count,1)

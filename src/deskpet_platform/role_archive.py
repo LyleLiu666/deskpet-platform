@@ -1,6 +1,8 @@
 """Read the portable role1 ZIP format used by the desktop display."""
 from collections import Counter
+import io
 import json
+from PIL import Image
 from pathlib import Path
 import re
 import shutil
@@ -29,7 +31,13 @@ ROLE1_ZIP_FILES = {
     "pet-v2/frames.bin": 20 + 512 * 65536,
     "pet-v2/timeline-v2.bin": 20 + 30 * 80,
 }
-FIXED_SIZE_FILES = {"kind", "row.565", "land.bin"}
+ROLE1_BURST_AUDIO = "burst-audio.pcm"
+ROLE1_OPTIONAL_FILES = {
+    "background-hd.565": 480 * 320 * 2,
+    "scene-frames.bin": 80 * 1024 * 1024,
+    ROLE1_BURST_AUDIO: 160_000,
+}
+FIXED_SIZE_FILES = {"kind", "row.565", "land.bin", "background-hd.565"}
 _FRAME = struct.Struct("<IIIHH")
 
 
@@ -130,19 +138,62 @@ def validate_resource_size(name, size, limit):
         raise ValueError(f"角色资源 {name} 必须为 {limit} 字节。")
     if not 0 < size <= limit:
         raise ValueError(f"角色资源 {name} 不能为空或超过 {limit} 字节。")
+    if name == ROLE1_BURST_AUDIO and size % 2:
+        raise ValueError("角色爆发舞步的音乐必须是 16 kHz、16 位、小端序单声道 PCM。")
 
 
 def _entries(archive):
     entries = archive.infolist()
-    validate_resource_names((entry.orig_filename for entry in entries), ROLE1_ZIP_FILES.keys())
+    validate_resource_names((entry.orig_filename for entry in entries), ROLE1_ZIP_FILES.keys(), optional=ROLE1_OPTIONAL_FILES)
     for entry in entries:
         if (entry.orig_filename != entry.filename or
                 stat.S_IFMT(entry.external_attr >> 16) not in (0, stat.S_IFREG) or
                 entry.flag_bits & 1 or
                 entry.compress_type not in (ZIP_STORED, ZIP_DEFLATED)):
             raise ValueError(f"角色资源 {entry.filename} 必须是未加密的普通文件，使用存储或 Deflate 压缩。")
-        validate_resource_size(entry.filename, entry.file_size, ROLE1_ZIP_FILES[entry.filename])
+        validate_resource_size(entry.filename, entry.file_size, (ROLE1_ZIP_FILES | ROLE1_OPTIONAL_FILES)[entry.filename])
     return entries
+
+
+def validate_photo_motion(path, interactions, motions, actions=None):
+    """Verify that each indexed photograph can be rendered by the board decoder."""
+    try:
+        with path.open("rb") as stream:
+            header = struct.unpack("<4s4H", stream.read(12))
+            if header[1:3] != (480, 320):
+                raise ValueError()
+            timed = header[0] == b"RSC2"
+            if timed:
+                track_count, frame_count = header[3:]
+                if track_count != actions or not 1 <= track_count <= 64 or not 1 <= frame_count <= 2048:
+                    raise ValueError()
+                refs = 0
+                for _ in range(track_count):
+                    first, length, ms, loop = struct.unpack("<4H", stream.read(8))
+                    if first != refs or not length or not 25 <= ms <= 1000 or loop > 1:
+                        raise ValueError()
+                    refs += length
+                if refs > 16384 or any(n >= frame_count for n in struct.unpack(f"<{refs}H", stream.read(refs*2))):
+                    raise ValueError()
+                count = frame_count + 1
+            else:
+                if header != (b"RSC1", 480, 320, interactions, motions) or not 0 < interactions + motions <= 640:
+                    raise ValueError()
+                count = interactions + motions + 1
+            offsets = struct.unpack(f"<{count}I", stream.read(count * 4))
+            if offsets[0] != stream.tell() or offsets[-1] != path.stat().st_size:
+                raise ValueError()
+            for start, end in zip(offsets, offsets[1:]):
+                if not 0 < end - start <= 131072:
+                    raise ValueError()
+                data = stream.read(end - start)
+                with Image.open(io.BytesIO(data)) as frame:
+                    if frame.format != "JPEG" or frame.size != ((320, 480) if timed else (480, 320)) or frame.mode != "RGB" or frame.info.get("progressive"):
+                        raise ValueError()
+                    frame.load()
+            return timed
+    except (ValueError, OSError, struct.error) as error:
+        raise ValueError("角色的原屏照片帧损坏或与动作不匹配。") from error
 
 
 def validate_manifest(data):
@@ -163,7 +214,7 @@ def validate_manifest(data):
 
 def inspect_role_archive(source):
     try:
-        if source.stat().st_size > sum(ROLE1_ZIP_FILES.values()) + 65536:
+        if source.stat().st_size > sum(ROLE1_ZIP_FILES.values()) + sum(ROLE1_OPTIONAL_FILES.values()) + 65536:
             return None
         with ZipFile(source) as archive:
             _entries(archive)
@@ -174,7 +225,7 @@ def inspect_role_archive(source):
 
 def extract_role_archive(source, work_root):
     """Extract only known regular files, under an identity from the manifest."""
-    if source.stat().st_size > sum(ROLE1_ZIP_FILES.values()) + 65536:
+    if source.stat().st_size > sum(ROLE1_ZIP_FILES.values()) + sum(ROLE1_OPTIONAL_FILES.values()) + 65536:
         raise ValueError("角色 ZIP 过大。")
     try:
         with ZipFile(source) as archive:

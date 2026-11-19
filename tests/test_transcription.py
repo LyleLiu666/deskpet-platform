@@ -100,6 +100,10 @@ class TranscriptionTests(unittest.IsolatedAsyncioTestCase):
         await transcribe_to_device(client, b"\0\0", api_key="test-key", model="model/name", transport=transport)
         client.queue_transcript.assert_awaited_once_with("合成结果")
         client.queue_transcript.reset_mock()
+        client.channel.capabilities['capture_transcript_ticket']=1
+        await transcribe_to_device(client, b"\0\0", api_key="test-key", model="model/name", transport=transport, capture_ticket=7)
+        client.queue_transcript.assert_awaited_once_with("合成结果",capture_ticket=7)
+        client.queue_transcript.reset_mock()
         transport = httpx.MockTransport(lambda _request: httpx.Response(500))
         with self.assertRaises(TranscriptionError):
             await transcribe_to_device(client, b"\0\0", api_key="test-key", model="model/name", transport=transport)

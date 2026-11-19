@@ -245,8 +245,14 @@ async def upload_file(channel, device_ip, key, path, source, *, expected_sha256=
                 # started, so no write can still be running behind the retry.
                 worker_unavailable = (background and error.code == "card_transfer_failed" and
                                       error.stage == "worker_start")
+                # Legacy asynchronous firmware reports an unscheduled or
+                # finished failure under the same code, with no stage field.
+                # An absent reply remains unconfirmed and is handled above.
+                legacy_failed = (background and resume is None and error.code == "card_transfer_failed"
+                                 and error.stage is None)
                 if (attempt == 2 or (background and deadline <= loop.time()) or
-                        not worker_unavailable and error.stage not in ("http_open", "http_headers", "http_body", "http_tag")):
+                        not (worker_unavailable or legacy_failed) and
+                        error.stage not in ("http_open", "http_headers", "http_body", "http_tag")):
                     raise
                 if worker_unavailable:
                     retry_delay = min(3 * (attempt + 1), max(0, deadline - loop.time()))

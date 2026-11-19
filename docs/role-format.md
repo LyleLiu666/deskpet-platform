@@ -12,7 +12,7 @@
 
 ## 1. 标准 `role1` ZIP 角色包
 
-搭搭图鉴使用标准的 `role1` ZIP 角色包。`desk_install_role` 可直接安装 `.zip` 文件或解压后的同结构目录。ZIP 包内必须按以下路径和精确大小写包含 7 个必需文件（可选附带 `background-hd.565`）：
+搭搭图鉴使用标准的 `role1` ZIP 角色包。`desk_install_role` 可直接安装 `.zip` 文件或解压后的同结构目录。ZIP 包内按以下路径和精确大小写包含 7 个必需文件。
 
 | 包内路径 | 是否必需 | 规格与用途 |
 | --- | --- | --- |
@@ -24,6 +24,8 @@
 | `pet-v2/frames.bin` | 必需 | `PET1` 格式的互动动作透明帧文件（标准尺寸 `176 × 160`）。 |
 | `pet-v2/timeline-v2.bin` | 必需 | `PTL1` v2（或 `timeline-v3.bin`）时间轴文件，定义各互动动作的帧序列、时长与锚点。 |
 | `background-hd.565` | 可选 | 预先按屏幕构图裁切的 `480 × 320` 小端 RGB565 高清背景（恰好 307,200 字节）。需固件声明 `role_hd_background` 能力（工作台使用该背景并叠加暗角，图鉴预览仍使用 `land.bin`；不支持的设备在传输前即会拒绝并返回 `role_hd_background_not_supported`）。 |
+| `scene-frames.bin` | 可选 | 屏幕原尺寸照片帧，使用 `RSC1` 或 `RSC2`（独立视频时间轴）。需固件声明 `role_photo_motion`，`RSC2` 还需声明 `role_video_timeline`。 |
+| `burst-audio.pcm` | 可选 | `RSC2` 角色的 `dance_burst` 配乐。16 kHz、16 位、有符号小端单声道 PCM，最多 160,000 字节。需固件声明 `role_burst_audio`。 |
 
 ### 解压目录、卡上备份恢复与图鉴行覆盖
 

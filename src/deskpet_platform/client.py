@@ -1,5 +1,6 @@
 """Connection, status and a small text display operation for developers."""
 import asyncio
+import base64
 import time
 from dataclasses import asdict
 from datetime import datetime
@@ -60,6 +61,7 @@ class Client:
         self.channel = Channel(self.link, config.identity)
         self._operation = asyncio.Lock()
         self._capture = asyncio.Lock()
+        self._speech = asyncio.Lock()
         self._upload = asyncio.Lock()
         self.device_id = None
 
@@ -175,12 +177,14 @@ class Client:
         async with self._operation:
             return await self.channel.send("weather_relay", **snapshot)
 
-    async def poll_capture(self):
+    async def poll_capture(self, *, voice_ready=False):
         """Inspect pending recordings on a device that explicitly supports capture."""
         if self.channel.capabilities.get("capture_pull") != 1:
             raise DeviceError("capture_not_supported")
+        if type(voice_ready) is not bool:raise ValueError('对话状态无效。')
+        fields={'voice_ready':voice_ready} if self.channel.capabilities.get('capture_mode')==1 else {}
         async with self._operation:
-            return await self.channel.send("capture_poll")
+            return await self.channel.send("capture_poll",**fields)
 
     async def receive_capture(self, metadata):
         """Receive one bounded PCM recording and clear the device copy."""
@@ -193,19 +197,33 @@ class Client:
             type(size) is not int or not 0 < size <= 24000 * 2 * 120 or size % 2 or
             type(crc) is not int or not 0 <= crc <= 0xffffffff):
             raise DeviceError("invalid_capture_metadata")
+        use_base64 = self.channel.capabilities.get("capture_chunk_b64") == 1
+        chunk_size = 720 if use_base64 else 384
+        fields = {"encoding": "base64"} if use_base64 else {}
         async with self._capture:
             data = bytearray()
             finished = False
             try:
-                for offset in range(0, size, 384):
+                for offset in range(0, size, chunk_size):
                     async with self._operation:
-                        reply = await self.channel.send("capture_chunk", ticket=ticket, offset=offset)
+                        reply = await self.channel.send("capture_chunk", ticket=ticket, offset=offset, **fields)
                     chunk = reply.get("data") if isinstance(reply, dict) else None
-                    expected = min(384, size - offset)
-                    if (not isinstance(chunk, str) or len(chunk) != expected * 2 or
-                        not re.fullmatch(r"[0-9a-f]+", chunk)):
+                    expected = min(chunk_size, size - offset)
+                    encoded_size = 4 * ((expected + 2) // 3) if use_base64 else expected * 2
+                    if not isinstance(chunk, str) or len(chunk) != encoded_size:
                         raise DeviceError("invalid_capture_data")
-                    data.extend(bytes.fromhex(chunk))
+                    if use_base64:
+                        try:
+                            decoded = base64.b64decode(chunk, validate=True)
+                        except ValueError:
+                            raise DeviceError("invalid_capture_data") from None
+                    else:
+                        if not re.fullmatch(r"[0-9a-f]+", chunk):
+                            raise DeviceError("invalid_capture_data")
+                        decoded = bytes.fromhex(chunk)
+                    if len(decoded) != expected:
+                        raise DeviceError("invalid_capture_data")
+                    data.extend(decoded)
                 if zlib.crc32(data) != crc:
                     raise DeviceError("invalid_capture_data")
                 async with self._operation:
@@ -220,13 +238,63 @@ class Client:
                             await self.channel.send("capture_finish", ticket=ticket)
                             await self.channel.send("capture_result", ticket=ticket, success=False)
 
-    async def capture_result(self, ticket, success):
+    async def capture_active(self, ticket):
+        if type(ticket) is not int or not 0<ticket<=0xffffffff:raise ValueError('录音请求编号无效。')
+        if self.channel.capabilities.get('capture_cancel_poll')!=1:raise DeviceError('capture_cancel_not_supported')
+        async with self._operation:
+            reply=await self.channel.send('capture_check',ticket=ticket)
+        if not isinstance(reply,dict) or type(reply.get('active')) is not bool:raise DeviceError('invalid_capture_check')
+        return reply['active']
+
+    async def capture_result(self, ticket, success, *, failure=None):
         if type(ticket) is not int or not 0 < ticket <= 0xffffffff or type(success) is not bool:
             raise ValueError("录音结果参数无效。")
+        if failure is not None:
+            allowed = (failure == 'no_speech' and self.channel.capabilities.get('capture_no_speech') == 1) or (
+                failure in ('recognition','model','playback') and self.channel.capabilities.get('capture_mode') == 1)
+            if success or not allowed:
+                raise ValueError('录音失败状态无效。')
+        fields={'ticket':ticket,'success':success}
+        if failure is not None:fields['failure']=failure
         async with self._operation:
-            return await self.channel.send("capture_result", ticket=ticket, success=success)
+            return await self.channel.send("capture_result", **fields)
 
-    async def queue_transcript(self, text):
+    async def capture_progress(self, ticket, phase):
+        if type(ticket) is not int or not 0<ticket<=0xffffffff or phase not in ('thinking','speaking'):
+            raise ValueError('对话状态无效。')
+        if self.channel.capabilities.get('capture_mode')!=1:raise DeviceError('capture_mode_not_supported')
+        async with self._operation:return await self.channel.send('capture_progress',ticket=ticket,phase=phase)
+
+    async def capture_role_view(self, ticket, *, poll_interval=.1):
+        """Wait for the active voice session to visibly present the role."""
+        if type(ticket) is not int or not 0<ticket<=0xffffffff:raise ValueError('对话请求编号无效。')
+        if self.channel.capabilities.get('capture_voice_role')!=1:raise DeviceError('voice_role_not_supported')
+        async with asyncio.timeout(5):
+            while True:
+                async with self._operation:reply=await self.channel.send('capture_role_view',ticket=ticket)
+                status=reply.get('role_view') if isinstance(reply,dict) else None
+                if status=='visible':return
+                if status!='pending':raise DeviceError('invalid_voice_role_view')
+                await asyncio.sleep(poll_interval)
+
+    async def capture_role_play(self,ticket,action,duration_ms=0):
+        if (type(ticket) is not int or not 0<ticket<=0xffffffff or type(action) is not int or not 0<=action<=255 or
+            type(duration_ms) is not int or not (duration_ms==0 or 100<=duration_ms<=6000)):
+            raise ValueError('语音角色动作参数无效。')
+        if self.channel.capabilities.get('capture_voice_role')!=1:raise DeviceError('voice_role_not_supported')
+        async with self._operation:
+            reply=await self.channel.send('capture_role_play',ticket=ticket,action=action,duration_ms=duration_ms)
+        if not isinstance(reply,dict) or reply.get('action_status') not in ('started','busy','unavailable','unsupported'):
+            raise DeviceError('invalid_voice_role_result')
+        return reply
+
+    async def discard_capture(self, ticket):
+        """Discard a pending capture without transferring its audio to the computer."""
+        if type(ticket) is not int or not 0<ticket<=0xffffffff:raise ValueError('录音请求编号无效。')
+        if self.channel.capabilities.get('capture_pull')!=1:raise DeviceError('capture_not_supported')
+        async with self._capture, self._operation:return await self.channel.send('capture_finish',ticket=ticket)
+
+    async def queue_transcript(self, text, *, capture_ticket=None):
         """Queue recognized text for the device; acceptance does not prove display."""
         if not isinstance(text, str):
             raise ValueError("识别结果须为文字。")
@@ -238,10 +306,17 @@ class Client:
             raise ValueError("识别结果过长或包含无效字符。")
         if self.channel.capabilities.get("transcript_display") != 1:
             raise DeviceError("transcript_not_supported")
+        if capture_ticket is not None:
+            if type(capture_ticket) is not int or not 0<capture_ticket<=0xffffffff:
+                raise ValueError("录音请求编号无效。")
+            if self.channel.capabilities.get('capture_transcript_ticket')!=1:
+                raise DeviceError('capture_cancel_not_supported')
         async with self._operation:
             started = False
             try:
-                await self.channel.send("transcript_begin", bytes=len(encoded), crc32=zlib.crc32(encoded))
+                fields={'bytes':len(encoded),'crc32':zlib.crc32(encoded)}
+                if capture_ticket is not None:fields['ticket']=capture_ticket
+                await self.channel.send("transcript_begin", **fields)
                 started = True
                 for offset in range(0, len(encoded), 384):
                     await self.channel.send("transcript_chunk", offset=offset, data=encoded[offset:offset+384].hex())
@@ -252,30 +327,50 @@ class Client:
                         await self.channel.send("transcript_cancel")
                 raise
 
-    async def play_speech_pcm(self, pcm, *, poll_interval=.1):
+    async def play_speech_pcm(self, pcm, *, poll_interval=.1, read_ticket=None, capture_ticket=None):
         """Play 16 kHz mono PCM16, clearing the device buffer on failure."""
         if not isinstance(pcm,bytes) or not 0<len(pcm)<=160000 or len(pcm)%2:
             raise ValueError("语音音频须为不超过五秒的 16 kHz 单声道 PCM。")
         if self.channel.capabilities.get("speech_pcm") != 1:
             raise DeviceError("speech_not_supported")
-        async with self._operation:
+        if read_ticket is not None and capture_ticket is not None:
+            raise ValueError("一段语音只能绑定一个请求。")
+        if read_ticket is not None:
+            if type(read_ticket) is not int or not 0<read_ticket<=0xffffffff:
+                raise ValueError("朗读请求编号无效。")
+            if self.channel.capabilities.get("read_speech_ticket") != 1:
+                raise DeviceError("read_cancel_not_supported")
+        if capture_ticket is not None:
+            if type(capture_ticket) is not int or not 0 < capture_ticket <= 0xffffffff:
+                raise ValueError("录音请求编号无效。")
+            if self.channel.capabilities.get("capture_speech_ticket") != 1:
+                raise DeviceError("capture_speech_ticket_not_supported")
+        async with self._speech:
             started=False
             try:
-                await self.channel.send("speech_begin",bytes=len(pcm),crc32=zlib.crc32(pcm))
-                started=True
+                fields={"bytes":len(pcm),"crc32":zlib.crc32(pcm)}
+                if read_ticket is not None:fields["read_ticket"]=read_ticket
+                if capture_ticket is not None:fields["capture_ticket"]=capture_ticket
+                async with self._operation:
+                    await self.channel.send("speech_begin",**fields)
+                    started=True
                 for offset in range(0,len(pcm),384):
-                    await self.channel.send("speech_chunk",offset=offset,data=pcm[offset:offset+384].hex())
-                await self.channel.send("speech_commit")
+                    async with self._operation:
+                        await self.channel.send("speech_chunk",offset=offset,data=pcm[offset:offset+384].hex())
+                async with self._operation:
+                    await self.channel.send("speech_commit")
                 async with asyncio.timeout(15):
                     while True:
-                        result=await self.channel.send("speech_status")
+                        async with self._operation:
+                            result=await self.channel.send("speech_status")
                         status=result.get("speech_status")
                         if status=="finished":return {"status":"finished","duration_ms":round(len(pcm)/32)}
                         if status not in ("queued","playing"):raise DeviceError("speech_"+str(status))
                         await asyncio.sleep(poll_interval)
             except BaseException:
                 if started:
-                    with suppress(Exception):await self.channel.send("speech_cancel")
+                    with suppress(Exception):
+                        async with self._operation:await self.channel.send("speech_cancel")
                 raise
 
     async def read_request_take(self):
@@ -341,6 +436,15 @@ class Client:
             raise ValueError("额度来源无效。")
         async with self._operation:
             return await self.channel.send("quota_source", source=SOURCES.index(source))
+
+    async def voice_names(self, *, user_name=None, device_name=None):
+        from .voice_names import validate_voice_name
+        fields={}
+        if user_name is not None:fields['user_name']=validate_voice_name(user_name,empty_ok=True)
+        if device_name is not None:fields['device_name']=validate_voice_name(device_name,empty_ok=False)
+        if self.channel.capabilities.get('voice_names')!=1:raise DeviceError('voice_names_not_supported')
+        async with self._operation:
+            return await self.channel.send('voice_names',mode='set' if fields else 'status',**fields)
 
     async def dashboard_config(self, metric=None, *, rotation=None, interval=None):
         if self.channel.capabilities.get('dashboard_config')!=1:
@@ -510,6 +614,17 @@ class Client:
             # Older firmware rejects a valid event's ACK after its tap slot expires.
             if error.code != "unsupported_command":
                 raise
+
+    async def set_card_batch(self, batch, *, opened):
+        if not isinstance(batch, str) or not re.fullmatch(r"[0-9a-f]{16}", batch):
+            raise ValueError("Invalid card batch ID")
+        if self.channel.capabilities.get("card_batch_display") != 1:
+            return False
+        command = "card_batch_begin" if opened else "card_batch_end"
+        reply = await self.channel.send(command, batch=batch, timeout=5)
+        if reply.get("batch_open") is not opened:
+            raise DeviceError("invalid_card_batch_reply")
+        return True
 
     async def upload_file(self, path, source, *, expected_sha256=None, resume=None):
         """Transfer one file to the board's card, reporting a verified write."""

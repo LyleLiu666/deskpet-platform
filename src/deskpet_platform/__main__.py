@@ -98,6 +98,12 @@ def main():
     workbuddy.add_argument("--edition", choices=EDITIONS, default="workbuddy")
     commands.add_parser("notification-worker", help="在后台发送待处理的提醒")
     commands.add_parser("receiver-worker", help="在后台发送独立设备的提醒")
+    live = commands.add_parser("service", help="持续保持已配对搭搭在线并更新速度、电脑状态、额度、天气与提醒")
+    live.add_argument("--shared-config", type=Path, help="可选：共享提醒和额度来源的原设备配置")
+    live.add_argument("--usb-port", help="可选：已核验的 USB 备用串口")
+    live_probe = live.add_mutually_exclusive_group()
+    live_probe.add_argument("--token-probe", type=Path, help="AgentSpeedProbe 程序路径")
+    live_probe.add_argument("--no-token-probe", action="store_true", help="跳过实时 Token 测速")
     service = commands.add_parser("receiver-service", help="持续更新独立设备的数据和提醒")
     service.add_argument("--shared-config", type=Path, required=True, help="原设备配置，用于共享提醒和额度")
     service.add_argument("--token-probe", type=Path, help="AgentSpeedProbe 程序路径")
@@ -134,6 +140,21 @@ def main():
     if args.command == "receiver-worker":
         from .notifications import run_receiver_worker
         asyncio.run(run_receiver_worker(args.config))
+        return
+    if args.command == "service":
+        from .live_service import run_live_service
+        try:
+            asyncio.run(
+                run_live_service(
+                    args.config,
+                    shared_config=args.shared_config.expanduser().resolve() if args.shared_config else None,
+                    token_probe=args.token_probe.expanduser().resolve() if args.token_probe else None,
+                    no_token_probe=args.no_token_probe,
+                    usb_port=args.usb_port,
+                )
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            parser.exit(2, f"设备操作失败：{error}\n")
         return
     if args.command == "receiver-service":
         from .notifications import run_live_receiver

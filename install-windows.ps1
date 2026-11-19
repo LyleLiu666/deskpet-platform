@@ -42,5 +42,6 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
 }
 $executable = Join-Path $PSScriptRoot '.venv\Scripts\deskpet-platform.exe'
 if (-not (Test-Path -LiteralPath $executable)) { throw 'Installation finished without the DeskPet executable.' }
-Write-Host "Pair: & `"$executable`" pair"
-Write-Host "MCP:  & `"$executable`" mcp"
+Write-Host "Pair:    & `"$executable`" pair"
+Write-Host "Service: & `"$executable`" service"
+Write-Host "MCP:     & `"$executable`" mcp"

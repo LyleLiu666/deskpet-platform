@@ -18,4 +18,5 @@ else
     'Python 官方下载：https://www.python.org/downloads/macos/' >&2
   exit 2
 fi
-printf '配对命令：%q pair\nMCP 命令：%q mcp\n' "$PWD/.venv/bin/deskpet-platform" "$PWD/.venv/bin/deskpet-platform"
+printf '配对命令：%q pair\n常驻服务：%q service\nMCP 命令：%q mcp\n' \
+  "$PWD/.venv/bin/deskpet-platform" "$PWD/.venv/bin/deskpet-platform" "$PWD/.venv/bin/deskpet-platform"

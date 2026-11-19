@@ -31,10 +31,20 @@ def validate_text(text):
 async def synthesize_speech(text):
     """Send only the requested text to Edge TTS; never retain audio files."""
     import edge_tts
+    from aiohttp import ClientConnectionError, ClientError
+    from edge_tts.exceptions import EdgeTTSException
+
     text=validate_text(text)
     with tempfile.TemporaryDirectory(prefix='deskpet-speech-') as directory:
         source=Path(directory)/'speech.mp3';target=Path(directory)/'speech.wav'
-        await asyncio.wait_for(edge_tts.Communicate(text,VOICE).save(str(source)),30)
+        try:
+            try:
+                await asyncio.wait_for(edge_tts.Communicate(text,VOICE).save(str(source)),30)
+            except (ClientConnectionError, asyncio.TimeoutError):
+                # A fresh request rewrites the temporary file if the first stream was cut short.
+                await asyncio.wait_for(edge_tts.Communicate(text,VOICE).save(str(source)),15)
+        except (ClientError, EdgeTTSException, asyncio.TimeoutError):
+            raise RuntimeError('在线语音合成暂时不可用。') from None
         process=await asyncio.create_subprocess_exec('/usr/bin/afconvert','-f','WAVE','-d','LEI16@16000',
             '-c','1',str(source),str(target),stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL)
         try:await asyncio.wait_for(process.wait(),20)
