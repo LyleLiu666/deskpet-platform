@@ -201,4 +201,4 @@ claude mcp add --scope user deskpet -- "/绝对路径/.venv/bin/deskpet-platform
 ## 许可证与致谢
 
 - **DeskPet 许可证**：DeskPet 自有软件采用 [PolyForm Noncommercial 1.0.0](LICENSE) 许可证，允许非商业用途的使用、修改和分发；商业使用需另行获得授权。随附的客户端图标沿用[各自的许可证](src/deskpet_platform/assets/agent_icons/LICENSE)。
-- **Agent Speed 致谢**：本项目当前使用 [zoefix/agent-speed](https://github.com/zoefix/agent-speed/tree/29dffc4e6fbe1da435071e40781b1571dd45ac22) 的 `AgentSpeedProbe` 进行实时 Token 测速，并基于其 Swift 实现开发 Python 移植版（保留原项目的 MIT 许可证和版权声明；Python 移植版增加了测试与部分修复，目前仍在验证中）。感谢原项目作者的工作。
+- **Agent Speed 致谢**：桌面包使用 [Agent Speed 1.8.0](https://github.com/zoefix/agent-speed/releases/tag/v1.8.0) 的 `AgentSpeedProbe` 进行实时 Token 测速。基于 Swift 实现的 Python 移植版仍在验证中，并保留原项目的 MIT 许可证和版权声明。感谢原项目作者的工作。

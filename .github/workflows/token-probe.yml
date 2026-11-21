@@ -2,7 +2,7 @@ name: Build and verify Token probes
 on:
   workflow_dispatch:
   push:
-    branches: [main, 'codex/deskpet-probe-*']
+    branches: [main, dev]
     paths: ['tools/*token_probe.py', 'tools/bundle_desktop.py', 'tools/verify_desktop_bundle.py', '.github/workflows/token-probe.yml']
   pull_request:
     paths: ['tools/*token_probe.py', 'tools/bundle_desktop.py', 'tools/verify_desktop_bundle.py', '.github/workflows/token-probe.yml']

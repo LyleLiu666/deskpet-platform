@@ -14,7 +14,7 @@ from urllib.request import urlretrieve
 from verify_token_probe import verify
 
 
-AGENT_SPEED = "29dffc4e6fbe1da435071e40781b1571dd45ac22"
+AGENT_SPEED = "7b2d448ffff24343d9f70b66e8c23b88dc1d16f7"  # v1.8.0
 ZSTD_SHARP = "2cd0c019693bc786a5fe5c3be94e107b24e7267e"
 TARGETS = {
     ("Darwin", "arm64"): "macos-arm64",
@@ -65,7 +65,7 @@ def build(output, target, *, fixture_output=None):
     with tempfile.TemporaryDirectory(prefix="deskpet-probe-") as temporary:
         work = Path(temporary)
         source = fetch(work, "zoefix/agent-speed", AGENT_SPEED,
-                       "c652f6355496d4607fbda2c02acc213c1d4b6069c212952f8b1c914923add7e6")
+                       "eebd1098d8044864c642631ff643fd63495ba22d3a7fcae0436f2834426aca33")
         bundle = work / "bundle"
         notices = bundle / "licenses"
         notices.mkdir(parents=True)
