@@ -97,6 +97,9 @@ def verify(archive, fixture):
         subprocess.run([str(python), "-c", MCP_SMOKE, str(desktop), str(config)], cwd=root, env=env,
                        check=True, timeout=30)
         verify_probe(probe, fixture)
+        provider_check = Path(__file__).with_name("verify_provider_token_probe.py").resolve()
+        subprocess.run([str(python), str(provider_check), str(probe)], cwd=root, env=env,
+                       check=True, timeout=150)
 
 
 if __name__ == "__main__":

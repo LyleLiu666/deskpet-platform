@@ -119,6 +119,7 @@ tool_timeout_sec = 1200
 ### 1. Token 速度采集（`AgentSpeedProbe`）
 
 - **自动识别随包采集器**：搭搭首页右栏实时显示 Token 输出速率（`t/s`）、时间、活跃会话数与额度，底部折线图显示近期速度趋势。各系统桌面包已内置预编译的 `AgentSpeedProbe`，安装后默认自动启用，多台搭搭共用同一个采集进程。
+- **首页总速度**：Agent Speed 1.8.0 将 Devin CLI、Qoder IDE 和 Qoder CLI 的本地 Token 速度计入首页总值。Devin Desktop 使用本地 agent 时也会计入。Qoder CLI 自带模型需要开启用量记录（国服 `QODERCN_EXPOSE_TOKEN_USAGE=1`，国际版 `QODER_EXPOSE_TOKEN_USAGE=1`），自定义模型有用量记录时可直接采集。
 - **自定义或关闭采集器**：
   - 也可在启动 MCP 或后台服务时通过 `--token-probe <程序绝对路径>` 指定采集器，或将采集器放入设备配置目录的 `bin/` 下（优先于随包版本：Windows 依次查找 `bin/AgentSpeedProbe.exe` 和 `bin/AgentSpeed.Probe.exe`，macOS 和 Linux 查找 `bin/AgentSpeedProbe`）。
   - 启动时传入 `mcp --no-token-probe` 可关闭测速（配对、屏幕控制与消息提醒照常工作）。
