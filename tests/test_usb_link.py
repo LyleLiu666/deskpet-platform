@@ -5,14 +5,50 @@ import struct
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from deskpet_platform.card_upload import upload_usb
-from deskpet_platform.usb_link import MacSerial, UsbLink, UsbPort, read_usb_identity
+from deskpet_platform.usb_link import MacSerial, UsbLink, UsbPort, read_usb_identity, reset_native_usb
 
 TEST_PORT = "COM5" if sys.platform == "win32" else "/dev/cu.synthetic"
 
 class UsbLinkTests(unittest.IsolatedAsyncioTestCase):
+    def test_native_reset_checks_identity_after_open_and_never_asserts_dtr(self):
+        mac = "02:00:00:00:00:01"
+        good = SimpleNamespace(device=TEST_PORT, vid=0x303A, pid=0x1001, serial_number=mac)
+        bad = SimpleNamespace(device=TEST_PORT, vid=0x303A, pid=0x1001,
+                              serial_number="02:00:00:00:00:02")
+
+        class Board:
+            def open(self):
+                self.transitions = []
+                assert not self.dtr and not self.rts
+            def close(self):
+                self.closed = True
+
+        def sample(board):
+            board.transitions.append((board.dtr, board.rts))
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(UsbPort, "_identity", return_value=(5,)):
+            board = Board()
+            result = reset_native_usb(TEST_PORT, mac, serial_factory=lambda **_: board,
+                                      list_ports=lambda: [good], sleep=lambda _: sample(board),
+                                      lock_root=directory)
+            self.assertEqual(result, {"status": "reset_requested"})
+            self.assertEqual(board.transitions, [(False, True), (False, False)])
+            self.assertTrue(board.closed)
+
+            replacement = Board()
+            enumerations = iter(([good], [bad]))
+            with self.assertRaises(ValueError):
+                reset_native_usb(TEST_PORT, mac, serial_factory=lambda **_: replacement,
+                                 list_ports=lambda: next(enumerations),
+                                 sleep=lambda _: sample(replacement), lock_root=directory)
+            self.assertEqual(replacement.transitions, [])
+            self.assertTrue(replacement.closed)
+            self.assertFalse(replacement.rts)
+
     @unittest.skipUnless(sys.platform == "darwin", "macOS serial ioctl")
     def test_macos_serial_open_releases_both_reset_lines_together(self):
         import termios

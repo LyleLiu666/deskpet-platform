@@ -54,7 +54,7 @@ from .speed_burst import SpeedBurst
 from .role_install import valid_identity
 from .token_metrics import TokenMetrics
 from .usb_setup import probe_usb
-from .usb_link import UsbLink, UsbPort, find_usb_devices, read_usb_identity
+from .usb_link import UsbLink, UsbPort, find_usb_devices, read_usb_identity, reset_native_usb
 from .weather import fetch_relay_weather, fetch_weather
 from .speech import SpeechTooLong, split_speech, synthesize_speech, validate_text
 from .transcription import (
@@ -1391,9 +1391,64 @@ class BoardSession:
         async with self.lock:
             if self.client is None:
                 return {"status": "not_connected", "connection": self.snapshot}
-            if self.client.channel.capabilities.get("device_diagnostics") != 1:
+            capabilities = self.client.channel.capabilities
+            result = {}
+            legacy = capabilities.get("device_diagnostics") == 1
+            if capabilities.get("device_info") == 1:
+                try:
+                    info = await self.client.device_info()
+                except LINK_ERRORS:
+                    if not legacy:
+                        raise
+                else:
+                    self.device_info = (self.client, info)
+                    if info and "diagnostics" in info:
+                        self.snapshot["device_info"] = info
+                        result["diagnostics"] = info["diagnostics"]
+            if legacy:
+                result.update(await self.client.diagnostics(include_card=include_card))
+                return {"status": "ok", **result}
+            return {"status": "ok", **result} if result else {"status": "unsupported"}
+
+    async def restart(self):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("system_restart") != 1:
                 return {"status": "unsupported"}
-            return {"status": "ok", **await self.client.diagnostics(include_card=include_card)}
+            try:
+                return await self.client.restart()
+            except (AckTimeout, OSError):
+                return {"status": "unknown", "reason": "restart_ack_lost"}
+            except CommandRejected as error:
+                return {"status": "rejected", "reason": error.code}
+
+    async def recover_subsystem(self, target):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("subsystem_recover") != 1:
+                return {"status": "unsupported"}
+            try:
+                return await self.client.recover_subsystem(target)
+            except (AckTimeout, OSError):
+                return {"status": "unknown", "reason": "recovery_ack_lost"}
+            except CommandRejected as error:
+                return {"status": "rejected", "reason": error.code}
+
+    async def reset_usb(self, port, device_id):
+        async with self.storage_lock, self.lock:
+            config = DeviceConfig.load(self.path)
+            if config.device_id != device_id:
+                raise DeviceError("device_identity_mismatch")
+            await self.drop()
+            reset = asyncio.create_task(asyncio.to_thread(reset_native_usb, port, config.identity))
+            try:
+                return await asyncio.shield(reset)
+            except asyncio.CancelledError:
+                with suppress(OSError, RuntimeError, ValueError):
+                    await reset
+                raise
 
     async def select_network(self, ssid):
         async with self.lock:
@@ -2120,6 +2175,13 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
             raise ValueError("请提供已配对设备的持久 UUID。")
         return await sessions.resolve(device_id).set_usb_fallback(port, device_id)
 
+    @server.tool()
+    async def desk_usb_reset(port: str, device_id: str) -> dict[str, Any]:
+        """通过原生 ESP USB 串口应急复位指定小板。设备 UUID 必须已配对，USB 序列号须与 MAC 匹配。"""
+        if not valid_device_uuid(device_id):
+            raise ValueError("请提供已配对设备的持久 UUID。")
+        return await sessions.resolve(device_id).reset_usb(port, device_id)
+
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
     def desk_read_manual(topic: Manual = "operations") -> str:
         """读取操作手册、SDK 二次开发手册或自定义角色指南。制作、体验或安装角色请选择 roles。无需连接搭搭。"""
@@ -2175,6 +2237,17 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         """在时钟页编辑日期和时间。adjust 每次调一个字段，save 应用草稿，cancel 放弃修改。"""
         session = sessions.resolve(device_id)
         return await session.clock_edit(mode, field, step)
+
+    @server.tool()
+    async def desk_restart(device_id: str | None = None) -> dict[str, Any]:
+        """重启指定的已配对搭搭。accepted 表示已受理，重启结果可重新查询设备状态。"""
+        return await sessions.resolve(device_id).restart()
+
+    @server.tool()
+    async def desk_recover_subsystem(target: Literal["sd", "i2c", "audio", "wifi"],
+                                     device_id: str | None = None) -> dict[str, Any]:
+        """请求恢复卡、触摸总线、音频或 Wi-Fi。accepted 表示已受理，设备在系统页显示执行结果。"""
+        return await sessions.resolve(device_id).recover_subsystem(target)
 
     @server.tool()
     async def desk_set_view(page: Literal["role", "home", "clock", "settings", "roles", "photos", "weather", "messages"],

@@ -23,6 +23,49 @@ LARGE = dict(SMALL, role_photo_motion=1, role_video_timeline=1, role_burst_audio
 
 
 class MultiBoardContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restart_requires_capability_and_distinguishes_local_confirmation(self):
+        client = object.__new__(Client)
+        client._operation = asyncio.Lock()
+        client.channel = SimpleNamespace(capabilities={}, send=AsyncMock())
+        with self.assertRaisesRegex(DeviceError, "system_restart_not_supported"):
+            await client.restart()
+        client.channel.send.assert_not_awaited()
+        client.channel.capabilities["system_restart"] = 1
+        client.channel.send.return_value = {"status": "accepted", "boot": 12}
+        self.assertEqual(await client.restart(), {"status": "accepted", "boot": 12})
+        client.channel.send.assert_awaited_once_with("system_restart")
+        client.channel.send.reset_mock()
+        client.channel.send.return_value = {"status": "confirm_pending", "boot": 12}
+        self.assertEqual(await client.restart(confirm=True), {"status": "confirm_pending", "boot": 12})
+        client.channel.send.assert_awaited_once_with("system_restart", confirm=True)
+
+    async def test_device_info_exposes_only_valid_diagnostic_summary(self):
+        client = object.__new__(Client)
+        client._operation = asyncio.Lock()
+        info = {"board": "synthetic", "chip": "esp32s3", "profile": "core",
+                "partition_id": "synthetic-dual", "screen": [480, 320], "modules": ["core"]}
+        summary = {"reset_reason": "watchdog", "early_resets": 3, "safe_mode": True,
+                   "crash_present": True, "crash_pc": 0x42002000,
+                   "last_subsystem": {"target": "wifi", "status": "reconnecting"}}
+        client.channel = SimpleNamespace(capabilities={"device_info": 1}, send=AsyncMock())
+        client.channel.send.return_value = dict(info, diagnostics=dict(
+            summary, memory="synthetic", crash_lr=True,
+            last_subsystem=dict(summary["last_subsystem"], password="synthetic")))
+        self.assertEqual(await client.device_info(), dict(info, diagnostics=summary))
+        client.channel.send.return_value = dict(info, diagnostics=dict(summary, early_resets=True))
+        self.assertEqual(await client.device_info(), info)
+
+    async def test_diagnostics_refreshes_safe_mode_without_requiring_card_support(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / "device.json")
+            summary = {"reset_reason": "watchdog", "early_resets": 3, "safe_mode": True,
+                       "crash_present": False}
+            session.client = SimpleNamespace(channel=SimpleNamespace(capabilities={"device_info": 1}),
+                                             device_info=AsyncMock(return_value={"diagnostics": summary}))
+            result = await session.diagnostics(include_card=True)
+            self.assertEqual(result, {"status": "ok", "diagnostics": summary})
+            self.assertEqual(session.device_info, (session.client, {"diagnostics": summary}))
+
     async def test_device_info_is_opt_in_and_checks_geometry(self):
         client = object.__new__(Client)
         client._operation = asyncio.Lock()

@@ -43,12 +43,14 @@ P1,{"epoch":"demo","seq":4,"boot":4,"ok":true}
 | `cap_ext` | `capabilities_ext` | 返回 `hello` 容纳不下的扩展能力键值（值均为 `1`），由 `Channel.handshake()` 合并至 `channel.capabilities` |
 | `battery_status` | `heartbeat` 或 `state` | 新增 `battery` 对象，例如 `{"mv":3920,"percent":null,"power":"unknown","low":false}`。未知读数用 `null`。`power` 取 `unknown`、`battery`、`charging` 或 `external_full`，后两者须满足板端实测判定条件 |
 | `device_info`（扩展） | `device_info` | 沿用现有 `device_info: 1` 能力（不占用已用于 `network_status`/`card_status` 的 `device_diagnostics`）。电脑端白名单保留新增的 `diagnostics` 对象，例如 `{"reset_reason":"watchdog","early_resets":1,"safe_mode":false,"crash_present":true}`。`reset_reason` 是脱敏类别，无法识别时取 `unknown` |
-| `subsystem_recover` | `subsystem_recover`，`target` 取 `sd`、`i2c`、`audio` 或 `wifi` | `{"status":"accepted"}` 表示板端已受理。重连或重挂的效果另行检查 |
+| `subsystem_recover` | `subsystem_recover`，`target` 取 `sd`、`i2c`、`audio` 或 `wifi` | `{"status":"accepted"}` 表示板端已受理。用 `desk_diagnostics` 查看最近一次执行结果 |
 | `system_restart` | `system_restart`，可选布尔字段 `confirm` | 电脑端维护工具 `desk_restart` 省略 `confirm`（或传 `false`），板端有界收尾后直接软重启并返回 `{"status":"accepted"}`。语音工具触发时传 `confirm: true`（或由板载助手本地弹窗），板端在屏上弹出确认框并返回 `{"status":"confirm_pending"}`，须经用户在屏上实际点按确认后才重启 |
 | `music_control` | `music_control`，`action` 取 `status`、`play`、`pause`、`stop`、`prev`、`next` 或 `shuffle`。`play` 可带相对路径 `path` | 返回操作后的 `state`（`playing`、`paused`、`stopped`）、`path`、`title`、`position_ms`、`volume`（0–100）和 `shuffled`。空曲库时 `path`、`title` 为 `null`。查询以外的失败回包不得报告成功 |
 | `music_library` | `music_list`、`music_delete` | 见下节。导入须同时声明 `card_transfer`，复用已有上传及文件校验回执 |
 | `assistant_onboard` | `agent_config_begin`、`agent_config_part`、`agent_config_commit`、`agent_config_status` | 见配置更新示例。电脑端入口为 `desk_agent_config` |
 | `assistant_onboard` | `voice_permissions_set`，`enabled` 为完整工具名数组，例如 `{"enabled":["device_status"]}` | 板端在当前配对下完整保存后返回 `{"applied":true}`。空数组撤销全部授权。新配对同步前默认全关 |
+
+诊断摘要有可选的 `crash_pc` 和 `crash_lr`，分别为有效的崩溃指令地址和返回地址，采用无符号 32 位整数。可选的 `last_subsystem` 记录本次启动后最近一次完成的子系统操作，包含 `target` 和 `status`。状态取 `busy`、`failed`、`recovered` 或 `reconnecting`。Wi-Fi 的 `reconnecting` 表示已开始重连，连接结果仍由网络状态确认。安全模式可只提供 `device_info` 摘要。
 
 ## 曲库、路径规范、分页与删除
 

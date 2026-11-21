@@ -154,6 +154,46 @@ def find_usb_devices(ports, device_id=None):
     return {"devices": devices, "unavailable": unavailable}
 
 
+def reset_native_usb(port, identity, *, serial_factory=default_serial_factory,
+                     list_ports=None, sleep=time.sleep, lock_root=None):
+    """Pulse RTS only on a native Espressif USB interface with the expected serial."""
+    if not isinstance(identity, str) or not DEVICE_ID.fullmatch(identity):
+        raise ValueError("请提供已配对小板的 MAC 地址。")
+    if list_ports is None:
+        from serial.tools.list_ports import comports
+        list_ports = comports
+    registration = UsbPort.register(port)
+    expected_serial = identity.replace(":", "").lower()
+
+    def verify():
+        registration.verify()
+        matches = [item for item in list_ports() if item.device.casefold() == port.casefold()]
+        if len(matches) == 1:
+            item = matches[0]
+            actual_serial = (item.serial_number or "").replace(":", "").lower()
+            if (item.vid, item.pid) == (0x303A, 0x1001) and actual_serial == expected_serial:
+                return
+        raise ValueError("USB 设备类型或序列号与已配对小板不匹配。")
+
+    with DeviceLock(identity, lock_root):
+        verify()
+        device = serial_factory(port=None, baudrate=115200, timeout=0.25,
+                                write_timeout=1, exclusive=True)
+        try:
+            device.port, device.dtr, device.rts = registration.path, False, False
+            device.open()
+            verify()
+            try:
+                device.rts = True
+                sleep(0.2)
+            finally:
+                device.rts = False
+            sleep(0.2)
+        finally:
+            device.close()
+    return {"status": "reset_requested"}
+
+
 class UsbLink:
     wireless = False
     peer_address = None

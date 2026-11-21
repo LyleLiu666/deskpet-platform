@@ -29,6 +29,8 @@ DEFAULT_SCREEN_PAGES = ("role", "home", "clock", "photos")
 DASHBOARD_METRICS = ("speed", "quota", "computer", "auto", "weather")
 DASHBOARD_ROTATION = ("speed", "quota", "computer", "weather")
 DASHBOARD_INTERVALS = (5, 10, 20, 30, 60)
+RECOVERY_TARGETS = ("sd", "i2c", "audio", "wifi")
+RECOVERY_STATUSES = ("busy", "failed", "recovered", "reconnecting")
 
 def _appearance_theme(value):
     if not isinstance(value,str):raise ValueError('主题须为名称或 JSON 文件名。')
@@ -112,7 +114,53 @@ class Client:
             raise DeviceError("invalid_device_info")
         fields = (*names, "screen", "modules", "firmware_version", "build_revision",
                   "ota_slots", "active_slot", "boot_slot", "ota_state", "bootloader_rollback")
-        return {field: reply[field] for field in fields if field in reply}
+        info = {field: reply[field] for field in fields if field in reply}
+        diagnostics = reply.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            reason = diagnostics.get("reset_reason")
+            count = diagnostics.get("early_resets")
+            if (reason in ("unknown", "power_on", "external", "software", "panic", "watchdog",
+                           "deep_sleep", "brownout", "cpu_lockup", "usb")
+                    and type(count) is int and 0 <= count <= 255
+                    and type(diagnostics.get("safe_mode")) is bool
+                    and type(diagnostics.get("crash_present")) is bool):
+                diagnostic_fields = ("reset_reason", "early_resets", "safe_mode", "crash_present")
+                summary = {field: diagnostics[field] for field in diagnostic_fields}
+                if summary["crash_present"]:
+                    for field in ("crash_pc", "crash_lr"):
+                        address = diagnostics.get(field)
+                        if type(address) is int and 0 < address <= 0xffffffff:
+                            summary[field] = address
+                subsystem = diagnostics.get("last_subsystem")
+                if (isinstance(subsystem, dict) and subsystem.get("target") in RECOVERY_TARGETS
+                        and subsystem.get("status") in RECOVERY_STATUSES):
+                    summary["last_subsystem"] = {"target": subsystem["target"], "status": subsystem["status"]}
+                info["diagnostics"] = summary
+        return info
+
+    async def restart(self, *, confirm=False):
+        if self.channel.capabilities.get("system_restart") != 1:
+            raise DeviceError("system_restart_not_supported")
+        if type(confirm) is not bool:
+            raise ValueError("confirm must be a boolean")
+        async with self._operation:
+            fields = {"confirm": True} if confirm else {}
+            reply = await self.channel.send("system_restart", **fields)
+        expected = "confirm_pending" if confirm else "accepted"
+        if reply.get("status") != expected:
+            raise DeviceError("invalid_system_restart_reply")
+        return {"status": expected, "boot": reply["boot"]}
+
+    async def recover_subsystem(self, target):
+        if self.channel.capabilities.get("subsystem_recover") != 1:
+            raise DeviceError("subsystem_recover_not_supported")
+        if target not in RECOVERY_TARGETS:
+            raise ValueError("请指定 sd、i2c、audio 或 wifi。")
+        async with self._operation:
+            reply = await self.channel.send("subsystem_recover", target=target)
+        if reply.get("status") != "accepted":
+            raise DeviceError("invalid_subsystem_recover_reply")
+        return {"status": "accepted", "target": target, "boot": reply["boot"]}
 
     async def render_metrics(self, *, reset=False):
         if self.channel.capabilities.get("render_metrics") != 1:
