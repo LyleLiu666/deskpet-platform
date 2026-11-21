@@ -50,6 +50,7 @@ class Channel:
     async def handshake(self):
         async with self.lock:
             self.online=False
+            self.capabilities={}
             while not self.events.empty():self.events.get_nowait()
             self.epoch=uuid.uuid4().hex
             self.seq=0
@@ -58,6 +59,18 @@ class Channel:
             if response.get('mac')!=self.expected_mac or response.get('protocol')!=1 or response.get('rx_bytes',0)<2048:
                 raise DeviceError('identity_mismatch: unsupported device or receive capacity')
             self.boot=response['boot']
+            if type(response.get('cap_ext')) is int and response['cap_ext'] == 1:
+                extension = await self._exchange('capabilities_ext', {})
+                additions = {}
+                for name, value in extension.items():
+                    if name in ('epoch', 'seq', 'boot', 'ok'):
+                        continue
+                    if (name in ('type', 'mac', 'protocol', 'rx_bytes', 'device_id', 'cap_ext', 'error', 'stage')
+                            or type(value) is not int or value != 1
+                            or (name in response and (type(response[name]) is not int or response[name] != value))):
+                        raise DeviceError('invalid_capabilities_ext')
+                    additions[name] = value
+                response.update(additions)
             self.capabilities=response
             self.online=True
             return response

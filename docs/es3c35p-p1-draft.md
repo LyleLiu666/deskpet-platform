@@ -13,6 +13,8 @@ ES3C35P 现有 `hello` 回包在最坏合法头部（48 字节 `epoch`、10 位 
 1. 新固件在 `hello` 回包中保持现有基础能力不变，仅新增 `"cap_ext":1`（占 12 字节，最坏总长 **1145 字节 ≤ 1152 字节**）。旧电脑端忽略未知字段 `cap_ext`，已有功能不受影响。
 2. 新电脑端在 `Channel.handshake()` 收到 `hello` 后，若 `response.get("cap_ext") == 1`，在同一握手锁内立即发送 `capabilities_ext`，将返回的扩展能力字典合并进 `channel.capabilities` 后再置 `online = True`。旧固件未声明 `cap_ext` 时不发送该请求。
 
+扩展响应沿用同一连接和启动编号。扩展能力值为整数 1。基础与扩展都出现的能力可以合并，值须一致。设备身份和协议版本仅取自 `hello`。扩展响应校验失败时，电脑端结束本次握手并保持离线。
+
 ```text
 P1,{"epoch":"demo","seq":1,"type":"hello"}
 P1,{"epoch":"demo","seq":1,"boot":4,"type":"capabilities","mac":"ec:d6:1b:3b:25:40","protocol":1,"rx_bytes":2048,"token_stats":1,"device_info":1,"cap_ext":1,"ok":true}
