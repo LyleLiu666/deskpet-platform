@@ -27,7 +27,7 @@ from .adaptive_speed.config import Config as SpeedConfig
 from .adaptive_speed.history import Frame, History
 from .adaptive_speed.runtime import AdaptiveRuntime
 from .agent_speed_probe import AgentSpeedProbe, find_installed_probe
-from .card_upload import MAX_FILE_BYTES, validate_path
+from .card_upload import MAX_FILE_BYTES, MUSIC_DIRECTORIES, validate_music_path, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
 from .device_lock import DeviceBusyError
 from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS, DASHBOARD_ROTATION, DASHBOARD_INTERVALS, _appearance_theme, _appearance_wallpaper
@@ -1573,7 +1573,8 @@ class BoardSession:
                 return {"status": "connection_changed", "completed": [], "connection": self.snapshot}
             if client.channel.capabilities.get('card_restricted_paths')==1:
                 def supported(path):
-                    return (client.channel.capabilities.get('photo_jpeg_upload')==1 and re.fullmatch(r'photos/p-[0-9a-f]{16}\.jpg',path) or
+                    return (client.channel.capabilities.get('music_library') == 1 and path.startswith(MUSIC_DIRECTORIES) or
+                            client.channel.capabilities.get('photo_jpeg_upload')==1 and re.fullmatch(r'photos/p-[0-9a-f]{16}\.jpg',path) or
                             client.channel.capabilities.get('wallpaper_jpeg_upload')==1 and re.fullmatch(r'wallpapers/[A-Za-z0-9][A-Za-z0-9_-]{0,23}-[0-9a-f]{16}\.jpg',path) or
                             client.channel.capabilities.get('theme_json_upload')==1 and re.fullmatch(r'themes/[A-Za-z0-9][A-Za-z0-9_-]{0,23}-[0-9a-f]{16}\.json',path))
                 if any(not supported(path) for _,path in checked):
@@ -1933,6 +1934,46 @@ class BoardSession:
             if self.client is None:return {'status':'not_connected','connection':self.snapshot}
             if self.client.channel.capabilities.get('wallpaper_list')!=1:return {'status':'unsupported'}
             return await self.client.list_wallpapers(cursor)
+
+    async def music_control(self, action, path):
+        async with self.lock:
+            if self.client is None:
+                return {"status": "not_connected", "connection": self.snapshot}
+            if self.client.channel.capabilities.get("music_control") != 1:
+                return {"status": "unsupported"}
+            try:
+                return {"status": "ok", **await self.client.music_control(action, path=path)}
+            except (AckTimeout, OSError):
+                return {"status": "unknown", "reason": "music_ack_lost"}
+            except CommandRejected as error:
+                return {"status": "rejected", "reason": error.code}
+
+    async def music_library(self, action, path, source):
+        client = self.client
+        if client is None:
+            return {"status": "not_connected", "connection": self.snapshot}
+        if client.channel.capabilities.get("music_library") != 1:
+            return {"status": "unsupported"}
+        if action == "import" and source:
+            destination = path if path is not None else f"music/{Path(source).name}"
+            validate_music_path(destination)
+            return await self.upload_files([CardFile(source=source, path=destination)], expected_client=client)
+        if action == "list" and path is None and source is None:
+            async with self.lock:
+                if self.client is not client:
+                    return {"status": "connection_changed"}
+                return {"status": "ok", "items": [{"path": name} for name in await client.list_music()]}
+        if action == "delete" and path is not None and source is None:
+            async with self.storage_lock, self.lock:
+                if self.client is not client:
+                    return {"status": "connection_changed"}
+                try:
+                    return {"status": "ok", "path": path, "deleted": await client.delete_music(path)}
+                except (AckTimeout, OSError):
+                    return {"status": "unknown", "reason": "music_ack_lost"}
+                except CommandRejected as error:
+                    return {"status": "rejected", "reason": error.code}
+        raise ValueError("导入须提供本机绝对路径，删除须提供曲库返回的歌曲路径。")
 
     async def add_photo(self, source):
         path = Path(source).expanduser()
@@ -2304,6 +2345,22 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     async def desk_add_theme(source: str, name: str = 'theme', device_id: str | None = None) -> dict[str, Any]:
         """导入设备配色 JSON；名称可用 1 至 24 位英文字母、数字、下划线或连字符。设备校验可读性。"""
         return await sessions.resolve(device_id).add_theme(source,name)
+
+    @server.tool()
+    async def desk_music_control(
+        action: Literal["status", "play", "pause", "stop", "prev", "next", "shuffle"] = "status",
+        path: str | None = None, device_id: str | None = None,
+    ) -> dict[str, Any]:
+        """查询或控制音乐。play 可指定歌曲路径。shuffle 会保存新顺序，整份列表播完后停止。"""
+        return await sessions.resolve(device_id).music_control(action, path)
+
+    @server.tool()
+    async def desk_music_library(
+        action: Literal["list", "import", "delete"] = "list", path: str | None = None,
+        source: str | None = None, device_id: str | None = None,
+    ) -> dict[str, Any]:
+        """按播放顺序列歌、从本机绝对路径导入 MP3 或 FLAC，或按列表返回的完整路径删除指定歌曲。"""
+        return await sessions.resolve(device_id).music_library(action, path, source)
 
     @server.tool()
     async def desk_add_photo(source: str, device_id: str | None = None) -> dict[str, Any]:

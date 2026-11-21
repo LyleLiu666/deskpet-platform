@@ -19,6 +19,7 @@ from .channel import AckTimeout, CommandRejected, DeviceError
 
 MAX_FILE_BYTES = 128 * 1024 * 1024
 BACKGROUND_RECEIPT_GRACE = 60
+MUSIC_DIRECTORIES = ("music/", "media/")
 
 
 def transfer_timeout(size, *, background):
@@ -27,7 +28,22 @@ def transfer_timeout(size, *, background):
     return max(300, 60 + math.ceil(size / bytes_per_second))
 
 
+def validate_music_path(path):
+    if not isinstance(path, str) or not path.startswith(MUSIC_DIRECTORIES):
+        raise ValueError("请指定 music/ 或 media/ 下的 MP3 或 FLAC 文件。")
+    name = path[6:]
+    try:
+        length = len(name.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ValueError("歌曲名须使用有效的 UTF-8 字符。") from error
+    if (not 1 <= length <= 120 or name.startswith(".") or not name.lower().endswith((".mp3", ".flac"))
+            or any(ord(char) < 32 or ord(char) == 127 or char in '/\\<>:"|?*' for char in name)):
+        raise ValueError("歌曲名须为有效的 MP3 或 FLAC 文件名，最长 120 字节。")
+
+
 def validate_path(path):
+    if isinstance(path, str) and path.startswith(MUSIC_DIRECTORIES):
+        return validate_music_path(path)
     if not isinstance(path, str) or len(path) > 110 or not path.startswith(("roles/", "desk/", "photos/", "themes/", "wallpapers/")):
         raise ValueError("储存卡路径无效。")
     if any(not part or part.startswith(".") or part.lower().endswith((".upload", ".previous", ".removing")) or
@@ -113,7 +129,7 @@ class CardRelay:
 def encrypt_file(source, destination, key, iv, path, size, crc):
     derived = hmac.new(key, b"desk-card-v1/key", hashlib.sha256).digest()
     encryptor = Cipher(algorithms.AES(derived), modes.GCM(iv)).encryptor()
-    encryptor.authenticate_additional_data(f"desk-card-v1\n{path}\n{size}\n{crc:08x}".encode("ascii"))
+    encryptor.authenticate_additional_data(f"desk-card-v1\n{path}\n{size}\n{crc:08x}".encode("utf-8"))
     digest, actual_size, actual_crc = hashlib.sha256(), 0, 0
     with source.open("rb") as input_file, destination.open("wb") as output_file:
         while chunk := input_file.read(256 * 1024):

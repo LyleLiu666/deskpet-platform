@@ -1128,6 +1128,7 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                                                  "desk_token_status", "desk_speed_windows", "desk_set_role_auto",
                                                  "desk_diagnostics", "desk_select_network", "desk_restart",
                                                  "desk_usb_reset", "desk_recover_subsystem",
+                                                 "desk_music_control", "desk_music_library",
                                                  "desk_pair_begin", "desk_pair_usb", "desk_pair_status", "desk_upload_files", "desk_delete_resource",
                                                  "desk_create_role_example", "desk_check_role", "desk_install_role", "desk_select_role", "desk_role_preview", "desk_list_actions", "desk_play_action", "desk_action_status", "desk_set_role_base",
                                                  "desk_list_roles", "desk_list_role_sources", "desk_wait_touch", "desk_show_image", "desk_clear_image",

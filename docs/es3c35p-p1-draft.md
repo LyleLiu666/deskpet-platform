@@ -56,9 +56,9 @@ P1,{"epoch":"demo","seq":4,"boot":4,"ok":true}
 
 1. **目录映射与路径格式：**
    - 协议层相对路径统一使用小写前缀 `music/<文件名>` 和 `media/<文件名>`；板端与主机测试将其映射到储存卡根目录下的 `Music/` 和 `Media/` 目录（与现有 `photos/` 映射 `/sdcard/Photos`、`wallpapers/` 映射 `/sdcard/Wallpapers` 一致）。
-   - 仅接受受控目录下的单个 `.mp3` 或 `.flac` 文件（不区分扩展名大小写，拒绝子目录及 `.wav` 等其他格式）。
+   - 仅接受受控目录下的单个 `.mp3` 或 `.flac` 文件（不区分扩展名大小写，拒绝子目录及 `.wav` 等其他格式）。两目录合计最多 256 首，满额时导入返回 `music_library_full`。同一路径已有不同内容时返回 `music_immutable`。
 2. **文件名字符集、加密 AAD 与长度限制：**
-   - 为支持真实中文歌名与空格，电脑端 `card_upload.py` 与固件 `deskpet_card.c` 对 `music/`、`media/` 分支放宽为允许有效 UTF-8 文件名：禁止包含 `/`、`\`、NUL、控制字符（码点 `< 32` 或 `127`），禁止以 `.` 开头或以 `.` 结尾，禁止使用 `.upload`、`.previous`、`.removing` 保留后缀。
+   - 电脑端和固件均接受有效 UTF-8 文件名。文件名须符合 TF 卡文件系统规则，禁止路径分隔符、控制字符（码点小于 32 或等于 127）、`< > : " | ? *`、点号头尾以及 `.upload`、`.previous`、`.removing` 保留后缀。
    - 单个文件名的 UTF-8 字节长度须为 **1–120 字节**（保证经 `channel.py` 的 `ensure_ascii=True` 转义为 `\uXXXX` 后，单条 `music_delete` 或 `music_control` 请求整行仍远低于 1024 字节）。
    - `card_upload.py` 与 `deskpet_card.c` 的 AES-GCM 附加认证数据（`desk-card-v1\n{path}\n{size}\n{crc:08x}`）统一按 **UTF-8** 字节编码计算（对既有纯 ASCII 路径完全兼容）。
 3. **分页与游标失效：**

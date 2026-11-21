@@ -16,7 +16,7 @@ from contextlib import suppress
 from PIL import Image, ImageDraw, ImageFont
 
 from .adaptive_speed.config import Config as SpeedConfig
-from .card_upload import upload_file, upload_usb, validate_path
+from .card_upload import MUSIC_DIRECTORIES, upload_file, upload_usb, validate_music_path, validate_path
 from .channel import Channel, CommandRejected, DeviceError, TextNotVisible
 from .image_display import prepare_image
 from .pairing import DeviceConfig, valid_device_uuid
@@ -31,6 +31,7 @@ DASHBOARD_ROTATION = ("speed", "quota", "computer", "weather")
 DASHBOARD_INTERVALS = (5, 10, 20, 30, 60)
 RECOVERY_TARGETS = ("sd", "i2c", "audio", "wifi")
 RECOVERY_STATUSES = ("busy", "failed", "recovered", "reconnecting")
+MUSIC_ACTIONS = ("status", "play", "pause", "stop", "prev", "next", "shuffle")
 
 def _appearance_theme(value):
     if not isinstance(value,str):raise ValueError('主题须为名称或 JSON 文件名。')
@@ -161,6 +162,79 @@ class Client:
         if reply.get("status") != "accepted":
             raise DeviceError("invalid_subsystem_recover_reply")
         return {"status": "accepted", "target": target, "boot": reply["boot"]}
+
+    async def music_control(self, action="status", *, path=None):
+        if self.channel.capabilities.get("music_control") != 1:
+            raise DeviceError("music_control_not_supported")
+        if action not in MUSIC_ACTIONS or (path is not None and action != "play"):
+            raise ValueError("只有播放操作可指定歌曲路径。")
+        if path is not None:
+            validate_music_path(path)
+        fields = {"path": path} if path is not None else {}
+        async with self._operation:
+            result = await self.channel.send("music_control", action=action, **fields)
+        names = ("state", "path", "title", "position_ms", "volume", "shuffled")
+        if any(name not in result for name in names):
+            raise DeviceError("invalid_music_control_reply")
+        if (result["state"] not in ("playing", "paused", "stopped")
+                or type(result["position_ms"]) is not int or result["position_ms"] < 0
+                or type(result["volume"]) is not int or not 0 <= result["volume"] <= 100
+                or type(result["shuffled"]) is not bool
+                or (result["title"] is not None and not isinstance(result["title"], str))):
+            raise DeviceError("invalid_music_control_reply")
+        if result["path"] is not None:
+            try:
+                validate_music_path(result["path"])
+            except ValueError as error:
+                raise DeviceError("invalid_music_control_reply") from error
+        return {name: result[name] for name in names}
+
+    async def list_music(self):
+        if self.channel.capabilities.get("music_library") != 1:
+            raise DeviceError("music_library_not_supported")
+        async with self._operation:
+            for attempt in range(3):
+                try:
+                    return await self._music_pages()
+                except CommandRejected as error:
+                    if error.code != "stale_cursor" or attempt == 2:
+                        raise
+
+    async def _music_pages(self):
+        paths, seen, cursors = [], set(), set()
+        cursor = None
+        while True:
+            fields = {"cursor": cursor} if cursor is not None else {}
+            result = await self.channel.send("music_list", **fields)
+            items = result.get("items")
+            if not isinstance(items, list) or len(paths) + len(items) > 256 or "next_cursor" not in result:
+                raise DeviceError("invalid_music_list_reply")
+            for item in items:
+                path = item.get("path") if isinstance(item, dict) else None
+                try:
+                    validate_music_path(path)
+                except ValueError as error:
+                    raise DeviceError("invalid_music_list_reply") from error
+                if path in seen:
+                    raise DeviceError("invalid_music_list_reply")
+                seen.add(path)
+                paths.append(path)
+            cursor = result["next_cursor"]
+            if cursor is None:
+                return paths
+            if not items or not isinstance(cursor, str) or not 1 <= len(cursor) <= 64 or cursor in cursors:
+                raise DeviceError("invalid_music_list_reply")
+            cursors.add(cursor)
+
+    async def delete_music(self, path):
+        if self.channel.capabilities.get("music_library") != 1:
+            raise DeviceError("music_library_not_supported")
+        validate_music_path(path)
+        async with self._upload, self._operation:
+            result = await self.channel.send("music_delete", path=path)
+        if type(result.get("deleted")) is not bool:
+            raise DeviceError("invalid_music_delete_reply")
+        return result["deleted"]
 
     async def render_metrics(self, *, reset=False):
         if self.channel.capabilities.get("render_metrics") != 1:
@@ -699,6 +773,9 @@ class Client:
         """Transfer one file to the board's card, reporting a verified write."""
         if self.channel.capabilities.get("card_transfer") != 1:
             raise DeviceError("card_transfer_not_supported")
+        if isinstance(path, str) and path.startswith(MUSIC_DIRECTORIES):
+            if self.channel.capabilities.get("music_library") != 1:
+                raise DeviceError("music_library_not_supported")
         if self.channel.capabilities.get("card_usb") == 1:
             async with self._operation:
                 return await upload_usb(self.channel, path, source, expected_sha256=expected_sha256)
@@ -714,7 +791,7 @@ class Client:
             raise DeviceError("card_delete_not_supported")
         validate_path(path)
         directory, name = path.split("/", 1)
-        if (path.endswith(".") or "./" in path or
+        if (directory in ("music", "media") or path.endswith(".") or "./" in path or
                 (directory == "roles" and not valid_identity(name)) or
                 (directory == "photos" and not re.fullmatch(r"p-[0-9a-f]{16}", name))):
             raise ValueError("请指定完整角色、相册照片，或 desk 下的单个文件。")
