@@ -1,0 +1,98 @@
+# ES3C35P 可选 P1 能力（协议评审稿）
+
+此文供电脑端与固件共同评审。切页、相册控制和 P1 公共字段沿用现有协议。下文的扩展能力握手、音乐、诊断、电池和板载助手消息是拟新增或扩展的接口，验收通过后由固件在握手中逐项声明。电脑端只对能力值为 1 的设备开放对应入口。
+
+## 消息格式与握手容量（1024 / 1152 字节边界）
+
+请求和回包均为一行 `P1,` 加 JSON 和换行。请求携带当前连接的 `epoch`、递增的 `seq` 和命令 `type`。回包原样带回 `epoch`、`seq`，并带当前启动编号 `boot`、布尔值 `ok`。失败回包给出字符串 `error`。按最终编码计算，包含前缀和换行的请求最多 **1024 字节**，回包最多 **1152 字节**。示例使用合成数据。[电脑端编解码](../src/deskpet_platform/channel.py)
+
+### 扩展能力握手（`cap_ext` 与 `capabilities_ext`）
+
+ES3C35P 现有 `hello` 回包在最坏合法头部（48 字节 `epoch`、10 位 `seq`/`boot`）并裁剪 `role1_required`、`dashboard_interval`、`dashboard_rotation` 三个可选字段后已达 **1133 字节**，仅余 19 字节，无法直接塞入 Base 语音子能力与本次新增能力。为同时满足 1152 字节上限与「旧电脑端 × 新固件」「新电脑端 × 旧固件」「新电脑端 × 新固件」三向兼容：
+
+1. 新固件在 `hello` 回包中保持现有基础能力不变，仅新增 `"cap_ext":1`（占 12 字节，最坏总长 **1145 字节 ≤ 1152 字节**）。旧电脑端忽略未知字段 `cap_ext`，已有功能不受影响。
+2. 新电脑端在 `Channel.handshake()` 收到 `hello` 后，若 `response.get("cap_ext") == 1`，在同一握手锁内立即发送 `capabilities_ext`，将返回的扩展能力字典合并进 `channel.capabilities` 后再置 `online = True`。旧固件未声明 `cap_ext` 时不发送该请求。
+
+```text
+P1,{"epoch":"demo","seq":1,"type":"hello"}
+P1,{"epoch":"demo","seq":1,"boot":4,"type":"capabilities","mac":"ec:d6:1b:3b:25:40","protocol":1,"rx_bytes":2048,"token_stats":1,"device_info":1,"cap_ext":1,"ok":true}
+P1,{"epoch":"demo","seq":2,"type":"capabilities_ext"}
+P1,{"epoch":"demo","seq":2,"boot":4,"dashboard_rotation":1,"dashboard_interval":1,"screen_views":1,"photo_album":1,"battery_status":1,"subsystem_recover":1,"system_restart":1,"music_control":1,"music_library":1,"assistant_onboard":1,"ok":true}
+```
+
+### 复用现有 Base 切页与相册协议
+
+- **切页（`open_page`）：** 依赖现有 `screen_views: 1`，调用 `screen_view`。例如临时打开首页时 `page` 取现有页面表中 `home` 的编号 `1`，并传 `make_default: false`。消息详情和列表使用独立的 `message_view` 能力；仅声明 `message_view` 时，电脑端隐藏通用切页工具。[切页实现与页面表](../src/deskpet_platform/client.py)
+- **相册与轮播（`photo_slideshow` 工具）：** 直接复用现有 `photo_album: 1` 能力与 `photo_album` 命令（`mode` 支持 `status`、`grid`、`open`、`previous`、`next`、`play`、`pause`、`interval`，轮播间隔 `seconds` 取 `5`、`10` 或 `15`），不另造新协议命令。
+
+```text
+P1,{"epoch":"demo","seq":3,"type":"screen_view","page":1,"make_default":false}
+P1,{"epoch":"demo","seq":3,"boot":4,"ok":true}
+P1,{"epoch":"demo","seq":4,"type":"photo_album","mode":"play"}
+P1,{"epoch":"demo","seq":4,"boot":4,"ok":true}
+```
+
+## 新增与扩展命令汇总
+
+以下表格仅列命令和业务字段。公共字段与错误格式均按上例处理。设备未知命令沿用 `unsupported`，字段不合法返回 `invalid_fields`，资源被占用返回 `busy`。状态查询可在重连后重读。切歌、打乱、恢复子系统和重启的回执丢失时，电脑端提示结果未知，由用户决定下一步。
+
+| 能力 | 请求 | 成功回包业务字段 |
+| --- | --- | --- |
+| `cap_ext` | `capabilities_ext` | 返回 `hello` 容纳不下的扩展能力键值（值均为 `1`），由 `Channel.handshake()` 合并至 `channel.capabilities` |
+| `battery_status` | `heartbeat` 或 `state` | 新增 `battery` 对象，例如 `{"mv":3920,"percent":null,"power":"unknown","low":false}`。未知读数用 `null`。`power` 取 `unknown`、`battery`、`charging` 或 `external_full`，后两者须满足板端实测判定条件 |
+| `device_info`（扩展） | `device_info` | 沿用现有 `device_info: 1` 能力（不占用已用于 `network_status`/`card_status` 的 `device_diagnostics`）。电脑端白名单保留新增的 `diagnostics` 对象，例如 `{"reset_reason":"watchdog","early_resets":1,"safe_mode":false,"crash_present":true}`。`reset_reason` 是脱敏类别，无法识别时取 `unknown` |
+| `subsystem_recover` | `subsystem_recover`，`target` 取 `sd`、`i2c`、`audio` 或 `wifi` | `{"status":"accepted"}` 表示板端已受理。重连或重挂的效果另行检查 |
+| `system_restart` | `system_restart`，可选布尔字段 `confirm` | 电脑端维护工具 `desk_restart` 省略 `confirm`（或传 `false`），板端有界收尾后直接软重启并返回 `{"status":"accepted"}`。语音工具触发时传 `confirm: true`（或由板载助手本地弹窗），板端在屏上弹出确认框并返回 `{"status":"confirm_pending"}`，须经用户在屏上实际点按确认后才重启 |
+| `music_control` | `music_control`，`action` 取 `status`、`play`、`pause`、`stop`、`prev`、`next` 或 `shuffle`。`play` 可带相对路径 `path` | 返回操作后的 `state`（`playing`、`paused`、`stopped`）、`path`、`title`、`position_ms`、`volume`（0–100）和 `shuffled`。空曲库时 `path`、`title` 为 `null`。查询以外的失败回包不得报告成功 |
+| `music_library` | `music_list`、`music_delete` | 见下节。导入须同时声明 `card_transfer`，复用已有上传及文件校验回执 |
+| `assistant_onboard` | `agent_config_begin`、`agent_config_part`、`agent_config_commit`、`agent_config_status` | 见配置更新示例。电脑端入口为 `desk_agent_config` |
+| `assistant_onboard` | `voice_permissions_set`，`enabled` 为完整工具名数组，例如 `{"enabled":["device_status"]}` | 板端在当前配对下完整保存后返回 `{"applied":true}`。空数组撤销全部授权。新配对同步前默认全关 |
+
+## 曲库、路径规范、分页与删除
+
+1. **目录映射与路径格式：**
+   - 协议层相对路径统一使用小写前缀 `music/<文件名>` 和 `media/<文件名>`；板端与主机测试将其映射到储存卡根目录下的 `Music/` 和 `Media/` 目录（与现有 `photos/` 映射 `/sdcard/Photos`、`wallpapers/` 映射 `/sdcard/Wallpapers` 一致）。
+   - 仅接受受控目录下的单个 `.mp3` 或 `.flac` 文件（不区分扩展名大小写，拒绝子目录及 `.wav` 等其他格式）。
+2. **文件名字符集、加密 AAD 与长度限制：**
+   - 为支持真实中文歌名与空格，电脑端 `card_upload.py` 与固件 `deskpet_card.c` 对 `music/`、`media/` 分支放宽为允许有效 UTF-8 文件名：禁止包含 `/`、`\`、NUL、控制字符（码点 `< 32` 或 `127`），禁止以 `.` 开头或以 `.` 结尾，禁止使用 `.upload`、`.previous`、`.removing` 保留后缀。
+   - 单个文件名的 UTF-8 字节长度须为 **1–120 字节**（保证经 `channel.py` 的 `ensure_ascii=True` 转义为 `\uXXXX` 后，单条 `music_delete` 或 `music_control` 请求整行仍远低于 1024 字节）。
+   - `card_upload.py` 与 `deskpet_card.c` 的 AES-GCM 附加认证数据（`desk-card-v1\n{path}\n{size}\n{crc:08x}`）统一按 **UTF-8** 字节编码计算（对既有纯 ASCII 路径完全兼容）。
+3. **分页与游标失效：**
+   - 电脑端对目录中的每个文件使用列表返回的完整相对路径。设备屏上确认删除与电脑端显式删除共用同一操作，语音工具集不提供删除。
+   - 首个请求省略 `cursor`。`next_cursor` 是绑定本次启动和曲库排列版本的不透明字符串，末页取 `null`。设备按最终 JSON 编码后整行 **≤ 1152 字节**动态控制每页条数。上传、删除或打乱改变曲库排列后，旧游标返回 `stale_cursor`。电脑端丢弃已取的各页，从第一页重新读取。
+
+```text
+P1,{"epoch":"demo","seq":5,"type":"music_list"}
+P1,{"epoch":"demo","seq":5,"boot":4,"ok":true,"items":[{"path":"music/sea.mp3"}],"next_cursor":"c7"}
+P1,{"epoch":"demo","seq":6,"type":"music_delete","path":"music/sea.mp3"}
+P1,{"epoch":"demo","seq":6,"boot":4,"ok":true,"deleted":true}
+P1,{"epoch":"demo","seq":7,"type":"music_list","cursor":"c7"}
+P1,{"epoch":"demo","seq":7,"boot":4,"ok":false,"error":"stale_cursor"}
+P1,{"epoch":"demo","seq":8,"type":"music_list"}
+P1,{"epoch":"demo","seq":8,"boot":4,"ok":true,"items":[{"path":"media/rain.flac"}],"next_cursor":null}
+```
+
+删除合法但已不存在的路径返回 `deleted=false`。越出受控目录、文件名超长或格式不符返回 `invalid_path`，实际写卡失败返回 `card_io`。导入遇到不支持的格式时，在创建文件前拒绝。
+
+## 配置更新与结果查询
+
+一次配置修改使用一个客户端生成的唯一 `tx`，以经过认证的配对和当前连接为边界。`begin` 声明 UTF-8 JSON 补丁的总字节数 `size`，取值 1–4096。每个 `part` 分别用标准 Base64 编码，`offset` 按解码后的字节从 0 连续递增。`next_offset` 返回已接收的字节数。板端每次只暂存一笔修改。缺段、越界或超时即丢弃本次暂存，断线也清理未提交内容。相应错误码为 `invalid_offset`、`invalid_size`、`tx_expired`。未知交易返回 `unknown_tx`。
+
+`commit` 时校验完整补丁、合并后的配置及容量，只替换补丁中出现的字段。保存成功才返回 `applied=true`，并将 `last_applied_tx` 与配置一并持久化。重连后先查状态再决定是否重新配置。查询返回生效模式、最近成功的交易标识和各组令牌是否已设置。令牌仅在配置写入时传输。
+
+```text
+P1,{"epoch":"demo","seq":9,"type":"agent_config_begin","tx":"t42","size":15}
+P1,{"epoch":"demo","seq":9,"boot":4,"ok":true,"next_offset":0}
+P1,{"epoch":"demo","seq":10,"type":"agent_config_part","tx":"t42","offset":0,"data":"eyJtb2RlIjo="}
+P1,{"epoch":"demo","seq":10,"boot":4,"ok":true,"next_offset":8}
+P1,{"epoch":"demo","seq":11,"type":"agent_config_part","tx":"t42","offset":8,"data":"ImF1dG8ifQ=="}
+P1,{"epoch":"demo","seq":11,"boot":4,"ok":true,"next_offset":15}
+P1,{"epoch":"demo","seq":12,"type":"agent_config_commit","tx":"t42"}
+P1,{"epoch":"demo","seq":12,"boot":4,"ok":true,"applied":true}
+P1,{"epoch":"demo","seq":13,"type":"agent_config_status"}
+P1,{"epoch":"demo","seq":13,"boot":4,"ok":true,"mode":"auto","last_applied_tx":"t42","configured":{"chat":false,"asr":false,"tts":false}}
+```
+
+提交前发现缺段时，例如已收到 8 字节却收到 `offset=9` 的片段，失败回包为 `{"epoch":"demo","seq":11,"boot":4,"ok":false,"error":"invalid_offset"}`。
+
+联调时使用两段以上的合法配置，分别在最后一段前和 `commit` 回执前断线。前者重连查询须看到旧配置，后者按 `last_applied_tx` 核对实际生效的交易。请求或响应超过上限时应在各自编码边界被拒绝。
