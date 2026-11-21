@@ -56,7 +56,7 @@ P1,{"epoch":"demo","seq":4,"boot":4,"ok":true}
 
 软重启若在收尾限时结束时仍有保存工作待确认，下一次启动的 `diagnostics.restart_pending_writes` 提供类别列表。类别取 `card`（文件传输或已取得独占写卡权限的修改）、`inbox`（消息缓存写入）、`merit`（待保存的木鱼敲击）。有记录时且 `reset_reason` 为 `software` 才上报。各类别最多出现一次，供诊断时核对对应数据。
 
-ES3C35P 当前上报滤波后的电池端电压。采样尚未稳定或持续失败时，`mv` 为 `null`。由于供电状态尚无独立证据，`power` 为 `unknown`，`percent` 为 `null`，`low` 为 `false`。电脑端 `desk_status` 按能力位展示摘要。
+ES3C35P 当前上报滤波后的电池端电压。采样尚未稳定，或连续 6 秒没有有效读数时，`mv` 为 `null`。由于供电状态尚无独立证据，`power` 为 `unknown`，`percent` 为 `null`，`low` 为 `false`。电脑端 `desk_status` 按能力位展示摘要。
 
 ## 曲库、路径规范、分页与删除
 
