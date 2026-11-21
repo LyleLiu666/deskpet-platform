@@ -2074,6 +2074,22 @@ def status_view(reply, capabilities):
         status["quota_source"] = SOURCES[quota_source]
     if capabilities.get("speed_windows") == 1 and (windows := speed_windows_view(reply)) is not None:
         status["speed_windows"] = windows
+    if capabilities.get("battery_status") == 1:
+        battery = reply.get("battery")
+        if isinstance(battery, dict):
+            power = battery.get("power")
+            mv = battery.get("mv")
+            percent = battery.get("percent")
+            if power not in ("battery", "charging", "external_full"):
+                power = "unknown"
+            valid_mv = type(mv) is int and 0 < mv <= 6000
+            valid_percent = type(percent) is int and 0 <= percent <= 100 and valid_mv and power == "battery"
+            status["battery"] = {
+                "mv": mv if valid_mv else None,
+                "percent": percent if valid_percent else None,
+                "power": power,
+                "low": valid_mv and power == "battery" and battery.get("low") is True,
+            }
     if capabilities.get("weather_device") == 1:
         status["weather"] = {"updated": reply.get("weather_updated") or None,
                              "device_refresh": reply.get("weather_device_refresh") is True}

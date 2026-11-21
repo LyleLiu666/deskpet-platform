@@ -13,7 +13,7 @@ from PIL import Image
 
 from deskpet_platform.channel import AckTimeout, CommandRejected, DeviceError
 from deskpet_platform.client import Client
-from deskpet_platform.mcp_server import BoardSession
+from deskpet_platform.mcp_server import BoardSession, status_view
 from deskpet_platform.role_example import create_role_example
 from deskpet_platform.role_sources import select_role_source
 
@@ -23,6 +23,17 @@ LARGE = dict(SMALL, role_photo_motion=1, role_video_timeline=1, role_burst_audio
 
 
 class MultiBoardContractTests(unittest.IsolatedAsyncioTestCase):
+    def test_battery_status_keeps_unknown_inputs_and_avoids_false_low_state(self):
+        capability = {"battery_status": 1}
+        reply = {"battery": {"mv": 4100, "percent": 100, "power": "unknown", "low": True}}
+        self.assertNotIn("battery", status_view(reply, {}))
+        self.assertEqual(status_view(reply, capability)["battery"],
+                         {"mv": 4100, "percent": None, "power": "unknown", "low": False})
+        reply["battery"] = {"mv": True, "percent": False, "power": {"raw": "invalid"}, "low": 1}
+        self.assertEqual(status_view(reply, capability)["battery"],
+                         {"mv": None, "percent": None, "power": "unknown", "low": False})
+        reply["battery"] = {"mv": 3400, "percent": 12, "power": "battery", "low": True}
+        self.assertEqual(status_view(reply, capability)["battery"], reply["battery"])
     async def test_music_listing_restarts_after_a_playlist_version_change(self):
         client = object.__new__(Client)
         client._operation = asyncio.Lock()
