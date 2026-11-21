@@ -54,6 +54,8 @@ P1,{"epoch":"demo","seq":4,"boot":4,"ok":true}
 
 诊断摘要有可选的 `crash_pc` 和 `crash_lr`，分别为有效的崩溃指令地址和返回地址，采用无符号 32 位整数。可选的 `last_subsystem` 记录本次启动后最近一次完成的子系统操作，包含 `target` 和 `status`。状态取 `busy`、`failed`、`recovered` 或 `reconnecting`。Wi-Fi 的 `reconnecting` 表示已开始重连，连接结果仍由网络状态确认。安全模式可只提供 `device_info` 摘要。
 
+软重启若在收尾限时结束时仍有保存工作待确认，下一次启动的 `diagnostics.restart_pending_writes` 提供类别列表。类别取 `card`（文件传输或已取得独占写卡权限的修改）、`inbox`（消息缓存写入）、`merit`（待保存的木鱼敲击）。有记录时且 `reset_reason` 为 `software` 才上报。各类别最多出现一次，供诊断时核对对应数据。
+
 ES3C35P 当前上报滤波后的电池端电压。采样尚未稳定或持续失败时，`mv` 为 `null`。由于供电状态尚无独立证据，`power` 为 `unknown`，`percent` 为 `null`，`low` 为 `false`。电脑端 `desk_status` 按能力位展示摘要。
 
 ## 曲库、路径规范、分页与删除

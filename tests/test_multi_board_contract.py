@@ -110,6 +110,27 @@ class MultiBoardContractTests(unittest.IsolatedAsyncioTestCase):
         client.channel.send.return_value = dict(info, diagnostics=dict(summary, early_resets=True))
         self.assertEqual(await client.device_info(), info)
 
+    async def test_device_info_reports_pending_restart_write_categories(self):
+        client = object.__new__(Client)
+        client._operation = asyncio.Lock()
+        info = {"board": "synthetic", "chip": "esp32s3", "profile": "core",
+                "partition_id": "synthetic-dual", "screen": [480, 320], "modules": ["core"]}
+        summary = {"reset_reason": "software", "early_resets": 0,
+                   "safe_mode": False, "crash_present": False}
+        categories = ["card", "inbox", "merit"]
+        client.channel = SimpleNamespace(capabilities={"device_info": 1}, send=AsyncMock())
+        client.channel.send.return_value = dict(info, diagnostics=dict(summary, restart_pending_writes=categories))
+        self.assertEqual((await client.device_info())["diagnostics"], dict(summary, restart_pending_writes=categories))
+
+        for invalid in ([], "card", ["card", "card"], ["inbox", {"title": "private"}], ["merit", "unknown"]):
+            with self.subTest(value=invalid):
+                client.channel.send.return_value = dict(info, diagnostics=dict(summary, restart_pending_writes=invalid))
+                self.assertEqual((await client.device_info())["diagnostics"], summary)
+
+        summary["reset_reason"] = "brownout"
+        client.channel.send.return_value = dict(info, diagnostics=dict(summary, restart_pending_writes=categories))
+        self.assertEqual((await client.device_info())["diagnostics"], summary)
+
     async def test_diagnostics_refreshes_safe_mode_without_requiring_card_support(self):
         with tempfile.TemporaryDirectory() as directory:
             session = BoardSession(Path(directory) / "device.json")

@@ -136,6 +136,11 @@ class Client:
                 if (isinstance(subsystem, dict) and subsystem.get("target") in RECOVERY_TARGETS
                         and subsystem.get("status") in RECOVERY_STATUSES):
                     summary["last_subsystem"] = {"target": subsystem["target"], "status": subsystem["status"]}
+                pending = diagnostics.get("restart_pending_writes")
+                if (reason == "software" and isinstance(pending, list) and 0 < len(pending) <= 3
+                        and all(name in ("card", "inbox", "merit") for name in pending)
+                        and len(set(pending)) == len(pending)):
+                    summary["restart_pending_writes"] = pending.copy()
                 info["diagnostics"] = summary
         return info
 
