@@ -205,6 +205,17 @@ tool_timeout_sec = 1200
 
 ---
 
+## 音乐播放与曲库
+
+支持曲库管理的设备可直接从电脑导入和删除曲目，储存卡可以留在设备里。
+
+- `desk_music_library(action="import", source=...)` 接收电脑上 MP3 或 FLAC 文件的绝对路径。默认放在 `music/`，也可用 `path` 指定 `music/曲名.flac` 或 `media/曲名.mp3`。导入返回 `completed` 后可用 `desk_music_library(action="list")` 查看当前播放顺序。
+- `desk_music_control(action="play", path=...)` 播放指定歌曲，`path` 使用曲库返回的完整路径。也可用 `status` 查询，或用 `pause`、`stop`、`prev`、`next` 控制。返回工作台后音乐继续播放，播到列表末尾自动停止。
+- 在屏上点「打乱顺序」，或调用 `desk_music_control(action="shuffle")`，会生成并保存一份新顺序。重启后仍沿用这份顺序，直到再次主动打乱。曲目太少、无法生成不同顺序时会有提示。
+- 在屏上点歌曲旁的「删除」并确认，或显式调用 `desk_music_library(action="delete", path=...)`。`music/` 和 `media/` 中的同名曲目路径不同，请从列表选择要删的一条。遇到 `music_ack_lost` 时，重新列出曲库核对该路径是否还在。
+
+---
+
 ## 页面切换、时钟、天气与屏幕控制
 
 - **页面切换与默认首页（`desk_set_view`）**：
@@ -222,6 +233,11 @@ tool_timeout_sec = 1200
   - `desk_show_image(source=...)`：将电脑图片自动转换后传到储存卡并全屏展示；轻触屏幕或调用 `desk_clear_image` 返回原页面。
   - `desk_set_brightness(level=0..100)`：设置并保存屏幕亮度；设为 `0` 会关闭背光，轻触屏幕即可重新点亮。
   - `desk_calibrate_touch`：在屏幕上启动三点触摸校准（按提示依次点击三个十字标记；长按 3 秒或调用 `desk_cancel_touch_calibration` 可取消并保留原校准）。完成校准后，`desk_wait_touch` 可读取点击位置，轻触屏幕上的角色区域也会本地触发角色的 `touched` 互动动作。
+
+### ES3C35P 的电池读数与屏幕休眠
+
+- 支持 `battery_status` 的固件在「设置 → 显示」提供电池读数，电脑端调用 `desk_status` 可查看 `battery`。现阶段提供电池电压，供电来源显示「状态未知」，电量百分比留空。刚开机或采样失效时，电压也可能暂时留空。
+- 有「休眠」入口的固件可在「设置 → 系统」立即休眠，在「设置 → 显示」选择自动休眠时间及微亮时钟或纯黑息屏。轻触屏幕后会出现确认，点「退出休眠」恢复亮度，点「继续休眠」或等待约六秒会回到休眠。
 
 ---
 
@@ -250,7 +266,7 @@ tool_timeout_sec = 1200
 
 ---
 
-## 网络切换、储存卡诊断与 USB 备用连接
+## 网络切换、诊断、重启与 USB 备用连接
 
 - **切换已保存的 Wi-Fi（`desk_select_network`）**：
   - 调用 `desk_select_network(ssid=...)` 可按网络名称（有效 UTF-8）切换到搭搭已保存的其他 Wi-Fi（旧版固件不支持此命令时请直接在屏幕 Wi-Fi 设置中切换）。
@@ -258,6 +274,10 @@ tool_timeout_sec = 1200
 - **储存卡状态与重挂载（`desk_diagnostics`）**：
   - `desk_diagnostics` 可查看当前连接、已保存网络、重启原因及储存卡空间，`card.mount_count` 记录本次开机以来储存卡成功挂载的次数。
   - 若储存卡接触恢复后需重新挂载，在屏幕上重新打开「角色图鉴」或「相册」即可触发介质探测与挂载，随后返回角色页会重新加载上次保存的角色。
+- **子系统恢复与软重启**：
+  - 有对应功能的设备，可在「设置 → 系统」分别恢复储存卡、触摸、声音或 Wi-Fi，也可使用 `desk_recover_subsystem(target=...)`，四项分别对应 `sd`、`i2c`、`audio`、`wifi`。`accepted` 表示设备已受理，执行结果见 `desk_diagnostics` 的 `diagnostics.last_subsystem`。
+  - 屏上「重启」需要点按确认。`desk_restart` 会直接请求已配对的设备软重启。收到 `accepted` 后等设备重新连接，再用 `desk_status` 或 `desk_diagnostics` 检查。收到 `restart_ack_lost` 时也先检查状态，避免重复请求。若重启时仍有写入待确认，`diagnostics.restart_pending_writes` 会列出对应类别，便于核对曲库、消息缓存或木鱼计数。
+- **原生 USB 应急复位（`desk_usb_reset`）**：ES3C35P 的无线和屏上入口都无法响应时，可用数据线连接设备。调用时传入已配对设备的持久 UUID 和已核对的原生 ESP 串口。工具会核对 USB 序列号和配对 MAC，复位后可用 `desk_status` 检查连接。
 - **USB 身份查询与无线断连备用串口（`--usb-port` / `desk_set_usb_fallback`）**：
   - 在终端运行 `deskpet-platform find-usb --device-id <设备UUID> /dev/cu.usbserial-1140`（或在 MCP 中调用 `desk_find_usb_device`），可在不抢占现有 Wi-Fi 控制连接的前提下，读取指定串口上的设备 MAC 与持久 UUID（省略 `--device-id` 可列出所有候选串口的匹配结果）。
   - 启动 MCP 时可通过 `--usb-port <串口>` 指定备用串口（启动时未插 USB 也能正常用 Wi-Fi 启动）；运行期间若串口路径改变或需为第二台设备设置备用串口，可先用 `desk_find_usb_device` 查出串口，再调用 `desk_set_usb_fallback(port=..., device_id=...)`（需在无线连接正常时更新）。
