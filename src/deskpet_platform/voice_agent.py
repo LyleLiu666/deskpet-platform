@@ -56,6 +56,7 @@ class ToolOutcome:
     completed: bool = True
     failure_message: str | None = None
     result_unknown: bool = False
+    deferred: bool = False
 
 
 @dataclass(frozen=True)
@@ -346,12 +347,15 @@ class VoiceAgent:
             result = ToolOutcome(False, {'error': 'tool_failed'})
         if (not isinstance(result,ToolOutcome) or type(result.ok) is not bool or type(result.completed) is not bool or
                 type(result.result_unknown) is not bool or (result.ok and result.result_unknown) or
+                type(result.deferred) is not bool or (result.deferred and (not result.ok or result.completed)) or
                 (result.failure_message is not None and (not isinstance(result.failure_message,str) or len(result.failure_message)>200))):
             result = ToolOutcome(False, {'error': 'tool_invalid_result'})
         if result.result_unknown:
             status = 'unknown'
         elif not result.ok:
             status = 'failed'
+        elif result.deferred:
+            status = 'deferred'
         elif result.completed:
             status = 'ok'
         else:
@@ -397,6 +401,9 @@ class VoiceAgent:
                     message={'role':'assistant','content':content}
                 elif any(event.status=='denied' for event in self._events):
                     content='已取消这项操作。'
+                    message={'role':'assistant','content':content}
+                elif any(event.status=='deferred' for event in self._events):
+                    content='已排队，实际播放状态以搭搭显示为准。'
                     message={'role':'assistant','content':content}
                 elif any(event.status=='started' for event in self._events):
                     content='操作已开始，尚未确认完成。'

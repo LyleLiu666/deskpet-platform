@@ -1142,6 +1142,31 @@ class BoardSession:
             except (OSError, DeviceError, TimeoutError):
                 return {'status': 'unknown'}
 
+    async def _voice_media_tool(self, capability, changing, invoke):
+        async with self.lock:
+            client, ticket = self.client, self.voice_active_ticket
+            if client is None or client is not self.voice_active_client or ticket is None:
+                return {'status': 'not_connected'}
+            if not voice_tool_supported(capability, client.channel.capabilities):
+                return {'status': 'unsupported'}
+            try:
+                result = await invoke(client, ticket)
+            except CommandRejected as error:
+                if changing and error.code in ('media_timeout', 'media_partial', 'out_of_memory'):
+                    return {'status': 'unknown'}
+                return {'status': 'rejected', 'reason': error.code}
+            except (OSError, DeviceError, TimeoutError):
+                return {'status': 'unknown' if changing else 'unavailable'}
+            return {'status': 'ok', **result}
+
+    async def voice_music_control(self, action, path):
+        return await self._voice_media_tool('music_control', action != 'status',
+            lambda client, ticket: client.music_control(action, path=path, capture_ticket=ticket))
+
+    async def voice_photo_slideshow(self, mode, interval_seconds):
+        return await self._voice_media_tool('photo_slideshow', True,
+            lambda client, ticket: client.photo_album(mode, interval_seconds=interval_seconds, capture_ticket=ticket))
+
     async def voice_role_action(self, action, duration_ms):
         """Show the role and play only while this exact voice request is active."""
         ticket=self.voice_active_ticket

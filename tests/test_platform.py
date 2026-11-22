@@ -842,6 +842,37 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await client.photo_album(mode, **fields)
 
+    async def test_voice_media_sdk_reuses_commands_and_checks_deferred_receipts(self):
+        client = Client(DeviceConfig(DEVICE, KEY))
+        client.channel = type("Channel", (), {})()
+        client.channel.capabilities = {"music_control": 1, "photo_album": 1}
+        client.channel.send = AsyncMock()
+        with self.assertRaisesRegex(DeviceError, "capture_media_tools_not_supported"):
+            await client.music_control("play", capture_ticket=7)
+        client.channel.send.assert_not_awaited()
+
+        client.channel.capabilities["capture_media_tools"] = 1
+        client.channel.send.return_value = {
+            "state": "stopped", "path": None, "title": None, "position_ms": 0,
+            "volume": 70, "shuffled": False, "queued": True, "target_path": "music/海.flac",
+        }
+        result = await client.music_control("play", path="music/海.flac", capture_ticket=7)
+        self.assertEqual((result["state"], result["target_path"], result["queued"]), ("stopped", "music/海.flac", True))
+        client.channel.send.assert_awaited_once_with("music_control", action="play", path="music/海.flac", ticket=7)
+        del client.channel.send.return_value["queued"]
+        with self.assertRaisesRegex(DeviceError, "invalid_music_control_reply"):
+            await client.music_control("play", capture_ticket=7)
+
+        client.channel.send.return_value = {"view": "closed", "playing": False, "interval_seconds": 15}
+        self.assertEqual((await client.photo_album("interval", interval_seconds=15, capture_ticket=7))["interval_seconds"], 15)
+        client.channel.send.assert_awaited_with("photo_album", mode="interval", seconds=15, ticket=7)
+        with self.assertRaisesRegex(DeviceError, "invalid_photo_album_reply"):
+            await client.photo_album("play", capture_ticket=7)
+        with self.assertRaises(ValueError):
+            await client.photo_album("grid", capture_ticket=7)
+        with self.assertRaises(ValueError):
+            await client.music_control("status", capture_ticket=True)
+
     async def test_message_view_sdk_requires_an_explicit_id_for_marking_seen(self):
         class Channel:
             capabilities = {}

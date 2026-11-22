@@ -19,19 +19,19 @@ ES3C35P 现有 `hello` 回包在最坏合法头部（48 字节 `epoch`、10 位 
 P1,{"epoch":"demo","seq":1,"type":"hello"}
 P1,{"epoch":"demo","seq":1,"boot":4,"type":"capabilities","mac":"ec:d6:1b:3b:25:40","protocol":1,"rx_bytes":2048,"token_stats":1,"device_info":1,"cap_ext":1,"ok":true}
 P1,{"epoch":"demo","seq":2,"type":"capabilities_ext"}
-P1,{"epoch":"demo","seq":2,"boot":4,"dashboard_rotation":1,"dashboard_interval":1,"screen_views":1,"photo_album":1,"battery_status":1,"subsystem_recover":1,"system_restart":1,"music_control":1,"music_library":1,"assistant_onboard":1,"ok":true}
+P1,{"epoch":"demo","seq":2,"boot":4,"dashboard_rotation":1,"dashboard_interval":1,"screen_views":1,"photo_album":1,"battery_status":1,"subsystem_recover":1,"system_restart":1,"music_control":1,"music_library":1,"assistant_onboard":1,"capture_media_tools":1,"ok":true}
 ```
 
 ### 复用现有 Base 切页与相册协议
 
 - **切页（`open_page`）：** 依赖现有 `screen_views: 1`，调用 `screen_view`。例如临时打开首页时 `page` 取现有页面表中 `home` 的编号 `1`，并传 `make_default: false`。消息详情和列表使用独立的 `message_view` 能力；仅声明 `message_view` 时，电脑端隐藏通用切页工具。[切页实现与页面表](../src/deskpet_platform/client.py)
-- **相册与轮播（`photo_slideshow` 工具）：** 直接复用现有 `photo_album: 1` 能力与 `photo_album` 命令（`mode` 支持 `status`、`grid`、`open`、`previous`、`next`、`play`、`pause`、`interval`，轮播间隔 `seconds` 取 `5`、`10` 或 `15`），不另造新协议命令。
+- **相册与轮播（`photo_album`）：** 普通电脑端命令的 `mode` 支持 `status`、`grid`、`open`、`previous`、`next`、`play`、`pause`、`interval`。`open` 带列表返回的照片 `id`，`interval` 带 `seconds`，取 `5`、`10` 或 `15`。ES3C35P 从卡上当前相册来源读取 JPEG，并返回 `view`、`playing`、`interval_seconds` 和照片标识。照片列表每页最多四项，页码从 0 开始。
 
 ```text
 P1,{"epoch":"demo","seq":3,"type":"screen_view","page":1,"make_default":false}
 P1,{"epoch":"demo","seq":3,"boot":4,"ok":true}
 P1,{"epoch":"demo","seq":4,"type":"photo_album","mode":"play"}
-P1,{"epoch":"demo","seq":4,"boot":4,"ok":true}
+P1,{"epoch":"demo","seq":4,"boot":4,"view":"photo","playing":true,"interval_seconds":10,"count":2,"page":0,"pages":1,"photos":["p-0123456789abcdef","p-1123456789abcdef"],"photo":"p-0123456789abcdef","photo_drawn":true,"photo_draws":1,"ok":true}
 ```
 
 ## 新增与扩展命令汇总
@@ -48,6 +48,7 @@ P1,{"epoch":"demo","seq":4,"boot":4,"ok":true}
 | `device_settings` | `device_settings`。查询无业务字段。临时调整时传当前录音编号 `ticket`，以及 `volume`（0–100）和 `brightness`（10–100）中的至少一个 | 返回当前 `volume` 和 `brightness`。语音调整仅对当前会话生效 |
 | `music_control` | `music_control`，`action` 取 `status`、`play`、`pause`、`stop`、`prev`、`next` 或 `shuffle`。`play` 可带相对路径 `path` | 返回操作后的 `state`（`playing`、`paused`、`stopped`）、`path`、`title`、`position_ms`、`volume`（0–100）和 `shuffled`。空曲库时 `path`、`title` 为 `null`。查询以外的失败回包不得报告成功 |
 | `music_library` | `music_list`、`music_delete` | 见下节。导入须同时声明 `card_transfer`，复用已有上传及文件校验回执 |
+| `capture_media_tools` | 带 `ticket` 的 `music_control` 或 `photo_album` | 只接受当前语音对话的执行端和已授权的工具。需要延后开始时返回 `queued:true`，音乐同时返回 `target_path` |
 | `assistant_onboard` | `agent_config_begin`、`agent_config_part`、`agent_config_commit`、`agent_config_status`、`agent_config_cancel` | 见配置更新示例。电脑端入口为 `desk_agent_config` |
 | `assistant_onboard` | `voice_permissions_set`，`enabled` 为完整工具名数组，例如 `{"enabled":["device_status"]}` | 板端在当前配对下完整保存后返回 `{"applied":true}`。空数组撤销全部授权。新配对同步前默认全关 |
 
@@ -84,6 +85,20 @@ P1,{"epoch":"demo","seq":8,"boot":4,"ok":true,"items":[{"path":"media/rain.flac"
 ```
 
 删除合法但已不存在的路径返回 `deleted=false`。越出受控目录、文件名超长或格式不符返回 `invalid_path`，实际写卡失败返回 `card_io`。导入遇到不支持的格式时，在创建文件前拒绝。
+
+## 语音控制音乐与相册
+
+- 有 `capture_media_tools:1` 及对应媒体能力时，电脑端语音可在授权后复用现有命令，并附当前对话的整数 `ticket`。板载直连使用同名、同参数的工具和同一板端执行入口。语音仅转写、过期会话和未获授权的工具均无法执行。
+- 语音 `music_control` 接受 `status`、`play`、`pause`、`stop`、`prev`、`next` 和 `shuffle`。只有 `play` 可选填曲库已有的 `path`。播放和切歌回包中的 `state` 等字段反映接收时状态，`queued:true` 与 `target_path` 表示待播放目标。暂停和停止立即生效，可取消待播放目标。打乱顺序沿用曲库持久化规则。
+- 语音 `photo_slideshow` 接受 `play`、`pause` 和 `interval`，通过 `photo_album.mode` 传输。仅 `interval` 需要 `interval_seconds`（P1 字段是 `seconds`），取 5、10 或 15。语音调整立即应用，设备重启后恢复已保存的间隔。轮播开始回包为 `queued:true`。
+- 待播放目标在本轮语音回复完整播完后生效。用户取消、回复失败或工具授权失效时丢弃待播放目标。回执未送达时电脑端提示结果未知，可先查询设备状态。
+
+```text
+P1,{"epoch":"demo","seq":9,"type":"music_control","action":"play","path":"music/sea.mp3","ticket":42}
+P1,{"epoch":"demo","seq":9,"boot":4,"state":"stopped","path":null,"title":null,"position_ms":0,"volume":70,"shuffled":false,"queued":true,"target_path":"music/sea.mp3","ok":true}
+P1,{"epoch":"demo","seq":10,"type":"photo_album","mode":"interval","seconds":15,"ticket":42}
+P1,{"epoch":"demo","seq":10,"boot":4,"view":"closed","playing":false,"interval_seconds":15,"count":0,"page":0,"pages":0,"photos":[],"photo_drawn":false,"photo_draws":0,"ok":true}
+```
 
 ## 配置更新与结果查询
 

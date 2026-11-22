@@ -6,7 +6,9 @@ confirmation policy, persist the user's choice, and pass that explicit set here.
 from dataclasses import replace
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .card_upload import validate_music_path
 
 from .voice_agent import ToolOutcome, VoiceTool
 
@@ -32,6 +34,32 @@ class _DeviceSettingsArgs(BaseModel):
     brightness: int | None = Field(default=None, ge=10, le=100)
 
 
+class _MusicArgs(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    action: Literal['status', 'play', 'pause', 'stop', 'prev', 'next', 'shuffle']
+    path: str | None = Field(default=None, description='仅 play 可指定设备曲库已知路径。')
+
+    @model_validator(mode='after')
+    def validate_path(self):
+        if self.path is not None:
+            if self.action != 'play':
+                raise ValueError('只有播放可以指定歌曲路径')
+            validate_music_path(self.path)
+        return self
+
+
+class _PhotoSlideshowArgs(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    mode: Literal['play', 'pause', 'interval']
+    interval_seconds: Literal[5, 10, 15] | None = Field(default=None, description='仅 interval 必填。')
+
+    @model_validator(mode='after')
+    def validate_interval(self):
+        if (self.mode == 'interval') != (self.interval_seconds is not None):
+            raise ValueError('仅设置轮播间隔时填写秒数')
+        return self
+
+
 _TOOLS = {
     'device_status': ('检查该配对设备当前能否与电脑通信，并查看页面和角色状态。', _NoArgs),
     'list_role_actions': ('列出当前角色支持的动作。', _NoArgs),
@@ -40,6 +68,8 @@ _TOOLS = {
     'battery_status': ('查看电压、估算电量与电源状态。没有数据时如实报告未知。', _NoArgs),
     'device_settings': ('查看或调整当前会话的音量和亮度。省略参数时只查询。', _DeviceSettingsArgs),
     'device_restart': ('请求在设备屏幕上确认软重启，用户实际点按后才会重启。', _NoArgs),
+    'music_control': ('查询、播放、暂停、停止、切歌或打乱设备曲库顺序。播放和切歌排到语音回复结束后执行。', _MusicArgs),
+    'photo_slideshow': ('开始、暂停或临时调整相册轮播，间隔可设 5、10 或 15 秒。', _PhotoSlideshowArgs),
 }
 _CAPABILITIES = {
     'device_status': (),
@@ -49,6 +79,8 @@ _CAPABILITIES = {
     'battery_status': ('battery_status',),
     'device_settings': ('device_settings',),
     'device_restart': ('system_restart',),
+    'music_control': ('music_control', 'capture_media_tools'),
+    'photo_slideshow': ('photo_album', 'capture_media_tools'),
 }
 
 
@@ -142,9 +174,18 @@ def build_voice_tools(session, enabled, *, authorize=None, permission_lock=None,
                                result_unknown=True)
         return ToolOutcome(False, {'status': status}, failure_message='目前无法请求设备重启。')
 
+    async def music_control(action, path=None):
+        result = await session.voice_music_control(action, path)
+        return _media_result(result, '音乐操作结果未知，请先核对播放器状态。', '目前无法完成音乐操作。')
+
+    async def photo_slideshow(mode, interval_seconds=None):
+        result = await session.voice_photo_slideshow(mode, interval_seconds)
+        return _media_result(result, '轮播操作结果未知，请先核对相册状态。', '目前无法完成轮播操作。')
+
     handlers = {'device_status': device_status, 'list_role_actions': list_role_actions,
                 'play_role_action': play_role_action, 'open_page': open_page, 'battery_status': battery_status,
-                'device_settings': device_settings, 'device_restart': device_restart}
+                'device_settings': device_settings, 'device_restart': device_restart,
+                'music_control': music_control, 'photo_slideshow': photo_slideshow}
     def guarded(tool):
         if authorize is None:return tool
         async def invoke(**arguments):
@@ -162,3 +203,14 @@ def build_voice_tools(session, enabled, *, authorize=None, permission_lock=None,
     return [guarded(VoiceTool(name, *_TOOLS[name], handlers[name],
                              requires_confirmation=voice_tool_requires_confirmation(name),
                              confirmation_on_device=voice_tool_requires_confirmation(name))) for name in sorted(enabled)]
+
+
+def _media_result(result, unknown_message, failure_message):
+    status = result['status']
+    if status == 'unknown':
+        return ToolOutcome(False, {'status': status}, failure_message=unknown_message, result_unknown=True)
+    if status != 'ok':
+        return ToolOutcome(False, result, failure_message=failure_message)
+    if result.get('queued') is True:
+        return ToolOutcome(True, result, completed=False, deferred=True)
+    return ToolOutcome(True, result)

@@ -646,7 +646,8 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(initial['enabled'],[])
             available = {item['name']: item for item in initial['available']}
             self.assertEqual(set(available), {'device_status', 'list_role_actions', 'play_role_action',
-                                             'battery_status', 'device_settings', 'device_restart'})
+                                             'battery_status', 'device_settings', 'device_restart',
+                                             'music_control', 'photo_slideshow'})
             self.assertTrue(available['device_restart']['requires_confirmation'])
             self.assertFalse(available['device_settings']['requires_confirmation'])
             session.client = self.board()
@@ -654,9 +655,33 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(legacy['device_status'])
             self.assertFalse(legacy['device_restart'])
             self.assertFalse(legacy['device_settings'])
+            self.assertFalse(legacy['music_control'])
+            self.assertFalse(legacy['photo_slideshow'])
             updated=await session.voice_tool_settings(['device_status'])
             self.assertEqual(updated['enabled'],['device_status'])
             self.assertEqual((await self.session(path).voice_tool_settings())['enabled'],['device_status'])
+
+    async def test_voice_media_stays_bound_to_the_current_board_and_capture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = self.session(Path(directory) / 'device.json')
+            client = self.board()
+            client.music_control = AsyncMock()
+            client.photo_album = AsyncMock()
+            session.client = session.voice_active_client = client
+            session.voice_active_ticket = 7
+            client.channel.capabilities.update(music_control=1, photo_album=1)
+            self.assertEqual(await session.voice_music_control('play', None), {'status': 'unsupported'})
+            client.music_control.assert_not_awaited()
+            client.channel.capabilities['capture_media_tools'] = 1
+            client.music_control.side_effect = CommandRejected('media_partial')
+            self.assertEqual(await session.voice_music_control('next', None), {'status': 'unknown'})
+            client.music_control.assert_awaited_once_with('next', path=None, capture_ticket=7)
+            client.photo_album.return_value = {'view': 'photo', 'playing': False, 'interval_seconds': 10}
+            self.assertEqual((await session.voice_photo_slideshow('pause', None))['status'], 'ok')
+            client.photo_album.assert_awaited_once_with('pause', interval_seconds=None, capture_ticket=7)
+            session.client = self.board()
+            self.assertEqual(await session.voice_photo_slideshow('play', None), {'status': 'not_connected'})
+            client.photo_album.assert_awaited_once()
 
     async def test_voice_restart_asks_for_physical_confirmation_and_never_reports_completion(self):
         with tempfile.TemporaryDirectory() as directory:

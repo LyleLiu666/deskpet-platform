@@ -18,6 +18,8 @@ VOICE_TOOLS = {
     'battery_status': '查看电池电压、估算电量和供电状态',
     'device_settings': '查看或临时调整音量、亮度',
     'device_restart': '请求在设备屏幕上确认软重启',
+    'music_control': '查询、播放、暂停、停止、切歌或打乱设备曲库的播放顺序',
+    'photo_slideshow': '开始或暂停相册轮播，或者临时调整轮播间隔',
 }
 
 

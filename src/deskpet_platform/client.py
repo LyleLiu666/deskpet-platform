@@ -183,18 +183,29 @@ class Client:
             raise DeviceError("invalid_subsystem_recover_reply")
         return {"status": "accepted", "target": target, "boot": reply["boot"]}
 
-    async def music_control(self, action="status", *, path=None):
+    def _capture_media_fields(self, capture_ticket):
+        if capture_ticket is None:
+            return {}
+        if self.channel.capabilities.get("capture_media_tools") != 1:
+            raise DeviceError("capture_media_tools_not_supported")
+        if type(capture_ticket) is not int or not 0 < capture_ticket <= 0xffffffff:
+            raise ValueError("语音媒体操作须绑定有效的录音编号。")
+        return {"ticket": capture_ticket}
+
+    async def music_control(self, action="status", *, path=None, capture_ticket=None):
         if self.channel.capabilities.get("music_control") != 1:
             raise DeviceError("music_control_not_supported")
         if action not in MUSIC_ACTIONS or (path is not None and action != "play"):
             raise ValueError("只有播放操作可指定歌曲路径。")
         if path is not None:
             validate_music_path(path)
-        fields = {"path": path} if path is not None else {}
+        fields = self._capture_media_fields(capture_ticket)
+        if path is not None:
+            fields["path"] = path
         async with self._operation:
             result = await self.channel.send("music_control", action=action, **fields)
         names = ("state", "path", "title", "position_ms", "volume", "shuffled")
-        if any(name not in result for name in names):
+        if not isinstance(result, dict) or any(name not in result for name in names):
             raise DeviceError("invalid_music_control_reply")
         if (result["state"] not in ("playing", "paused", "stopped")
                 or type(result["position_ms"]) is not int or result["position_ms"] < 0
@@ -207,7 +218,16 @@ class Client:
                 validate_music_path(result["path"])
             except ValueError as error:
                 raise DeviceError("invalid_music_control_reply") from error
-        return {name: result[name] for name in names}
+        status = {name: result[name] for name in names}
+        if capture_ticket is not None and action in ("play", "prev", "next"):
+            if result.get("queued") is not True:
+                raise DeviceError("invalid_music_control_reply")
+            try:
+                validate_music_path(result.get("target_path"))
+            except ValueError as error:
+                raise DeviceError("invalid_music_control_reply") from error
+            status.update(queued=True, target_path=result["target_path"])
+        return status
 
     async def list_music(self):
         if self.channel.capabilities.get("music_library") != 1:
@@ -303,12 +323,14 @@ class Client:
             return await self.channel.send("screen_view", page=SCREEN_PAGES.index(page),
                                            make_default=make_default, **options)
 
-    async def photo_album(self, mode="status", *, photo=None, interval_seconds=None):
+    async def photo_album(self, mode="status", *, photo=None, interval_seconds=None, capture_ticket=None):
         if self.channel.capabilities.get("photo_album") != 1:
             raise DeviceError("photo_album_not_supported")
         if mode not in ("status", "grid", "open", "previous", "next", "play", "pause", "interval"):
             raise ValueError("相册操作无效。")
-        fields = {}
+        fields = self._capture_media_fields(capture_ticket)
+        if capture_ticket is not None and mode not in ("play", "pause", "interval"):
+            raise ValueError("语音相册仅支持开始、暂停和调整轮播间隔。")
         if mode == "open":
             if not isinstance(photo, str) or not re.fullmatch(r"p-[0-9a-f]{16}", photo):
                 raise ValueError("请选择相册中的照片标识。")
@@ -322,7 +344,18 @@ class Client:
         elif interval_seconds is not None:
             raise ValueError("请选择设置轮播间隔操作。")
         async with self._operation:
-            return await self.channel.send("photo_album", mode=mode, **fields)
+            reply = await self.channel.send("photo_album", mode=mode, **fields)
+        if capture_ticket is None:
+            return reply
+        if (not isinstance(reply, dict) or reply.get("view") not in ("closed", "grid", "photo", "menu")
+                or type(reply.get("playing")) is not bool
+                or type(reply.get("interval_seconds")) is not int
+                or reply["interval_seconds"] not in (5, 10, 15, 30, 60)
+                or (mode == "play" and reply.get("queued") is not True)
+                or (mode == "pause" and reply["playing"])
+                or (mode == "interval" and reply["interval_seconds"] != interval_seconds)):
+            raise DeviceError("invalid_photo_album_reply")
+        return {key: reply[key] for key in ("view", "playing", "interval_seconds", "queued") if key in reply}
 
     async def set_weather(self, snapshot, *, location=None):
         if self.channel.capabilities.get("weather") != 1:

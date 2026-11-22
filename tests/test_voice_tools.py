@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from pydantic import ValidationError
-from deskpet_platform.voice_tools import build_voice_tools
+from deskpet_platform.voice_tools import build_voice_tools, voice_tool_supported
 from deskpet_platform.voice_agent import VoiceAgent
 
 
@@ -101,11 +101,48 @@ class VoiceToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.events[-1].status,'started')
         self.assertEqual(result.text,'操作已开始，尚未确认完成。')
 
+    async def test_media_tools_require_ticket_capability_and_validate_narrow_actions(self):
+        tools = {tool.name: tool for tool in build_voice_tools(self.session, {'music_control', 'photo_slideshow'})}
+        music, photo = tools['music_control'].parameters, tools['photo_slideshow'].parameters
+        self.assertFalse(voice_tool_supported('music_control', {'music_control': 1}))
+        self.assertFalse(voice_tool_supported('photo_slideshow', {'photo_album': 1}))
+        self.assertTrue(voice_tool_supported('music_control', {'music_control': 1, 'capture_media_tools': 1}))
+        self.assertTrue(voice_tool_supported('photo_slideshow', {'photo_album': 1, 'capture_media_tools': 1}))
+        self.assertEqual(music.model_validate({'action': 'play', 'path': 'music/海.flac'}, strict=True).path,
+                         'music/海.flac')
+        self.assertEqual(photo.model_validate({'mode': 'interval', 'interval_seconds': 15}, strict=True).interval_seconds, 15)
+        for fields in ({'action': 'delete'}, {'action': 'next', 'path': 'music/海.flac'},
+                       {'action': 'play', 'path': 'music/../海.flac'}, {'action': 'stop', 'ticket': 2}):
+            with self.assertRaises(ValidationError):
+                music.model_validate(fields, strict=True)
+        for fields in ({'mode': 'grid'}, {'mode': 'interval', 'interval_seconds': 30},
+                       {'mode': 'interval'}, {'mode': 'pause', 'interval_seconds': 10}):
+            with self.assertRaises(ValidationError):
+                photo.model_validate(fields, strict=True)
+
+    async def test_media_receipt_is_deferred_until_the_board_finishes_speaking(self):
+        self.session.voice_music_control = AsyncMock(return_value={
+            'status': 'ok', 'queued': True, 'target_path': 'music/海.flac', 'state': 'stopped',
+        })
+        backend = AsyncMock()
+        backend.complete.side_effect = [
+            {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'media', 'type': 'function',
+                'function': {'name': 'music_control', 'arguments': '{"action":"play","path":"music/海.flac"}'}}]},
+            {'role': 'assistant', 'content': '正在为你播放。'},
+        ]
+        agent = VoiceAgent(backend, build_voice_tools(self.session, {'music_control'}))
+        turn = await agent.turn('在搭搭播放海')
+        self.session.voice_music_control.assert_awaited_once_with('play', 'music/海.flac')
+        self.assertEqual(turn.events[-1].status, 'deferred')
+        self.assertEqual(turn.text, '已排队，实际播放状态以搭搭显示为准。')
+
     async def test_unknown_mutation_stops_the_turn_before_the_model_can_repeat_it(self):
         cases = (
             ('device_settings', 'voice_device_settings', {'volume': 35, 'brightness': 65},
              {'status': 'unknown', 'reason': 'settings_partial'}, '设备可能已应用部分设置，请先核对音量和亮度。'),
             ('device_restart', 'voice_restart', {}, {'status': 'unknown'}, '重启请求结果未知，请先核对设备状态。'),
+            ('photo_slideshow', 'voice_photo_slideshow', {'mode': 'pause'},
+             {'status': 'unknown'}, '轮播操作结果未知，请先核对相册状态。'),
         )
         for name, method, arguments, response, expected_text in cases:
             with self.subTest(tool=name):
@@ -122,7 +159,10 @@ class VoiceToolsTest(unittest.IsolatedAsyncioTestCase):
                 agent = VoiceAgent(backend, build_voice_tools(self.session, {name}))
                 result = await agent.turn('执行一次操作')
                 backend.complete.assert_awaited_once()
-                invoke.assert_awaited_once_with(**arguments)
+                if name == 'photo_slideshow':
+                    invoke.assert_awaited_once_with('pause', None)
+                else:
+                    invoke.assert_awaited_once_with(**arguments)
                 self.assertEqual(result.text, expected_text)
                 self.assertEqual([event.status for event in result.events], ['unknown'])
                 self.assertEqual(json.loads(agent.messages[-2]['content'])['status'], 'unknown')
