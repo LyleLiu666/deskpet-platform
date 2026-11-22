@@ -1,9 +1,10 @@
 import asyncio
+import json
 import unittest
 import zlib
 from unittest.mock import AsyncMock
 from deskpet_platform.client import Client
-from deskpet_platform.channel import DeviceError
+from deskpet_platform.channel import Channel, DeviceError
 
 class SpeechPCM(unittest.IsolatedAsyncioTestCase):
     def client(self,send):
@@ -32,6 +33,78 @@ class SpeechPCM(unittest.IsolatedAsyncioTestCase):
         send.assert_not_awaited()
         with self.assertRaises(DeviceError):await client.play_speech_pcm(b'1234')
         self.assertEqual(send.await_args.args[0],'speech_cancel')
+        self.assertEqual(send.await_args.kwargs, {})
+
+    async def test_ticket_playback_failure_cleans_up_only_its_ticket(self):
+        send = AsyncMock(side_effect=[{'ok': True}, DeviceError('broken'), {'ok': True}])
+        client = self.client(send)
+        client.channel.capabilities.update(capture_speech_ticket=1, capture_speech_cancel_ticket=1)
+
+        with self.assertRaisesRegex(DeviceError, 'broken'):
+            await client.play_speech_pcm(b'1234', capture_ticket=7)
+
+        send.assert_awaited_with('speech_cancel', ticket=7)
+
+    async def test_ticket_cancellation_drains_outstanding_ack(self):
+        for waiting_for in ('speech_begin', 'speech_chunk', 'speech_commit', 'speech_status'):
+            with self.subTest(waiting_for=waiting_for):
+                ack_pending = asyncio.Event()
+                release_ack = asyncio.Event()
+                sent = []
+
+                class Transport:
+                    async def write(self, batch):
+                        sent.append(json.loads(batch[3:]))
+
+                    async def readline(self):
+                        request = sent[-1]
+                        kind = request['type']
+                        if kind == waiting_for:
+                            ack_pending.set()
+                            await release_ack.wait()
+                        reply = {'ok': True, 'boot': 1, 'epoch': request['epoch'], 'seq': request['seq']}
+                        if kind == 'speech_status':
+                            reply['speech_status'] = 'playing'
+                        elif kind == 'capture_check':
+                            reply['active'] = True
+                        elif kind == 'speech_cancel' and waiting_for == 'speech_status':
+                            reply.update(ok=False, error='unknown_capture')
+                        return ('P1,' + json.dumps(reply) + '\n').encode()
+
+                client = self.client(AsyncMock())
+                client.channel = Channel(Transport(), 'aa:bb:cc:dd:ee:ff')
+                client.channel.boot = 1
+                client.channel.online = True
+                client.channel.capabilities.update(speech_pcm=1, capture_speech_ticket=1,
+                                                   capture_speech_cancel_ticket=1, capture_cancel_poll=1)
+                playing = asyncio.create_task(client.play_speech_pcm(bytes(768), capture_ticket=7))
+                try:
+                    await asyncio.wait_for(ack_pending.wait(), 1)
+                    playing.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(playing.done())
+                    self.assertTrue(client._operation.locked())
+                    # A second cancellation while draining must still leave the P1 exchange intact.
+                    playing.cancel()
+                    await asyncio.sleep(0)
+                    self.assertTrue(client._operation.locked())
+                    release_ack.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.wait_for(playing, 1)
+
+                    self.assertTrue(client.channel.online)
+                    self.assertTrue(await client.capture_active(8))
+                    expected = ['speech_begin', 'speech_chunk', 'speech_chunk', 'speech_commit', 'speech_status']
+                    if waiting_for == 'speech_chunk':
+                        expected = expected[:2]
+                    else:
+                        expected = expected[:expected.index(waiting_for) + 1]
+                    self.assertEqual([request['type'] for request in sent], expected + ['speech_cancel', 'capture_check'])
+                    self.assertEqual(sent[-2]['ticket'], 7)
+                    self.assertEqual(sent[-1]['ticket'], 8)
+                finally:
+                    release_ack.set()
+                    await asyncio.gather(playing, return_exceptions=True)
 
     async def test_device_interruption_is_not_reported_as_success(self):
         async def reply(kind,**fields):return {'speech_status':'interrupted'} if kind=='speech_status' else {'ok':True}

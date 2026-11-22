@@ -49,8 +49,10 @@ P1,{"epoch":"demo","seq":4,"boot":4,"view":"photo","playing":true,"interval_seco
 | `music_control` | `music_control`，`action` 取 `status`、`play`、`pause`、`stop`、`prev`、`next` 或 `shuffle`。`play` 可带相对路径 `path` | 返回操作后的 `state`（`playing`、`paused`、`stopped`）、`path`、`title`、`position_ms`、`volume`（0–100）和 `shuffled`。空曲库时 `path`、`title` 为 `null`。查询以外的失败回包不得报告成功 |
 | `music_library` | `music_list`、`music_delete` | 见下节。导入须同时声明 `card_transfer`，复用已有上传及文件校验回执 |
 | `capture_media_tools` | 带 `ticket` 的 `music_control` 或 `photo_album` | 只接受当前语音对话的执行端和已授权的工具。需要延后开始时返回 `queued:true`，音乐同时返回 `target_path` |
+| `capture_speech_cancel_ticket` | `speech_cancel`，可带非零无符号 32 位整数 `ticket` | 带编号时仅取消与该录音关联的播报。编号已失效时返回标准 `ok:true`，其余播报继续。省略编号沿用原有取消命令 |
 | `assistant_onboard` | `agent_config_begin`、`agent_config_part`、`agent_config_commit`、`agent_config_status`、`agent_config_cancel` | 见配置更新示例。电脑端入口为 `desk_agent_config` |
 | `assistant_onboard` | `voice_permissions_set`，`enabled` 为完整工具名数组，例如 `{"enabled":["device_status"]}` | 板端在当前配对下完整保存后返回 `{"applied":true}`。空数组撤销全部授权。新配对同步前默认全关 |
+| `agent_tool_callback` | `agent_tool_poll`、`agent_tool_result` | 经配对 Wi-Fi 将板载助手当前会话中的只读工具请求交给电脑端处理。依赖 `cap_ext` 与 `assistant_onboard` |
 
 收到 `device_restarting` 表示板端已进入有界的重启收尾窗口。握手、能力、状态、诊断和已受理的传输及角色动作回执仍可查询，重复请求重启返回 `busy`。新的操作请求会被拒绝。设备重新上线后可查询状态，再决定是否重新发起操作。
 
@@ -59,6 +61,13 @@ P1,{"epoch":"demo","seq":4,"boot":4,"view":"photo","playing":true,"interval_seco
 软重启若在收尾限时结束时仍有保存工作待确认，下一次启动的 `diagnostics.restart_pending_writes` 提供类别列表。类别取 `card`（文件传输或已取得独占写卡权限的修改）、`inbox`（消息缓存写入）、`merit`（待保存的木鱼敲击）。有记录时且 `reset_reason` 为 `software` 才上报。各类别最多出现一次，供诊断时核对对应数据。
 
 ES3C35P 当前上报滤波后的电池端电压。采样尚未稳定，或连续 6 秒没有有效读数时，`mv` 为 `null`。由于供电状态尚无独立证据，`power` 为 `unknown`，`percent` 为 `null`，`low` 为 `false`。电脑端 `desk_status` 按能力位展示摘要。
+
+## 板载助手的电脑端工具回调
+
+1. 电脑以配对加密 Wi-Fi 建立连接，完成能力握手和当前 `voice_permissions_set` 同步后，发送无业务字段的 `agent_tool_poll`。板端将该连接标为可接收回调，3 秒内未再次轮询则失效。断线或连接代际变更清除待处理请求。
+2. 有待处理请求时，成功回包带 `call` 对象，例如 `{"call":{"ticket":7,"id":42,"name":"device_status"}}`。无待处理请求时省略 `call`。`ticket` 和 `id` 均使用非零无符号 32 位整数。`ticket` 绑定当前板载语音轮次。`id` 在一次板端启动中递增，回绕时跳过零。板端每次只交付一个请求，每个请求仅交付一次。
+3. 工具限于 `device_status` 和 `list_role_actions`，沿用 Base 语音工具的结果字段，均无参数。电脑在执行和返回前复核当前配对、连接和授权。角色动作列表若超出报文预算，返回能够容纳的前缀并标记 `truncated:true`。
+4. `agent_tool_result` 带同一组 `ticket`、`id`，以及布尔值 `success` 和 JSON 对象 `result`。`result` 经紧凑 ASCII JSON 编码后最多 800 字节，整条请求受 P1 1024 字节限制，回包受 1152 字节限制。板端在发起回调后最多等待 5 秒，只接收当前板载语音轮次和连接的结果。接收成功返回标准 `ok:true`。轮次已取消、结果超时或重复时返回 `callback_stale`，电脑无需重发。
 
 ## 曲库、路径规范、分页与删除
 

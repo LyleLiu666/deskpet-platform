@@ -28,6 +28,7 @@ from .adaptive_speed.history import Frame, History
 from .adaptive_speed.runtime import AdaptiveRuntime
 from .agent_config import AgentConfigUnconfirmed
 from .agent_speed_probe import AgentSpeedProbe, find_installed_probe
+from .agent_tool_callback import fit_callback_result
 from .card_upload import MAX_FILE_BYTES, MUSIC_DIRECTORIES, validate_music_path, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
 from .device_lock import DeviceBusyError
@@ -70,7 +71,7 @@ from .transcription import (
 from .voice_agent import configured_chat_backend
 from .voice_conversation import create_device_conversation
 from .voice_permissions import VOICE_TOOLS, VoicePermissions
-from .voice_tools import voice_tool_requires_confirmation, voice_tool_supported
+from .voice_tools import build_voice_tools, voice_tool_requires_confirmation, voice_tool_supported
 from .wifi_link import NO_DEVICE_REPLY_HELP, probe_board
 
 Manual = Literal["operations", "development", "roles"]
@@ -115,6 +116,19 @@ class _CaptureVoiceBackend:
         return message
 
 
+class _OnboardToolReader:
+    """Give the selected read-only tools access to the exact callback connection."""
+
+    def __init__(self, client):
+        self.client = client
+
+    async def get_status(self):
+        return status_view(await self.client.status(), self.client.channel.capabilities)
+
+    async def list_actions(self):
+        return {'status': 'ok', 'actions': await self.client.list_actions()}
+
+
 def read_manual(topic: Manual) -> str:
     if topic not in get_args(Manual):
         raise ValueError("unknown_manual")
@@ -148,6 +162,7 @@ class BoardSession:
         self.voice_session_id = None
         self.voice_permissions = VoicePermissions(path)
         self.voice_policy_sent = None
+        self.agent_tool_watermark = None
         self.voice_tool_snapshot = frozenset()
         self.voice_active_ticket = None
         self.voice_active_client = None
@@ -460,6 +475,7 @@ class BoardSession:
         sampled_client, heartbeat = None, {}
         while True:
             await self.recover_wifi(sampled_client, heartbeat)
+            await self.refresh_onboard_tool_callback(self.client)
             async with self.lock:
                 try:
                     if self.client is None:
@@ -740,6 +756,69 @@ class BoardSession:
         if type(ticket) is not int or not 0 < ticket <= 0xffffffff:
             return
         self.capture_task = asyncio.create_task(self._screen_capture(client, metadata))
+
+    def _advance_agent_tool_watermark(self, client, call_id):
+        scope = (client.config.identity, client.device_id, client.channel.boot)
+        previous = self.agent_tool_watermark
+        if previous is not None and previous[0] == scope:
+            distance = (call_id - previous[1]) & 0xffffffff
+            if not 0 < distance < 0x80000000:
+                return False
+        self.agent_tool_watermark = (scope, call_id)
+        return True
+
+    def _agent_tool_bound(self, client, epoch, boot):
+        return (self.client is client and client.channel.online and client.channel.epoch == epoch and
+                client.channel.boot == boot)
+
+    async def refresh_onboard_tool_callback(self, client):
+        if client is None or getattr(getattr(client, 'link', None), 'wireless', False) is not True:
+            return
+        channel = client.channel
+        if any(channel.capabilities.get(name) != 1 for name in ('cap_ext', 'assistant_onboard', 'agent_tool_callback')):
+            return
+        epoch, boot = channel.epoch, channel.boot
+        try:
+            async with self.lock:
+                if not self._agent_tool_bound(client, epoch, boot):
+                    return
+                if await self.sync_onboard_voice_permissions(client) != 'applied':
+                    return
+                call = await client.poll_agent_tool()
+                if call is None or not self._advance_agent_tool_watermark(client, call['id']):
+                    return
+
+            # Keep the lock order used by Base tools. The read-only handlers are
+            # bound to this client and cannot reconnect through BoardSession.
+            async with self.voice_permissions.lock(), self.lock:
+                if (not self._agent_tool_bound(client, epoch, boot) or
+                        not self._matches_voice_pairing(client, DeviceConfig.load(self.path))):
+                    return
+                name = call['name']
+                success, result = False, {'status': 'not_authorized'}
+                if name in self.voice_permissions.enabled():
+                    result = {'status': 'unsupported'}
+                    if voice_tool_supported(name, channel.capabilities):
+                        tool, = build_voice_tools(_OnboardToolReader(client), {name})
+                        try:
+                            outcome = await tool.invoke()
+                        except CommandRejected:
+                            result = {'status': 'unavailable'}
+                        else:
+                            success, result = fit_callback_result(name, outcome)
+                if (not self._agent_tool_bound(client, epoch, boot) or
+                        not self._matches_voice_pairing(client, DeviceConfig.load(self.path))):
+                    return
+                if name not in self.voice_permissions.enabled():
+                    success, result = False, {'status': 'not_authorized'}
+                await client.send_agent_tool_result(call['ticket'], call['id'], success, result)
+        except CommandRejected:
+            # A cancelled or expired board turn may reject its result. No callback is retried.
+            return
+        except LINK_ERRORS as error:
+            async with self.lock:
+                if self.client is client and not channel.online:
+                    await self.record_link_error(error)
 
     async def _require_active_capture(self, client, ticket):
         if self.client is not client:

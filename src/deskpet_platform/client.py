@@ -25,6 +25,7 @@ from .agent_config import (
     encode_agent_config,
     valid_agent_config_tx,
 )
+from .agent_tool_callback import AGENT_CALLBACK_TOOLS, valid_callback_id, valid_callback_result
 from .card_upload import MUSIC_DIRECTORIES, upload_file, upload_usb, validate_music_path, validate_path
 from .channel import Channel, CommandRejected, DeviceError, TextNotVisible
 from .image_display import prepare_image
@@ -551,32 +552,55 @@ class Client:
                 raise ValueError("录音请求编号无效。")
             if self.channel.capabilities.get("capture_speech_ticket") != 1:
                 raise DeviceError("capture_speech_ticket_not_supported")
+        scoped_cancel = (capture_ticket is not None and
+                         self.channel.capabilities.get("capture_speech_cancel_ticket") == 1)
+        started = False
+
+        async def speech_command(kind, **fields):
+            nonlocal started
+            async with self._operation:
+                if not scoped_cancel:
+                    result = await self.channel.send(kind, **fields)
+                else:
+                    request = asyncio.create_task(self.channel.send(kind, **fields))
+                    try:
+                        result = await asyncio.shield(request)
+                    except asyncio.CancelledError:
+                        # Keep the connection usable for the interrupting capture by draining the ACK.
+                        while not request.done():
+                            try:
+                                await asyncio.wait((request,))
+                            except asyncio.CancelledError:
+                                continue
+                        acknowledged = not request.cancelled() and request.exception() is None
+                        if kind == "speech_begin" and acknowledged:
+                            started = True
+                        raise
+                if kind == "speech_begin":
+                    started = True
+                return result
+
         async with self._speech:
-            started=False
             try:
                 fields={"bytes":len(pcm),"crc32":zlib.crc32(pcm)}
                 if read_ticket is not None:fields["read_ticket"]=read_ticket
                 if capture_ticket is not None:fields["capture_ticket"]=capture_ticket
-                async with self._operation:
-                    await self.channel.send("speech_begin",**fields)
-                    started=True
+                await speech_command("speech_begin", **fields)
                 for offset in range(0,len(pcm),384):
-                    async with self._operation:
-                        await self.channel.send("speech_chunk",offset=offset,data=pcm[offset:offset+384].hex())
-                async with self._operation:
-                    await self.channel.send("speech_commit")
+                    await speech_command("speech_chunk", offset=offset, data=pcm[offset:offset+384].hex())
+                await speech_command("speech_commit")
                 async with asyncio.timeout(15):
                     while True:
-                        async with self._operation:
-                            result=await self.channel.send("speech_status")
+                        result = await speech_command("speech_status")
                         status=result.get("speech_status")
                         if status=="finished":return {"status":"finished","duration_ms":round(len(pcm)/32)}
                         if status not in ("queued","playing"):raise DeviceError("speech_"+str(status))
                         await asyncio.sleep(poll_interval)
             except BaseException:
                 if started:
+                    cancel_fields = {"ticket": capture_ticket} if scoped_cancel else {}
                     with suppress(Exception):
-                        async with self._operation:await self.channel.send("speech_cancel")
+                        await speech_command("speech_cancel", **cancel_fields)
                 raise
 
     async def read_request_take(self):
@@ -724,6 +748,35 @@ class Client:
             reply = await self.channel.send("voice_permissions_set", enabled=sorted(enabled))
         if reply.get("applied") is not True:
             raise DeviceError("invalid_voice_permissions_reply")
+
+    def _require_agent_tool_callback(self):
+        capabilities = self.channel.capabilities
+        if (getattr(self.link, 'wireless', False) is not True or
+                capabilities.get('cap_ext') != 1 or capabilities.get('assistant_onboard') != 1 or
+                capabilities.get('agent_tool_callback') != 1):
+            raise DeviceError('agent_tool_callback_not_supported')
+
+    async def poll_agent_tool(self):
+        """Take at most one request from this paired board's current onboard turn."""
+        self._require_agent_tool_callback()
+        async with self._operation:
+            reply = await self.channel.send('agent_tool_poll')
+        if 'call' not in reply:
+            return None
+        call = reply['call']
+        if (not isinstance(call, dict) or set(call) != {'ticket', 'id', 'name'} or
+                not valid_callback_id(call['ticket']) or not valid_callback_id(call['id']) or
+                not isinstance(call['name'], str) or call['name'] not in AGENT_CALLBACK_TOOLS):
+            raise DeviceError('invalid_agent_tool_call')
+        return call
+
+    async def send_agent_tool_result(self, ticket, call_id, success, result):
+        self._require_agent_tool_callback()
+        if (not valid_callback_id(ticket) or not valid_callback_id(call_id) or
+                type(success) is not bool or not valid_callback_result(result)):
+            raise ValueError('invalid_agent_tool_result')
+        async with self._operation:
+            await self.channel.send('agent_tool_result', ticket=ticket, id=call_id, success=success, result=result)
 
     async def voice_device_settings(self, *, volume=None, brightness=None, capture_ticket=None):
         if self.channel.capabilities.get("device_settings") != 1:
