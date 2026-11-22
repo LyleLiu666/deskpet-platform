@@ -1,9 +1,11 @@
 import asyncio
+import json
 import tempfile
 import unittest
 import zlib
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
+from deskpet_platform.channel import Channel
 from deskpet_platform.mcp_server import BoardSession
 from deskpet_platform.client import Client, DeviceError
 from deskpet_platform.pairing import DeviceConfig
@@ -20,6 +22,37 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
         client.channel.capabilities={}
         with self.assertRaises(DeviceError):await client.capture_active(7)
 
+    async def test_capture_check_uses_the_wire_ack_deadline(self):
+        transport = Mock(wireless=True, write=AsyncMock(), readline=AsyncMock(return_value=b'P1,' + json.dumps({
+            'epoch': 'test', 'seq': 1, 'boot': 1, 'ok': True, 'active': True,
+        }).encode() + b'\n'))
+        client = Client.__new__(Client)
+        client._operation = asyncio.Lock()
+        client.channel = Channel(transport, expected_mac=None)
+        client.channel.epoch = 'test'
+        client.channel.boot = 1
+        client.channel.online = True
+        client.channel.capabilities = {'capture_cancel_poll': 1}
+        with tempfile.TemporaryDirectory() as directory:
+            session = self.session(Path(directory) / 'device.json')
+            session.client = client
+
+            async def wait_for_delayed_ack(awaitable, timeout):
+                # Model a response that needs 3.125 seconds without delaying the suite.
+                if timeout < 3.125:
+                    awaitable.close()
+                    raise TimeoutError
+                return await awaitable
+
+            virtual_asyncio = Mock(wraps=asyncio, wait_for=wait_for_delayed_ack)
+            with patch('deskpet_platform.mcp_server.asyncio', virtual_asyncio), \
+                 patch('deskpet_platform.channel.asyncio', virtual_asyncio):
+                await session._require_active_capture(client, 7)
+        self.assertTrue(client.channel.online)
+        transport.write.assert_awaited_once()
+        self.assertEqual(json.loads(transport.write.await_args.args[0][3:]),
+                         {'epoch': 'test', 'seq': 1, 'type': 'capture_check', 'ticket': 7})
+
     async def test_no_speech_requires_advertised_capability(self):
         client=Client.__new__(Client);client._operation=asyncio.Lock()
         client.channel=type('Channel',(),{})();client.channel.capabilities={'capture_mode':1}
@@ -29,6 +62,31 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
         await client.capture_result(7,False,failure='no_speech')
         client.channel.send.assert_awaited_once_with('capture_result',ticket=7,success=False,failure='no_speech')
         with self.assertRaises(ValueError):await client.capture_result(7,True,failure='no_speech')
+
+    async def test_reply_text_uses_ticketed_transcript_transfer(self):
+        client = Client.__new__(Client)
+        client._operation = asyncio.Lock()
+        client.channel = Mock(capabilities={'transcript_display': 1, 'capture_transcript_ticket': 1}, send=AsyncMock())
+        with self.assertRaises(DeviceError):
+            await client.queue_transcript('收到', capture_ticket=7, kind='reply')
+        client.channel.capabilities['capture_reply_text'] = 1
+        with self.assertRaises(ValueError):
+            await client.queue_transcript('收到', kind='reply')
+        client.channel.send.assert_not_awaited()
+
+        text = '好' * 1400
+        expected = ('好' * 1364 + '…').encode('utf-8')
+        await client.queue_transcript(text, capture_ticket=7, kind='reply')
+        sent = client.channel.send.await_args_list
+        self.assertEqual(sent[0], call('transcript_begin', bytes=len(expected), crc32=zlib.crc32(expected),
+                                       ticket=7, kind='reply'))
+        self.assertEqual(sent[-1], call('transcript_commit'))
+        self.assertEqual(b''.join(bytes.fromhex(chunk.kwargs['data']) for chunk in sent[1:-1]), expected)
+        client.channel.send.reset_mock()
+        await client.queue_transcript('你好', capture_ticket=7)
+        encoded = '你好'.encode('utf-8')
+        self.assertEqual(client.channel.send.await_args_list[0], call('transcript_begin', bytes=len(encoded),
+                         crc32=zlib.crc32(encoded), ticket=7))
 
     def session(self, path, enabled=True):
         with patch.dict('os.environ', {'DESKPET_ENABLE_ONLINE_TRANSCRIPTION': '1' if enabled else '0',
@@ -58,11 +116,12 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             session = self.session(Path(directory) / 'device.json')
             client = self.board(); session.client = client
-            with patch('deskpet_platform.mcp_server.transcribe_to_device', new_callable=AsyncMock) as transcribe:
+            with patch('deskpet_platform.mcp_server.transcribe_pcm', new_callable=AsyncMock, return_value='你好') as transcribe:
                 await session.refresh_capture(client)
                 await session.capture_task
             client.receive_capture.assert_awaited_once()
-            transcribe.assert_awaited_once_with(client, b'\0\0', api_key='test-key', model='model/name', capture_ticket=7)
+            transcribe.assert_awaited_once_with(b'\0\0', api_key='test-key', model='model/name')
+            client.queue_transcript.assert_awaited_once_with('你好', capture_ticket=7)
             client.capture_result.assert_awaited_once_with(7, True)
 
     async def test_local_capture_reports_result_and_rejects_empty_speech(self):
@@ -157,7 +216,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             session = self.session(Path(directory) / 'device.json')
             client = self.board(); session.client = client
-            with patch('deskpet_platform.mcp_server.transcribe_to_device', new_callable=AsyncMock, side_effect=RuntimeError('test-key')):
+            with patch('deskpet_platform.mcp_server.transcribe_pcm', new_callable=AsyncMock, side_effect=RuntimeError('test-key')):
                 await session.refresh_capture(client)
                 await session.capture_task
             client.capture_result.assert_awaited_once_with(7, False)
@@ -171,7 +230,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
                 session.client = None
                 return b'\0\0'
             client.receive_capture.side_effect = receive
-            with patch('deskpet_platform.mcp_server.transcribe_to_device', new_callable=AsyncMock) as transcribe:
+            with patch('deskpet_platform.mcp_server.transcribe_pcm', new_callable=AsyncMock) as transcribe:
                 await session.refresh_capture(client)
                 await session.capture_task
             transcribe.assert_not_awaited()
@@ -278,13 +337,16 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result['status'], 'not_connected')
             new.play_speech_pcm.assert_not_awaited()
 
-    async def test_old_firmware_does_not_start_uncancellable_capture(self):
+    async def test_capture_requires_the_complete_base_capability_set(self):
         with tempfile.TemporaryDirectory() as directory:
-            session=self.session(Path(directory)/'device.json')
-            client=self.board();session.client=client
-            client.channel.capabilities.pop('capture_transcript_ticket')
-            await session.refresh_capture(client)
-            client.poll_capture.assert_not_awaited()
+            session = self.session(Path(directory) / 'device.json')
+            for name in ('capture_pull', 'transcript_display', 'capture_transcript_ticket', 'capture_cancel_poll'):
+                with self.subTest(missing=name):
+                    client = self.board()
+                    session.client = client
+                    del client.channel.capabilities[name]
+                    await session.refresh_capture(client)
+                    client.poll_capture.assert_not_awaited()
 
     async def test_exiting_cancels_inflight_recognition(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -295,12 +357,66 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
                 entered.set()
                 try:await asyncio.Event().wait()
                 finally:cancelled.set()
-            with patch('deskpet_platform.mcp_server.transcribe_to_device',side_effect=recognition):
+            with patch('deskpet_platform.mcp_server.transcribe_pcm',side_effect=recognition):
                 await session.refresh_capture(client)
                 await asyncio.wait_for(entered.wait(),1)
                 await asyncio.wait_for(session.capture_task,2)
             self.assertTrue(cancelled.is_set())
             client.capture_result.assert_awaited_once_with(7,False)
+
+    async def test_recognition_returned_after_cancel_does_not_display_or_start_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = self.session(Path(directory) / 'device.json')
+            client = self.board()
+            session.client = client
+            client.channel.capabilities.update(capture_mode=1, capture_reply_text=1, voice_names=1, speech_pcm=1)
+            client.poll_capture.return_value = {'ticket': 7, 'mode': 'voice'}
+            session.voice_backend = Mock(complete=AsyncMock())
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+
+            async def recognize(*_args, **_kwargs):
+                client.capture_active.return_value = False
+                return '这段识别回得太晚'
+
+            with patch('deskpet_platform.mcp_server.transcribe_pcm', side_effect=recognize):
+                await session.refresh_capture(client)
+                await session.capture_task
+            client.queue_transcript.assert_not_awaited()
+            client.capture_progress.assert_not_awaited()
+            session.voice_backend.complete.assert_not_awaited()
+            client.capture_result.assert_awaited_once_with(7, False, failure='recognition')
+
+    async def test_model_returned_after_cancel_does_not_dispatch_authorized_tool(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'device.json'
+            DeviceConfig('aa:bb:cc:dd:ee:ff', bytes(range(32))).save(path)
+            session = self.session(path)
+            client = self.board()
+            session.client = client
+            client.channel.capabilities.update(capture_mode=1, capture_reply_text=1, voice_names=1, speech_pcm=1)
+            client.poll_capture.return_value = {'ticket': 7, 'mode': 'voice'}
+            await session.voice_tool_settings(['device_status'])
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.get_status = AsyncMock(return_value={'connection': 'wifi'})
+            session.speak_voice_reply = AsyncMock()
+
+            async def complete(_messages, tools):
+                self.assertEqual([tool.name for tool in tools], ['device_status'])
+                client.capture_active.return_value = False
+                return {'role': 'assistant', 'content': None, 'tool_calls': [{
+                    'id': 'late', 'type': 'function', 'function': {'name': 'device_status', 'arguments': '{}'},
+                }]}
+
+            session.voice_backend = Mock(complete=AsyncMock(side_effect=complete))
+            with patch('deskpet_platform.mcp_server.transcribe_pcm', new_callable=AsyncMock, return_value='看下状态'):
+                await session.refresh_capture(client)
+                await session.capture_task
+            session.voice_backend.complete.assert_awaited_once()
+            session.get_status.assert_not_awaited()
+            client.queue_transcript.assert_awaited_once_with('看下状态', capture_ticket=7)
+            session.speak_voice_reply.assert_not_awaited()
+            client.capture_result.assert_awaited_once_with(7, False, failure='model')
+            self.assertIsNone(session.voice_conversation)
 
     async def test_voice_capture_transcribes_then_replies_with_context(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -312,11 +428,15 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             session.voice_backend=backend
             session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
             session.speak_voice_reply=AsyncMock(return_value={'status':'finished','duration_ms':1})
+            phase = Mock()
+            phase.attach_mock(client.queue_transcript, 'display')
+            phase.attach_mock(session.speak_voice_reply, 'speech')
             with patch('deskpet_platform.mcp_server.transcribe_pcm',new_callable=AsyncMock,return_value='你好'):
                 await session.refresh_capture(client);await session.capture_task
             backend.complete.assert_awaited_once()
             self.assertEqual(backend.complete.await_args.args[1],[]) # no unapproved tools
             session.speak_voice_reply.assert_awaited_once_with('你好，我在。')
+            self.assertEqual(phase.mock_calls, [call.speech('你好，我在。'), call.display('你好', capture_ticket=7)])
             client.capture_result.assert_awaited_once_with(7,True)
             client.poll_capture.assert_awaited_once_with(voice_ready=True)
 
@@ -347,8 +467,8 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             session=self.session(Path(directory)/'device.json');client=self.board();session.client=client
             client.channel.capabilities.update(capture_mode=1,voice_names=1)
             client.poll_capture.return_value={'ticket':7,'bytes':2,'crc32':0,'mode':'voice'}
-            client.capture_active.return_value=False
             entered=asyncio.Event();cancelled=asyncio.Event()
+            client.capture_active.side_effect = lambda _ticket: not entered.is_set()
             async def complete(*_args):
                 entered.set()
                 try:await asyncio.Event().wait()
@@ -367,11 +487,11 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             session=self.session(Path(directory)/'device.json');client=self.board();session.client=client
             client.channel.capabilities.update(capture_mode=1,voice_names=1)
             client.poll_capture.return_value={'ticket':7,'bytes':2,'crc32':0,'mode':'voice'}
-            client.capture_active.return_value=False
             backend=type('Backend',(),{})();backend.complete=AsyncMock(return_value={'role':'assistant','content':'你好'})
             session.voice_backend=backend
             session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
             entered=asyncio.Event();cancelled=asyncio.Event()
+            client.capture_active.side_effect = lambda _ticket: not entered.is_set()
             async def speak(_text):
                 entered.set()
                 try:await asyncio.Event().wait()
@@ -383,22 +503,49 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(cancelled.is_set());self.assertIsNone(session.voice_conversation)
             client.capture_result.assert_awaited_once_with(7,False,failure='playback')
 
-    async def test_two_voice_turns_retain_context(self):
+    async def test_ten_voice_turns_retain_context_and_display_text_during_each_turn(self):
         with tempfile.TemporaryDirectory() as directory:
-            session=self.session(Path(directory)/'device.json');client=self.board();session.client=client
-            client.channel.capabilities.update(capture_mode=1,voice_names=1)
-            client.poll_capture.return_value={'ticket':7,'bytes':2,'crc32':0,'mode':'voice'}
-            histories=[]
-            async def complete(messages,_tools):
-                histories.append([dict(message) for message in messages]);return {'role':'assistant','content':'收到'}
-            backend=type('Backend',(),{})();backend.complete=AsyncMock(side_effect=complete);session.voice_backend=backend
-            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
-            session.speak_voice_reply=AsyncMock(return_value={'status':'finished'})
-            with patch('deskpet_platform.mcp_server.transcribe_pcm',new_callable=AsyncMock,side_effect=['第一句','第二句']):
-                await session.refresh_capture(client);await session.capture_task
-                await session.refresh_capture(client);await session.capture_task
-            self.assertEqual([m['content'] for m in histories[1][1:]],['第一句','收到','第二句'])
-            self.assertEqual(session.voice_names.await_count,1)
+            session = self.session(Path(directory) / 'device.json')
+            client = self.board()
+            session.client = client
+            client.channel.capabilities.update(capture_mode=1, capture_voice_session=1, capture_speech_ticket=1,
+                                               capture_reply_text=1, voice_names=1, speech_pcm=1)
+            tickets = list(range(7, 17))
+            client.poll_capture.side_effect = [{'ticket': ticket, 'mode': 'voice', 'voice_session': 12}
+                                               for ticket in tickets]
+            turns = [f'第 {i} 句' for i in range(1, 11)]
+            history = []
+            phase = Mock()
+
+            async def complete(messages, tools):
+                self.assertEqual(tools, [])
+                self.assertEqual([message['content'] for message in messages[1:]], history + [turns[len(history) // 2]])
+                history.extend([turns[len(history) // 2], '收到'])
+                return {'role': 'assistant', 'content': '收到'}
+
+            session.voice_backend = Mock(complete=AsyncMock(side_effect=complete))
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.speak_voice_reply = AsyncMock(return_value={'status': 'finished'})
+            phase.attach_mock(client.queue_transcript, 'display')
+            phase.attach_mock(client.capture_progress, 'progress')
+            phase.attach_mock(session.voice_backend.complete, 'model')
+            phase.attach_mock(session.speak_voice_reply, 'speech')
+            phase.attach_mock(client.capture_result, 'result')
+            with patch('deskpet_platform.mcp_server.transcribe_pcm', new_callable=AsyncMock, side_effect=turns):
+                for ticket, turn in zip(tickets, turns, strict=True):
+                    phase.reset_mock()
+                    await session.refresh_capture(client)
+                    await session.capture_task
+                    self.assertEqual([item[0] for item in phase.mock_calls],
+                                     ['display', 'progress', 'model', 'display', 'progress', 'speech', 'result'])
+                    self.assertEqual(phase.mock_calls[:2], [call.display(turn, capture_ticket=ticket),
+                                                           call.progress(ticket, 'thinking')])
+                    self.assertEqual(phase.mock_calls[3:], [call.display('收到', capture_ticket=ticket, kind='reply'),
+                                                           call.progress(ticket, 'speaking'),
+                                                           call.speech('收到', capture_ticket=ticket),
+                                                           call.result(ticket, True)])
+            self.assertEqual(len(history), 20)
+            session.voice_names.assert_awaited_once()
 
     async def test_leaving_voice_page_ends_context_even_if_the_idle_poll_is_missed(self):
         with tempfile.TemporaryDirectory() as directory:

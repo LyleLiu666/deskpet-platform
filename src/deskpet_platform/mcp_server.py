@@ -65,7 +65,6 @@ from .transcription import (
     transcribe_dashscope_pcm,
     transcribe_local_pcm,
     transcribe_pcm,
-    transcribe_to_device,
 )
 from .voice_agent import configured_chat_backend
 from .voice_conversation import create_device_conversation
@@ -99,6 +98,19 @@ class CardFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source: str
     path: str
+
+
+class _CaptureVoiceBackend:
+    def __init__(self, backend, require_active):
+        self.backend = backend
+        self.require_active = require_active
+
+    async def complete(self, messages, tools):
+        await self.require_active()
+        message = await self.backend.complete(messages, tools)
+        # The cancellation poll can be asleep when the model responds.
+        await self.require_active()
+        return message
 
 
 def read_manual(topic: Manual) -> str:
@@ -718,6 +730,14 @@ class BoardSession:
             return
         self.capture_task = asyncio.create_task(self._screen_capture(client, metadata))
 
+    async def _require_active_capture(self, client, ticket):
+        if self.client is not client:
+            raise DeviceError('connection_changed')
+        # Channel owns the ACK deadline. Cancelling the check early invalidates the connection.
+        active = await client.capture_active(ticket)
+        if not active or self.client is not client:
+            raise DeviceError('capture_cancelled')
+
     async def _screen_capture(self, client, metadata):
         if client is not self.client:
             return
@@ -727,6 +747,7 @@ class BoardSession:
         success = False
         failure = 'recognition'
         mode=metadata.get('mode','transcript')
+        display_reply = mode == 'voice' and capabilities.get('capture_reply_text') == 1
         mode_valid=(mode in ('transcript','voice') and
                     (('mode' not in metadata and client.channel.capabilities.get('capture_mode')!=1) or
                      ('mode' in metadata and client.channel.capabilities.get('capture_mode')==1)))
@@ -749,13 +770,13 @@ class BoardSession:
                     text=await transcribe_dashscope_pcm(pcm,service)
                 else:
                     key, model = service
-                    if mode!='voice':
-                        await transcribe_to_device(client,pcm,api_key=key,model=model,capture_ticket=ticket);return
                     text=await transcribe_pcm(pcm,api_key=key,model=model)
-                if self.client is not client:raise DeviceError('connection_changed')
+                await self._require_active_capture(client, ticket)
                 if mode!='voice':
                     await client.queue_transcript(text,capture_ticket=ticket);return
                 if not isinstance(text,str) or not text.strip():raise ValueError('empty_transcript')
+                if display_reply:
+                    await client.queue_transcript(text, capture_ticket=ticket)
                 failure='model';await client.capture_progress(ticket,'thinking')
                 if self.client is not client:raise DeviceError('connection_changed')
                 enabled=self.voice_permissions.enabled()
@@ -768,8 +789,23 @@ class BoardSession:
                 if self.voice_conversation is None:
                     def authorize(name):
                         return self.client is client and name in self.voice_permissions.enabled()
-                    conversation=await create_device_conversation(self,self.voice_backend,enabled_tools=enabled,authorize=authorize,
-                        permission_lock=self.voice_permissions.lock,voice_role_action=self.voice_role_action)
+
+                    async def require_active_turn():
+                        # This conversation is reused across several capture tickets.
+                        active_ticket = self.voice_active_ticket
+                        if self.voice_active_client is not client or active_ticket is None:
+                            raise DeviceError('capture_cancelled')
+                        await self._require_active_capture(client, active_ticket)
+
+                    @asynccontextmanager
+                    async def permission_lock():
+                        async with self.voice_permissions.lock():
+                            await require_active_turn()
+                            yield
+
+                    backend = _CaptureVoiceBackend(self.voice_backend, require_active_turn)
+                    conversation=await create_device_conversation(self,backend,enabled_tools=enabled,authorize=authorize,
+                        permission_lock=permission_lock,voice_role_action=self.voice_role_action)
                     if self.client is not client:
                         await conversation.end()
                         raise DeviceError('connection_changed')
@@ -777,7 +813,10 @@ class BoardSession:
                     self.voice_tool_snapshot=enabled
                 async def speak_reply(reply_text):
                     nonlocal failure
-                    failure='playback';await client.capture_progress(ticket,'speaking')
+                    failure = 'playback'
+                    if display_reply:
+                        await client.queue_transcript(reply_text, capture_ticket=ticket, kind='reply')
+                    await client.capture_progress(ticket, 'speaking')
                     if self.client is not client:raise DeviceError('connection_changed')
                     if capabilities.get('capture_speech_ticket')==1:
                         return await self.speak_voice_reply(reply_text,capture_ticket=ticket)
@@ -789,13 +828,16 @@ class BoardSession:
                         self.voice_active_ticket=None;self.voice_active_client=None
                 if reply.agent.confirmation is not None or not reply.playback or reply.playback.get('status')!='finished':
                     raise RuntimeError('voice_reply_incomplete')
-                failure='recognition';await client.queue_transcript(text,capture_ticket=ticket)
+                if not display_reply:
+                    failure = 'recognition'
+                    await self._require_active_capture(client, ticket)
+                    await client.queue_transcript(text, capture_ticket=ticket)
             task=asyncio.create_task(process())
             try:
                 while not task.done():
                     done,_=await asyncio.wait({task},timeout=.5)
                     if done:break
-                    if self.client is not client or not await asyncio.wait_for(client.capture_active(ticket),timeout=3):return
+                    await self._require_active_capture(client, ticket)
                 await task
                 success = True
             finally:

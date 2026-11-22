@@ -442,14 +442,21 @@ class Client:
         if self.channel.capabilities.get('capture_pull')!=1:raise DeviceError('capture_not_supported')
         async with self._capture, self._operation:return await self.channel.send('capture_finish',ticket=ticket)
 
-    async def queue_transcript(self, text, *, capture_ticket=None):
-        """Queue recognized text for the device; acceptance does not prove display."""
+    async def queue_transcript(self, text, *, capture_ticket=None, kind=None):
+        """Queue a transcript or reply excerpt for display on the paired device."""
+        if kind not in (None, 'reply'):
+            raise ValueError("显示内容类型无效。")
+        if kind == 'reply' and capture_ticket is None:
+            raise ValueError("回复文字须绑定录音请求。")
         if not isinstance(text, str):
             raise ValueError("识别结果须为文字。")
         try:
             encoded = text.encode("utf-8")
         except UnicodeEncodeError:
             raise ValueError("识别结果包含无效文字。") from None
+        if kind == 'reply' and len(encoded) > 4096:
+            suffix = '…'.encode("utf-8")
+            encoded = encoded[:4096 - len(suffix)].decode('utf-8', errors='ignore').encode('utf-8') + suffix
         if len(encoded) > 4096 or any((ord(c) < 32 and c not in "\n\r\t") or ord(c) == 127 for c in text):
             raise ValueError("识别结果过长或包含无效字符。")
         if self.channel.capabilities.get("transcript_display") != 1:
@@ -459,11 +466,14 @@ class Client:
                 raise ValueError("录音请求编号无效。")
             if self.channel.capabilities.get('capture_transcript_ticket')!=1:
                 raise DeviceError('capture_cancel_not_supported')
+        if kind == 'reply' and self.channel.capabilities.get('capture_reply_text') != 1:
+            raise DeviceError('capture_reply_text_not_supported')
         async with self._operation:
             started = False
             try:
                 fields={'bytes':len(encoded),'crc32':zlib.crc32(encoded)}
                 if capture_ticket is not None:fields['ticket']=capture_ticket
+                if kind is not None:fields['kind']=kind
                 await self.channel.send("transcript_begin", **fields)
                 started = True
                 for offset in range(0, len(encoded), 384):
