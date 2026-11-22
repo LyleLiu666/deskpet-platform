@@ -90,6 +90,158 @@ class CompactPollTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(refreshed["last_link_loss"]["observed_at"], evidence["observed_at"])
             self.assertEqual(refreshed["last_link_loss"]["connection_recovery_ms"], 3250)
 
+    def make_status_session(self, directory, *, wireless=True):
+        path = Path(directory) / "device.json"
+        CONFIG.save(path)
+        session = BoardSession(path)
+        client = self.make_status_client(wireless=wireless)
+        client.status.side_effect = AckTimeout("heartbeat did not reply")
+        session.client = client
+        session.record_status({"boot": 1})
+        return session, client
+
+    def make_status_client(self, *, wireless=True, boot=1):
+        client = AsyncMock(config=CONFIG, device_id=None)
+        client.link.wireless = wireless
+        client.channel.boot = boot
+        client.channel.capabilities = {"clock_sync": 1}
+        client.channel.dropped_events = 0
+        return client
+
+    async def test_explicit_status_recovers_wifi_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, timed_out = self.make_status_session(directory)
+            replacement = self.make_status_client()
+            replacement.status.return_value = {"boot": 1, "pet_page": 3}
+            session.usb_port = Mock()
+            session.last_notice_count = 1
+            session.last_message_cache = {"pending": 1}
+            session.snapshot["notification_error"] = "fixture notice error"
+
+            async def reconnect(config):
+                timed_out.close.assert_awaited_once()
+                self.assertIsNone(session.client)
+                return replacement
+
+            with patch.object(session, "open_wifi", side_effect=reconnect) as connect, \
+                 patch.object(session, "usb_client") as usb:
+                status = await session.get_status()
+
+            connect.assert_awaited_once_with(CONFIG)
+            usb.assert_not_called()
+            timed_out.status.assert_awaited_once_with()
+            replacement.status.assert_awaited_once_with()
+            replacement.sync_clock.assert_not_awaited()
+            self.assertIs(session.client, replacement)
+            self.assertIsNone(session.last_notice_count)
+            self.assertIsNone(session.last_message_cache)
+            self.assertEqual(status["connection"], "connected")
+            self.assertEqual(status["page"], 3)
+            self.assertEqual(status["notification_error"], "fixture notice error")
+            self.assertEqual(status["last_link_loss"]["reason"], "ack_timeout")
+            self.assertIn("connection_recovery_ms", status["last_link_loss"])
+
+    async def test_explicit_status_failed_wifi_recovery_closes_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, timed_out = self.make_status_session(directory)
+            replacement = self.make_status_client()
+            replacement.status.side_effect = AckTimeout("second heartbeat did not reply")
+            with patch.object(session, "open_wifi", return_value=replacement) as connect:
+                status = await session.get_status()
+                self.assertEqual(await session.get_status(), status)
+
+            connect.assert_awaited_once_with(CONFIG)
+            timed_out.close.assert_awaited_once()
+            replacement.status.assert_awaited_once_with()
+            replacement.close.assert_awaited_once()
+            self.assertEqual(status["connection"], "offline")
+            self.assertEqual(status["last_link_loss"]["reason"], "ack_timeout")
+            self.assertNotIn("connection_recovery_ms", status["last_link_loss"])
+
+    async def test_explicit_status_recovers_wifi_stream_closure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, disconnected = self.make_status_session(directory)
+            disconnected.status.side_effect = OSError("wifi_disconnected: wifi_disconnected")
+            replacement = self.make_status_client()
+            replacement.status.return_value = {"boot": 1, "pet_page": 3}
+            with patch.object(session, "open_wifi", return_value=replacement) as connect:
+                status = await session.get_status()
+
+            connect.assert_awaited_once_with(CONFIG)
+            disconnected.close.assert_awaited_once()
+            replacement.status.assert_awaited_once_with()
+            self.assertEqual(status["connection"], "connected")
+            self.assertEqual(status["page"], 3)
+            self.assertEqual(status["last_link_loss"]["reason"], "wifi_stream_closed")
+
+    async def test_unrelated_wifi_status_error_does_not_connect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, disconnected = self.make_status_session(directory)
+            disconnected.status.side_effect = OSError("fixture unrelated error")
+            with patch.object(session, "open_wifi") as connect:
+                status = await session.get_status()
+
+            connect.assert_not_called()
+            disconnected.close.assert_awaited_once()
+            self.assertEqual(status["connection"], "offline")
+            self.assertEqual(status["last_link_loss"]["reason"], "link_error")
+
+    async def test_explicit_status_wifi_recovery_has_a_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, _timed_out = self.make_status_session(directory)
+            replacement = self.make_status_client()
+            replacement.status.side_effect = asyncio.Event().wait
+            with patch.object(session, "open_wifi", return_value=replacement) as connect, \
+                 patch("deskpet_platform.mcp_server.STATUS_WIFI_RECOVERY_TIMEOUT", .05):
+                status = await asyncio.wait_for(session.get_status(), 1)
+
+            connect.assert_awaited_once_with(CONFIG)
+            replacement.close.assert_awaited_once()
+            self.assertIsNone(session.client)
+            self.assertEqual(status["connection"], "offline")
+
+    async def test_explicit_status_usb_timeout_does_not_connect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, timed_out = self.make_status_session(directory, wireless=False)
+            with patch.object(session, "open_wifi") as connect:
+                status = await session.get_status()
+
+            connect.assert_not_called()
+            timed_out.close.assert_awaited_once()
+            self.assertEqual(status["connection"], "offline")
+            self.assertEqual(status["last_link_loss"]["reason"], "ack_timeout")
+
+    async def test_explicit_status_wifi_recovery_leaves_new_boot_for_poll(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, _timed_out = self.make_status_session(directory)
+            replacement = self.make_status_client(boot=2)
+            with patch.object(session, "open_wifi", return_value=replacement) as connect:
+                status = await session.get_status()
+
+            connect.assert_awaited_once_with(CONFIG)
+            replacement.status.assert_not_awaited()
+            replacement.close.assert_awaited_once()
+            self.assertIsNone(session.client)
+            self.assertEqual(status["connection"], "offline")
+
+    async def test_explicit_status_wifi_recovery_rejects_changed_pairing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, _timed_out = self.make_status_session(directory)
+            replacement = self.make_status_client()
+
+            async def status_after_pairing_change():
+                DeviceConfig("02:00:00:00:00:02", bytes(range(32))).save(session.path)
+                return {"boot": 1}
+
+            replacement.status.side_effect = status_after_pairing_change
+            with patch.object(session, "open_wifi", return_value=replacement) as connect:
+                status = await session.get_status()
+
+            connect.assert_awaited_once_with(CONFIG)
+            replacement.close.assert_awaited_once()
+            self.assertIsNone(session.client)
+            self.assertEqual(status["connection"], "offline")
+
     async def test_speed_recovery_requires_a_successful_device_update(self):
         with tempfile.TemporaryDirectory() as directory:
             probe = Mock(metric_version="fixture-output-v1", speed_state="L")

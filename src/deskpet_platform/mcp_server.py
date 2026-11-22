@@ -75,6 +75,7 @@ from .wifi_link import NO_DEVICE_REPLY_HELP, probe_board
 Manual = Literal["operations", "development", "roles"]
 LINK_ERRORS = (OSError, RuntimeError, ValueError, TimeoutError)
 WIFI_FALLBACK_TIMEOUT = 5
+STATUS_WIFI_RECOVERY_TIMEOUT = 8
 MAX_CODEX_ALLOWANCE_AGE = 600
 NOTIFICATION_SETUP = {
     "codex": ("Codex", "desk_enable_codex_notifications", {}),
@@ -368,20 +369,53 @@ class BoardSession:
             self.snapshot = {"connection": "offline"}
         self.snapshot["device_error"] = error.code
 
+    async def _read_status(self):
+        previous = self.client
+        try:
+            return await previous.status()
+        except (AckTimeout, OSError) as error:
+            if isinstance(error, OSError) and str(error).partition(":")[0] != "wifi_disconnected":
+                raise
+            if (self.snapshot.get("connection") != "connected" or self.storage_lock.locked() or
+                    getattr(getattr(previous, "link", None), "wireless", False) is not True):
+                raise
+            await self.record_link_error(error)
+
+        config = DeviceConfig.load(self.path)
+        if config != previous.config:
+            raise DeviceError("device_pairing_changed")
+        async with asyncio.timeout(STATUS_WIFI_RECOVERY_TIMEOUT):
+            replacement = await self.open_wifi(config)
+            try:
+                if replacement.device_id != previous.device_id:
+                    raise DeviceError("device_identity_mismatch")
+                # Leave a new boot for the regular poll connection setup.
+                if replacement.channel.boot != previous.channel.boot:
+                    raise DeviceError("device_restarted")
+                heartbeat = await replacement.status()
+                if DeviceConfig.load(self.path) != config:
+                    raise DeviceError("device_pairing_changed")
+            except BaseException:
+                await replacement.close()
+                raise
+        self.client = replacement
+        self.last_notice_count = self.last_message_cache = None
+        return heartbeat
+
     async def get_status(self):
         if self.client is None or self.storage_lock.locked():
             return self.snapshot.copy()
         async with self.lock:
             if self.client is None or self.storage_lock.locked():
                 return self.snapshot.copy()
+            notification_error = self.snapshot.get("notification_error")
             try:
-                heartbeat = await self.client.status()
+                heartbeat = await self._read_status()
             except CommandRejected as error:
                 await self.record_status_rejection(error)
             except LINK_ERRORS as error:
                 await self.record_link_error(error)
             else:
-                notification_error = self.snapshot.get("notification_error")
                 self.record_status(heartbeat)
                 await self.attach_device_info()
                 if notification_error is not None:
