@@ -98,16 +98,27 @@ print('你好')
         with self.assertRaises(ProcessLookupError):os.kill(pid,0)
 
     async def test_timeout_stops_and_reaps_unresponsive_child(self):
-        marker=self.root/'timeout-pid'
-        self.exe.write_text('#!/usr/bin/env python3\nimport os,time\n'
-                            'open('+repr(str(marker))+',"w").write(str(os.getpid()))\n'
-                            'time.sleep(30)\n')
-        real_timeout=asyncio.timeout
-        with patch('deskpet_platform.transcription.asyncio.timeout',side_effect=lambda _:real_timeout(.5)):
-            with self.assertRaisesRegex(TranscriptionError,'service_error'):
-                await transcribe_local_pcm(b'\0\0'*240000,configured_service(self.env))
-        pid=int(marker.read_text())
-        with self.assertRaises(ProcessLookupError):os.kill(pid,0)
+        self.exe.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n')
+        spawn = asyncio.create_subprocess_exec
+        deadline = asyncio.timeout(.5)
+        child = None
+
+        async def start_child(*args, **kwargs):
+            nonlocal child
+            child = await spawn(*args, **kwargs)
+            return child
+
+        with (
+            patch('deskpet_platform.transcription.asyncio.create_subprocess_exec', new=start_child),
+            patch('deskpet_platform.transcription.asyncio.timeout', return_value=deadline),
+        ):
+            with self.assertRaisesRegex(TranscriptionError, 'service_error'):
+                await transcribe_local_pcm(b'\0\0' * 240000, configured_service(self.env))
+        self.assertTrue(deadline.expired())
+        self.assertIsNotNone(child)
+        self.assertIsNotNone(child.returncode)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child.pid, 0)
 
     async def test_invalid_audio_never_launches_child(self):
         service=configured_service(self.env)
