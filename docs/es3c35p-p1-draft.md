@@ -109,6 +109,13 @@ P1,{"epoch":"demo","seq":10,"type":"photo_album","mode":"interval","seconds":15,
 P1,{"epoch":"demo","seq":10,"boot":4,"view":"closed","playing":false,"interval_seconds":15,"count":0,"page":0,"pages":0,"photos":[],"photo_drawn":false,"photo_draws":0,"ok":true}
 ```
 
+## 语音查询天气与额度
+
+已配对的加密 Wi-Fi 会话通过 `capabilities_ext` 按项协商 `weather_status` 和 `quota_status`。同名查询命令的业务参数为空。Base 语音和板载助手沿用各自的工具授权，对设备工作台的同一份数据执行只读查询。
+
+- `weather_status` 在 `status:"ok"` 时提供摄氏温度 `degrees_c`、天气类别 `condition`，以及已知时的 `city`。天气类别取 `clear`、`clear_night`、`cloudy`、`rain`、`snow`、`fog`、`thunderstorm`、`partly_cloudy` 或 `unknown`。数据过期、定位或获取中、缺少数据时分别返回 `stale`、`pending`、`unavailable`。已过期的转发天气可由板载天气替代。缺少板载天气时报告 `stale`。
+- `quota_status` 按 `codex`、`claude_code`、`antigravity_gemini`、`antigravity_third_party` 的顺序返回 `sources`。每项含 `source` 和 `status`。只有 `ok` 的来源返回 `windows`，每个窗口包含 `remaining_percent`、`window_minutes` 和 `reset_at`。百分比 0 表示额度用完。重置时间未知时 `reset_at` 为 `null`。查询时检查各窗口的重置时间。旧版 Codex 快照若有重复周期，取当前仍有效的条目中剩余比例较小的一项。过期的来源返回 `stale`，等待对时的来源返回 `clock_pending`，缺少数据的来源返回 `unavailable`。顶层状态按 `ok`、`stale`、`clock_pending`、`unavailable` 的顺序取第一个存在的状态。板载助手在电脑断线时收到 `stale`。
+
 ## 配置更新与结果查询
 
 一次配置修改使用一个客户端生成的唯一 `tx`，以经过认证的配对和当前连接为边界。`begin` 声明 UTF-8 JSON 补丁的总字节数 `size`，取值 1–4096。每个 `part` 分别用标准 Base64 编码，`offset` 按解码后的字节从 0 连续递增。`next_offset` 返回已接收的字节数。板端每次只暂存一笔修改。缺段、越界或超时即丢弃本次暂存，断线也清理未提交内容。相应错误码为 `invalid_offset`、`invalid_size`、`tx_expired`。未知交易返回 `unknown_tx`。

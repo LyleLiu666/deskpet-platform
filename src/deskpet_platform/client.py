@@ -33,6 +33,7 @@ from .pairing import DeviceConfig, valid_device_uuid
 from .quota_projection import SOURCES
 from .role_install import MAX_ROLE_ACTIONS, MAX_ROLE_ID_LENGTH, valid_identity
 from .voice_permissions import VOICE_TOOLS
+from .board_readouts import BOARD_READOUTS, board_readout
 from .wifi_link import WifiLink
 
 SCREEN_PAGES = ("role", "home", "clock", "settings", "roles", "photos", "weather", "messages")
@@ -172,6 +173,16 @@ class Client:
         if reply.get("status") != expected:
             raise DeviceError("invalid_system_restart_reply")
         return {"status": expected, "boot": reply["boot"]}
+
+    async def read_board_status(self, name):
+        if not isinstance(name, str) or name not in BOARD_READOUTS:
+            raise ValueError("invalid board readout")
+        if self.channel.capabilities.get(name) != 1:
+            raise DeviceError(f"{name}_not_supported")
+        if getattr(self.link, "wireless", False) is not True:
+            raise DeviceError("requires_paired_wifi")
+        async with self._operation:
+            return board_readout(name, await self.channel.send(name))
 
     async def recover_subsystem(self, target):
         if self.channel.capabilities.get("subsystem_recover") != 1:

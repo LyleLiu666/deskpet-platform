@@ -166,6 +166,23 @@ class AgentConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await session.sync_onboard_voice_permissions(new), "applied")
         new.channel.send.assert_awaited_once_with("voice_permissions_set", enabled=[])
 
+    async def test_older_board_still_syncs_its_authorized_tools_without_new_readouts(self):
+        client = self.client()
+        client.channel.capabilities.update(weather_relay=1, quota_multi=1)
+        client.channel.send.return_value = {"applied": True}
+        session = BoardSession(self.path, no_token_probe=True)
+        session.client = client
+        enabled = ["battery_status", "weather_status", "quota_status"]
+        result = await session.voice_tool_settings(enabled)
+        self.assertEqual(result["onboard_sync"], "applied")
+        self.assertEqual(result["enabled"], sorted(enabled))
+        client.channel.send.assert_awaited_once_with("voice_permissions_set", enabled=["battery_status"])
+
+        client.channel.capabilities["weather_status"] = 1
+        client.channel.epoch = "new"
+        self.assertEqual(await session.sync_onboard_voice_permissions(client), "applied")
+        client.channel.send.assert_awaited_with("voice_permissions_set", enabled=["battery_status", "weather_status"])
+
     def test_invalid_config_never_echoes_the_supplied_value(self):
         cases = [
             {"chat": {"url": "http://127.0.0.1/v1", "token": "sensitive"}},

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from deskpet_platform.pairing import DeviceConfig
-from deskpet_platform.voice_permissions import VoicePermissions
+from deskpet_platform.voice_permissions import VOICE_TOOLS, VoicePermissions
 
 
 class VoicePermissionsTest(unittest.TestCase):
@@ -34,7 +34,7 @@ class VoicePermissionsTest(unittest.TestCase):
 
     def test_invalid_request_and_failed_save_preserve_previous_settings(self):
         store=VoicePermissions(self.path);store.update(['device_status'])
-        for value in (['open_page'],['device_status','device_status'],['bogus'],None,'device_status'):
+        for value in (['music_delete'],['device_status','device_status'],['bogus'],None,'device_status'):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):store.update(value)
         with patch('deskpet_platform.voice_permissions.os.replace',side_effect=OSError('disk full')):
@@ -44,7 +44,7 @@ class VoicePermissionsTest(unittest.TestCase):
 
     def test_modified_or_extra_fields_fail_closed(self):
         store=VoicePermissions(self.path);store.update(['device_status'])
-        data=json.loads(store.path.read_text());data['enabled'].append('open_page')
+        data=json.loads(store.path.read_text());data['enabled'].append('music_delete')
         store.path.write_text(json.dumps(data),encoding='utf-8')
         self.assertEqual(store.enabled(),frozenset())
         self.assertEqual(store.inspect()[1],'invalid')
@@ -91,9 +91,17 @@ class VoicePermissionsMCPTest(unittest.IsolatedAsyncioTestCase):
             path=Path(directory)/'device.json'
             DeviceConfig('aa:bb:cc:dd:ee:ff',bytes(range(32))).save(path)
             server=create_server(path,no_token_probe=True)
+            tool = next(tool for tool in await server.list_tools() if tool.name == 'desk_voice_tools')
+            enabled_schema = tool.inputSchema['properties']['enabled']
+            item_schema = next(choice['items'] for choice in enabled_schema['anyOf'] if choice['type'] == 'array')
+            self.assertEqual(set(item_schema['enum']), set(VOICE_TOOLS))
             result=(await server.call_tool('desk_voice_tools',{}))[1]
             self.assertEqual(result['status'],'ok');self.assertEqual(result['enabled'],[])
             result=(await server.call_tool('desk_voice_tools',{'enabled':['device_status']}))[1]
             self.assertEqual(result['enabled'],['device_status'])
+            result = (await server.call_tool('desk_voice_tools', {'enabled': ['weather_status', 'quota_status']}))[1]
+            self.assertEqual(result['enabled'], ['quota_status', 'weather_status'])
+            result = (await server.call_tool('desk_voice_tools', {'enabled': sorted(VOICE_TOOLS)}))[1]
+            self.assertEqual(result['enabled'], sorted(VOICE_TOOLS))
             result=(await server.call_tool('desk_voice_tools',{'enabled':[]}))[1]
             self.assertEqual(result['enabled'],[])

@@ -71,6 +71,7 @@ from .transcription import (
 from .voice_agent import configured_chat_backend
 from .voice_conversation import create_device_conversation
 from .voice_permissions import VOICE_TOOLS, VoicePermissions
+from .board_readouts import BOARD_READOUTS
 from .voice_tools import build_voice_tools, voice_tool_requires_confirmation, voice_tool_supported
 from .wifi_link import NO_DEVICE_REPLY_HELP, probe_board
 
@@ -1114,7 +1115,8 @@ class BoardSession:
             if (getattr(getattr(client, 'link', None), 'wireless', False) is not True or
                     not self._matches_voice_pairing(client, DeviceConfig.load(self.path))):
                 return 'pending'
-            enabled = self.voice_permissions.enabled()
+            enabled = frozenset(name for name in self.voice_permissions.enabled()
+                                if name not in BOARD_READOUTS or client.channel.capabilities.get(name) == 1)
             sent = (client, client.channel.epoch, enabled)
             if self.voice_policy_sent != sent:
                 self.voice_policy_sent = None
@@ -1187,6 +1189,18 @@ class BoardSession:
             except LINK_ERRORS:
                 return {'status': 'unavailable'}
             return {'status': 'ok', 'battery': battery_view(reply.get('battery'))}
+
+    async def voice_board_readout(self, name):
+        async with self.lock:
+            client = self.client
+            if client is None or client is not self.voice_active_client:
+                return {'status': 'not_connected'}
+            if client.channel.capabilities.get(name) != 1:
+                return {'status': 'unsupported'}
+            try:
+                return await client.read_board_status(name)
+            except (OSError, DeviceError, TimeoutError):
+                return {'status': 'unavailable'}
 
     async def voice_device_settings(self, *, volume, brightness):
         async with self.lock:
@@ -2641,7 +2655,9 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool()
     async def desk_voice_tools(enabled: list[Literal['device_status', 'list_role_actions', 'play_role_action',
-                                                     'battery_status', 'device_settings', 'device_restart']] | None = None,
+                                                     'open_page', 'battery_status', 'weather_status', 'quota_status',
+                                                     'device_settings', 'device_restart', 'music_control',
+                                                     'photo_slideshow']] | None = None,
                                device_id: str | None = None) -> dict[str, Any]:
         """查看语音助手工具和确认要求，或用完整 enabled 列表替换授权。空列表撤销全部。"""
         return await sessions.resolve(device_id).voice_tool_settings(enabled)

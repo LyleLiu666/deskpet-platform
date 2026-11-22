@@ -646,7 +646,8 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(initial['enabled'],[])
             available = {item['name']: item for item in initial['available']}
             self.assertEqual(set(available), {'device_status', 'list_role_actions', 'play_role_action',
-                                             'battery_status', 'device_settings', 'device_restart',
+                                             'open_page', 'battery_status', 'weather_status', 'quota_status',
+                                             'device_settings', 'device_restart',
                                              'music_control', 'photo_slideshow'})
             self.assertTrue(available['device_restart']['requires_confirmation'])
             self.assertFalse(available['device_settings']['requires_confirmation'])
@@ -655,11 +656,30 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(legacy['device_status'])
             self.assertFalse(legacy['device_restart'])
             self.assertFalse(legacy['device_settings'])
+            self.assertFalse(legacy['open_page'])
+            self.assertFalse(legacy['weather_status'])
+            self.assertFalse(legacy['quota_status'])
             self.assertFalse(legacy['music_control'])
             self.assertFalse(legacy['photo_slideshow'])
             updated=await session.voice_tool_settings(['device_status'])
             self.assertEqual(updated['enabled'],['device_status'])
             self.assertEqual((await self.session(path).voice_tool_settings())['enabled'],['device_status'])
+
+    async def test_voice_readouts_stay_on_the_device_that_owns_the_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = self.session(Path(directory) / 'device.json')
+            active = self.board()
+            session.client = session.voice_active_client = active
+            active.channel.capabilities['quota_status'] = 1
+            active.read_board_status = AsyncMock(return_value={'status': 'stale'})
+            self.assertEqual(await session.voice_board_readout('quota_status'), {'status': 'stale'})
+            self.assertEqual(await session.voice_board_readout('weather_status'), {'status': 'unsupported'})
+            replacement = self.board()
+            replacement.read_board_status = AsyncMock()
+            session.client = replacement
+            self.assertEqual(await session.voice_board_readout('quota_status'), {'status': 'not_connected'})
+            active.read_board_status.assert_awaited_once_with('quota_status')
+            replacement.read_board_status.assert_not_awaited()
 
     async def test_voice_media_stays_bound_to_the_current_board_and_capture(self):
         with tempfile.TemporaryDirectory() as directory:

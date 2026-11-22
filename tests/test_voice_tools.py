@@ -27,6 +27,28 @@ class VoiceToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('page',status.value)
         self.assertEqual(status.value['screen_page'],'role')
 
+    async def test_weather_and_quota_readouts_keep_data_status_and_require_permission(self):
+        enabled = {'weather_status', 'quota_status'}
+        self.session.voice_board_readout = AsyncMock(side_effect=[
+            {'status': 'ok', 'city': 'Shanghai', 'degrees_c': 0, 'condition': 'snow'},
+            {'status': 'stale'},
+        ])
+        tools = {tool.name: tool for tool in build_voice_tools(self.session, enabled, authorize=enabled.__contains__)}
+        for name in tools:
+            self.assertFalse(voice_tool_supported(name, {'weather_relay': 1, 'quota_multi': 1}))
+            self.assertTrue(voice_tool_supported(name, {name: 1}))
+            with self.assertRaises(ValidationError):
+                tools[name].parameters.model_validate({'provider': 'user'}, strict=True)
+        weather = await tools['weather_status'].invoke()
+        self.assertTrue(weather.ok)
+        self.assertEqual(weather.value['degrees_c'], 0)
+        quota = await tools['quota_status'].invoke()
+        self.assertTrue(quota.ok)
+        self.assertEqual(quota.value, {'status': 'stale'})
+        enabled.remove('quota_status')
+        self.assertEqual((await tools['quota_status'].invoke()).value, {'status': 'not_authorized'})
+        self.assertEqual(self.session.voice_board_readout.await_count, 2)
+
     async def test_revoked_permission_is_checked_again_before_execution(self):
         enabled={'play_role_action'}
         tool=build_voice_tools(self.session,enabled,authorize=lambda name:name in enabled)[0]

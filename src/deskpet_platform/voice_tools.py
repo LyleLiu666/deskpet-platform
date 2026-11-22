@@ -66,6 +66,8 @@ _TOOLS = {
     'play_role_action': ('让角色做指定动作。started 只表示动作已开始。', _ActionArgs),
     'open_page': ('临时切换到指定页面，不修改默认首页。', _PageArgs),
     'battery_status': ('查看电压、估算电量与电源状态。没有数据时如实报告未知。', _NoArgs),
+    'weather_status': ('查看设备上的当前天气；数据过期或缺失时如实报告。', _NoArgs),
+    'quota_status': ('查看设备收到的各来源额度快照；数据过期或缺失时如实报告。', _NoArgs),
     'device_settings': ('查看或调整当前会话的音量和亮度。省略参数时只查询。', _DeviceSettingsArgs),
     'device_restart': ('请求在设备屏幕上确认软重启，用户实际点按后才会重启。', _NoArgs),
     'music_control': ('查询、播放、暂停、停止、切歌或打乱设备曲库顺序。播放和切歌排到语音回复结束后执行。', _MusicArgs),
@@ -77,6 +79,8 @@ _CAPABILITIES = {
     'play_role_action': ('role_actions', 'capture_voice_role'),
     'open_page': ('screen_views',),
     'battery_status': ('battery_status',),
+    'weather_status': ('weather_status',),
+    'quota_status': ('quota_status',),
     'device_settings': ('device_settings',),
     'device_restart': ('system_restart',),
     'music_control': ('music_control', 'capture_media_tools'),
@@ -153,6 +157,14 @@ def build_voice_tools(session, enabled, *, authorize=None, permission_lock=None,
             return ToolOutcome(False, {'status': result['status']}, failure_message='暂时无法读取电池状态。')
         return ToolOutcome(True, result['battery'])
 
+    async def weather_status():
+        result = await session.voice_board_readout('weather_status')
+        return ToolOutcome(result['status'] not in ('not_connected', 'unsupported'), result)
+
+    async def quota_status():
+        result = await session.voice_board_readout('quota_status')
+        return ToolOutcome(result['status'] not in ('not_connected', 'unsupported'), result)
+
     async def device_settings(volume=None, brightness=None):
         result = await session.voice_device_settings(volume=volume, brightness=brightness)
         status = result['status']
@@ -184,6 +196,7 @@ def build_voice_tools(session, enabled, *, authorize=None, permission_lock=None,
 
     handlers = {'device_status': device_status, 'list_role_actions': list_role_actions,
                 'play_role_action': play_role_action, 'open_page': open_page, 'battery_status': battery_status,
+                'weather_status': weather_status, 'quota_status': quota_status,
                 'device_settings': device_settings, 'device_restart': device_restart,
                 'music_control': music_control, 'photo_slideshow': photo_slideshow}
     def guarded(tool):
