@@ -1278,10 +1278,20 @@ class BoardSession:
             client=self.client
             if client is None or client is not expected:return {'status':'not_connected'}
             if client.channel.capabilities.get('capture_voice_role')!=1 or client.channel.capabilities.get('role_actions')!=1:return {'status':'unsupported'}
-            actions=await client.list_actions()
-            if action not in actions:return {'status':'unsupported','action':action,'available_actions':actions}
-            await client.capture_role_view(ticket)
-            result=await client.capture_role_play(ticket,actions.index(action),duration_ms or 0)
+            try:
+                actions = await client.list_actions()
+                if action not in actions:
+                    return {'status': 'unsupported', 'action': action}
+                await client.capture_role_view(ticket)
+            except (OSError, DeviceError, TimeoutError):
+                return {'status': 'unavailable', 'action': action}
+            try:
+                result = await client.capture_role_play(ticket, actions.index(action), duration_ms or 0)
+            except CommandRejected as error:
+                status = 'unknown' if error.code in ('media_timeout', 'out_of_memory') else 'unavailable'
+                return {'status': status, 'action': action}
+            except (OSError, DeviceError, TimeoutError):
+                return {'status': 'unknown', 'action': action}
             reply={'status':result['action_status'],'action':action}
             if isinstance(result.get('reason'),str) and result['reason']:reply['reason']=result['reason']
             return reply

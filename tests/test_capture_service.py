@@ -877,3 +877,33 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             with patch('deskpet_platform.mcp_server.transcribe_pcm',new_callable=AsyncMock,return_value='你好'):
                 await session.refresh_capture(client);await session.capture_task
             self.assertEqual(backend.complete.await_args.args[1],[])
+
+    async def test_lost_role_action_ack_ends_turn_without_repeating_the_action(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'device.json'
+            DeviceConfig('aa:bb:cc:dd:ee:ff', bytes(range(32))).save(path)
+            session = self.session(path)
+            client = self.board()
+            session.client = client
+            client.channel.capabilities.update(capture_mode=1, capture_voice_role=1, role_actions=1,
+                                               voice_names=1, speech_pcm=1)
+            client.poll_capture.return_value = {'ticket': 7, 'mode': 'voice'}
+            client.list_actions = AsyncMock(return_value=['idle', 'touched'])
+            client.capture_role_view = AsyncMock()
+            client.capture_role_play = AsyncMock(side_effect=TimeoutError('no action receipt'))
+            await session.voice_tool_settings(['play_role_action'])
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.speak_voice_reply = AsyncMock(return_value={'status': 'finished'})
+            backend = Mock(complete=AsyncMock(return_value={
+                'role': 'assistant', 'content': None, 'tool_calls': [{
+                    'id': 'one', 'type': 'function',
+                    'function': {'name': 'play_role_action', 'arguments': '{"action":"touched"}'},
+                }],
+            }))
+            session.voice_backend = backend
+            with patch('deskpet_platform.mcp_server.transcribe_pcm', new_callable=AsyncMock, return_value='做个动作'):
+                await session.refresh_capture(client)
+                await session.capture_task
+            backend.complete.assert_awaited_once()
+            client.capture_role_play.assert_awaited_once_with(7, 1, 0)
+            session.speak_voice_reply.assert_awaited_once_with('角色动作结果未知，请先查看搭搭。')

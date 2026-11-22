@@ -49,6 +49,7 @@ P1,{"epoch":"demo","seq":4,"boot":4,"view":"photo","playing":true,"interval_seco
 | `music_control` | `music_control`，`action` 取 `status`、`play`、`pause`、`stop`、`prev`、`next` 或 `shuffle`。`play` 可带相对路径 `path` | 返回操作后的 `state`（`playing`、`paused`、`stopped`）、`path`、`title`、`position_ms`、`volume`（0–100）和 `shuffled`。空曲库时 `path`、`title` 为 `null`。查询以外的失败回包不得报告成功 |
 | `music_library` | `music_list`、`music_delete` | 见下节。导入须同时声明 `card_transfer`，复用已有上传及文件校验回执 |
 | `capture_media_tools` | 带 `ticket` 的 `music_control` 或 `photo_album` | 只接受当前语音对话的执行端和已授权的工具。需要延后开始时返回 `queued:true`，音乐同时返回 `target_path` |
+| `capture_voice_role` | 配对连接中的 `capture_role_view` 和 `capture_role_play` | 以当前语音 `ticket` 校验执行方和 `play_role_action` 授权。在从工作台进入的语音页确认角色已呈现后播放动作 |
 | `capture_speech_cancel_ticket` | `speech_cancel`，可带非零无符号 32 位整数 `ticket` | 带编号时仅取消与该录音关联的播报。编号已失效时返回标准 `ok:true`，其余播报继续。省略编号沿用原有取消命令 |
 | `assistant_onboard` | `agent_config_begin`、`agent_config_part`、`agent_config_commit`、`agent_config_status`、`agent_config_cancel` | 见配置更新示例。电脑端入口为 `desk_agent_config` |
 | `assistant_onboard` | `voice_permissions_set`，`enabled` 为完整工具名数组，例如 `{"enabled":["device_status"]}` | 板端在当前配对下完整保存后返回 `{"applied":true}`。空数组撤销全部授权。新配对同步前默认全关 |
@@ -101,6 +102,12 @@ P1,{"epoch":"demo","seq":8,"boot":4,"ok":true,"items":[{"path":"media/rain.flac"
 - 语音 `music_control` 接受 `status`、`play`、`pause`、`stop`、`prev`、`next` 和 `shuffle`。只有 `play` 可选填曲库已有的 `path`。播放和切歌回包中的 `state` 等字段反映接收时状态，`queued:true` 与 `target_path` 表示待播放目标。暂停和停止立即生效，可取消待播放目标。打乱顺序沿用曲库持久化规则。
 - 语音 `photo_slideshow` 接受 `play`、`pause` 和 `interval`，通过 `photo_album.mode` 传输。仅 `interval` 需要 `interval_seconds`（P1 字段是 `seconds`），取 5、10 或 15。语音调整立即应用，设备重启后恢复已保存的间隔。轮播开始回包为 `queued:true`。
 - 待播放目标在本轮语音回复完整播完后生效。用户取消、回复失败或工具授权失效时丢弃待播放目标。回执未送达时电脑端提示结果未知，可先查询设备状态。
+
+## 语音播放角色动作
+
+`capture_role_view` 只传当前 `ticket`。成功回包的 `role_view` 为 `pending` 或 `visible`。电脑端查询当前角色的动作列表后，等待 `visible` 再发送 `capture_role_play`。后者携带同一 `ticket`、动作的零基 `action` 序号和 `duration_ms`。时长可为 100 至 6,000 毫秒，0 沿用动作时长。板端校验列表与屏上角色对应同一次加载，旧序号无法用于已经切换的角色。
+
+`action_status` 可以是 `started`、`busy`、`unsupported` 或 `unavailable`。`started` 回包带 `operation`，可与回包的 `boot` 一起用于 `role_action_status`。板载助手用同名 `play_role_action` 工具按动作名找到当前角色的动作，共用语音页和播放控制器。退出语音页、取消、断线或撤销授权会终止对应动作。丢失播放回执时，电脑端提示结果未知并结束本轮工具调用。
 
 ```text
 P1,{"epoch":"demo","seq":9,"type":"music_control","action":"play","path":"music/sea.mp3","ticket":42}

@@ -138,6 +138,8 @@ def build_voice_tools(session, enabled, *, authorize=None, permission_lock=None,
         status=response.get('status')
         if not isinstance(status,str):return ToolOutcome(False,{'status':'invalid_response'})
         visible={key:response[key] for key in ('status','action','operation','boot','available_actions') if key in response}
+        if status == 'unknown':
+            return ToolOutcome(False, visible, failure_message='角色动作结果未知，请先查看搭搭。', result_unknown=True)
         failure={'busy':'设备正忙，动作未开始。','unsupported':'当前角色不支持这个动作。',
                  'not_connected':'设备未连接，动作未开始。'}.get(status,'动作未能开始。')
         return ToolOutcome(status=='started',visible,completed=False,failure_message=failure if status!='started' else None)
