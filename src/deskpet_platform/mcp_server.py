@@ -137,6 +137,8 @@ def read_manual(topic: Manual) -> str:
 
 
 class BoardSession:
+    VOICE_HISTORY_IDLE_SECONDS = 300
+
     def __init__(self, path, *, background=False, client_factory=Client, token_root=None, usb_port=None,
                  token_collector=None, token_probe=None, probe_collector=None, no_token_probe=False,
                  notification_source=None, quota_store=None):
@@ -160,6 +162,7 @@ class BoardSession:
         self.capture_service = configured_service(os.environ)
         self.voice_backend = configured_chat_backend(os.environ)
         self.voice_conversation = None
+        self.voice_idle_deadline = None
         self.voice_session_id = None
         self.voice_permissions = VoicePermissions(path)
         self.voice_policy_sent = None
@@ -209,6 +212,7 @@ class BoardSession:
 
     def _detach_voice_conversation(self):
         conversation, self.voice_conversation = self.voice_conversation, None
+        self.voice_idle_deadline = None
         self.voice_tool_snapshot = frozenset()
         return conversation
 
@@ -741,18 +745,20 @@ class BoardSession:
             return
         if not isinstance(metadata, dict):
             return
+        session_id = self.voice_session_id
         if capabilities.get('capture_voice_session') == 1:
             session_id = metadata.get('voice_session')
             if type(session_id) is not int or not 0 <= session_id <= 0xffffffff:
                 return
-            if session_id != self.voice_session_id:
-                conversation = self._detach_voice_conversation()
-                self.voice_session_id = session_id
-                if conversation is not None:
-                    await conversation.end()
-                    if (client is not self.client or self.voice_session_id != session_id or
-                            (self.capture_task and not self.capture_task.done())):
-                        return
+        history_expired = self.voice_idle_deadline is not None and time.monotonic() >= self.voice_idle_deadline
+        if session_id != self.voice_session_id or history_expired:
+            conversation = self._detach_voice_conversation()
+            self.voice_session_id = session_id
+            if conversation is not None:
+                await conversation.end()
+                if (client is not self.client or self.voice_session_id != session_id or
+                        (self.capture_task and not self.capture_task.done())):
+                    return
         ticket = metadata.get('ticket')
         if type(ticket) is not int or not 0 < ticket <= 0xffffffff:
             return
@@ -941,9 +947,12 @@ class BoardSession:
         except Exception:
             pass  # Never log credentials, recorded audio or remote response bodies.
         finally:
-            if self.client is client and mode=='voice' and not success and self.voice_conversation is not None:
-                conversation=self._detach_voice_conversation()
-                with suppress(Exception):await conversation.end()
+            if self.client is client and mode == 'voice' and self.voice_conversation is not None:
+                if success:
+                    self.voice_idle_deadline = time.monotonic() + self.VOICE_HISTORY_IDLE_SECONDS
+                else:
+                    conversation = self._detach_voice_conversation()
+                    with suppress(Exception):await conversation.end()
             if received and self.client is client:
                 with suppress(OSError, DeviceError, asyncio.TimeoutError):
                     if not success and (failure=='no_speech' or (mode=='voice' and mode_valid)):

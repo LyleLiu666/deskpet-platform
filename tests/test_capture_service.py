@@ -582,6 +582,42 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(session.voice_conversation)
             self.assertEqual(session.voice_names.await_count, 2)
 
+    async def test_five_idle_minutes_clear_context_without_a_page_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = self.session(Path(directory) / 'device.json')
+            client = self.board()
+            session.client = client
+            client.channel.capabilities.update(capture_mode=1, capture_voice_session=1, voice_names=1, speech_pcm=1)
+            client.poll_capture.side_effect = [
+                {'ticket': 7, 'mode': 'voice', 'voice_session': 7},
+                {'voice_session': 7},
+                {'voice_session': 7},
+                {'ticket': 8, 'mode': 'voice', 'voice_session': 7},
+            ]
+            backend = Mock(complete=AsyncMock(return_value={'role': 'assistant', 'content': '收到'}))
+            session.voice_backend = backend
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.speak_voice_reply = AsyncMock(return_value={'status': 'finished'})
+            clock = Mock()
+            clock.monotonic.return_value = 10
+            with patch('deskpet_platform.mcp_server.time', clock), \
+                 patch('deskpet_platform.mcp_server.transcribe_pcm', new_callable=AsyncMock,
+                       side_effect=['第一句', '新会话']):
+                await session.refresh_capture(client)
+                await session.capture_task
+                conversation = session.voice_conversation
+                self.assertIsNotNone(conversation)
+                clock.monotonic.return_value = 309.999
+                await session.refresh_capture(client)
+                self.assertIs(session.voice_conversation, conversation)
+                clock.monotonic.return_value = 310
+                await session.refresh_capture(client)
+                self.assertIsNone(session.voice_conversation)
+                await session.refresh_capture(client)
+                await session.capture_task
+            self.assertEqual([message['content'] for message in backend.complete.await_args.args[0][1:]], ['新会话'])
+            self.assertEqual(session.voice_names.await_count, 2)
+
     async def test_device_cancel_stops_actual_pcm_playback(self):
         with tempfile.TemporaryDirectory() as directory:
             session=self.session(Path(directory)/'device.json')
