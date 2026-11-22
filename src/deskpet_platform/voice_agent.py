@@ -374,14 +374,31 @@ class VoiceAgent:
         self.messages.append({'role': 'assistant', 'content': content})
         return AgentResult(text=content, events=tuple(self._events))
 
+    def _fit_context(self):
+        try:
+            # Two bytes per entry account for the JSON list delimiters and separators.
+            sizes = [len(json.dumps(message, ensure_ascii=False).encode('utf-8')) + 2
+                     for message in self.messages]
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            raise AgentError('model_invalid_response') from None
+        context_bytes = sum(sizes)
+        if context_bytes <= MAX_CONTEXT_BYTES:
+            return
+
+        first_turn = 1
+        for boundary in range(2, len(self.messages)):
+            if self.messages[boundary]['role'] != 'user':
+                continue
+            context_bytes -= sum(sizes[first_turn:boundary])
+            if context_bytes <= MAX_CONTEXT_BYTES:
+                del self.messages[1:boundary]
+                return
+            first_turn = boundary
+        raise AgentError('context_limit_reached')
+
     async def _advance(self):
         for _ in range(MAX_TOOL_ROUNDS):
-            try:
-                context_bytes=len(json.dumps(self.messages,ensure_ascii=False).encode('utf-8'))
-            except (TypeError,ValueError,UnicodeError,RecursionError):
-                raise AgentError('model_invalid_response') from None
-            if context_bytes > MAX_CONTEXT_BYTES:
-                raise AgentError('context_limit_reached')
+            self._fit_context()
             message = await self.backend.complete(copy.deepcopy(self.messages), list(self.tools.values()))
             if not isinstance(message, dict) or message.get('role') != 'assistant':raise AgentError('model_invalid_response')
             calls = message.get('tool_calls') or []

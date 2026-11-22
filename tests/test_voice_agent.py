@@ -1,7 +1,7 @@
 import asyncio
 import json
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from pydantic import BaseModel, ConfigDict
@@ -54,6 +54,27 @@ class VoiceAgentTest(unittest.IsolatedAsyncioTestCase):
         request = backend.complete.await_args_list[-1].args[0]
         self.assertTrue(any(m.get('content') == '我想看相册' for m in request))
         self.assertEqual(json.loads(request[-1]['content']), {'status':'ok','result':{'connected': True}})
+
+    async def test_context_limit_discards_old_turn_and_its_tool_receipt_together(self):
+        backend = AsyncMock()
+        backend.complete.side_effect = [
+            call('board_status'),
+            {'role': 'assistant', 'content': '设备在线。'},
+            {'role': 'assistant', 'content': '收到。'},
+        ]
+        handler = AsyncMock(return_value=ToolOutcome(True, {'connected': True}))
+        agent = VoiceAgent(backend, [VoiceTool('board_status', '查看设备状态', NoArgs, handler)],
+                           system_prompt='设备助手')
+        await agent.turn('查看连接。')
+        self.assertEqual([message['role'] for message in agent.messages],
+                         ['system', 'user', 'assistant', 'tool', 'assistant'])
+
+        latest = [agent.messages[0], {'role': 'user', 'content': '换个话题。'}]
+        budget = len(json.dumps(latest, ensure_ascii=False).encode('utf-8'))
+        with patch('deskpet_platform.voice_agent.MAX_CONTEXT_BYTES', budget):
+            self.assertEqual((await agent.turn('换个话题。')).text, '收到。')
+        self.assertEqual(backend.complete.await_args.args[0], latest)
+        handler.assert_awaited_once_with()
 
     async def test_unknown_and_invalid_tool_are_never_run(self):
         for response in (call('not_authorized'), call('open_page', '{"page":"home","extra":1}'),
