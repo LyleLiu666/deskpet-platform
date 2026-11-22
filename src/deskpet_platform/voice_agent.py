@@ -39,6 +39,7 @@ class VoiceTool:
     parameters: type[BaseModel]
     invoke: Callable[..., Awaitable[Any]]
     requires_confirmation: bool = False
+    confirmation_on_device: bool = False
 
     def schema(self):
         return {'type': 'function', 'function': {
@@ -49,11 +50,12 @@ class VoiceTool:
 
 @dataclass(frozen=True)
 class ToolOutcome:
-    """The registered handler must explicitly report whether its operation succeeded."""
+    """Report success, failure, or an unconfirmed action that ends this turn."""
     ok: bool
     value: Any
     completed: bool = True
     failure_message: str | None = None
+    result_unknown: bool = False
 
 
 @dataclass(frozen=True)
@@ -296,7 +298,9 @@ class VoiceAgent:
             self._pending = None  # A confirmation can never run twice, even if a call is interrupted.
             confirmation, tool, arguments, call_id = pending
             if approved:
-                await self._execute(tool, arguments, call_id)
+                result = await self._execute(tool, arguments, call_id)
+                if result is not None:
+                    return result
             else:
                 self._append_tool(call_id, {'status': 'denied'})
                 self._events.append(ToolEvent(tool.name,'denied'))
@@ -341,12 +345,30 @@ class VoiceAgent:
         except Exception:
             result = ToolOutcome(False, {'error': 'tool_failed'})
         if (not isinstance(result,ToolOutcome) or type(result.ok) is not bool or type(result.completed) is not bool or
+                type(result.result_unknown) is not bool or (result.ok and result.result_unknown) or
                 (result.failure_message is not None and (not isinstance(result.failure_message,str) or len(result.failure_message)>200))):
             result = ToolOutcome(False, {'error': 'tool_invalid_result'})
-        response = {'status': 'ok' if result.completed else 'started', 'result': result.value} if result.ok else {'status':'failed', 'result':result.value}
-        valid = self._append_tool(call_id, response)
-        status=('ok' if result.completed else 'started') if result.ok and valid else 'failed'
-        self._events.append(ToolEvent(tool.name,status,result.failure_message if status=='failed' and valid else None))
+        if result.result_unknown:
+            status = 'unknown'
+        elif not result.ok:
+            status = 'failed'
+        elif result.completed:
+            status = 'ok'
+        else:
+            status = 'confirm_pending' if tool.confirmation_on_device else 'started'
+        valid = self._append_tool(call_id, {'status': status, 'result': result.value})
+        if not valid and status != 'unknown':
+            status = 'failed'
+        message = result.failure_message if status in ('failed', 'unknown') and valid else None
+        self._events.append(ToolEvent(tool.name, status, message))
+        if status == 'confirm_pending':
+            content = '请在设备屏幕上确认这项操作。'
+        elif status == 'unknown':
+            content = message or '操作结果未知，请先核对设备状态。'
+        else:
+            return None
+        self.messages.append({'role': 'assistant', 'content': content})
+        return AgentResult(text=content, events=tuple(self._events))
 
     async def _advance(self):
         for _ in range(MAX_TOOL_ROUNDS):
@@ -402,9 +424,11 @@ class VoiceAgent:
                 name=function.get('name') if isinstance(function,dict) else None
                 self._events.append(ToolEvent(name if isinstance(name,str) else '', 'failed'))
                 continue
-            if tool.requires_confirmation:
+            if tool.requires_confirmation and not tool.confirmation_on_device:
                 confirmation = Confirmation(secrets.token_urlsafe(24), tool.name, tool.description, copy.deepcopy(arguments))
                 self._pending = (confirmation, tool, arguments, call_id)
                 return AgentResult(confirmation=confirmation,events=tuple(self._events))
-            await self._execute(tool, arguments, call_id)
+            result = await self._execute(tool, arguments, call_id)
+            if result is not None:
+                return result
         raise AgentError('tool_limit_reached')

@@ -93,6 +93,32 @@ class MultiBoardContractTests(unittest.IsolatedAsyncioTestCase):
         client.channel.send.return_value = {"status": "confirm_pending", "boot": 12}
         self.assertEqual(await client.restart(confirm=True), {"status": "confirm_pending", "boot": 12})
         client.channel.send.assert_awaited_once_with("system_restart", confirm=True)
+        client.channel.send.reset_mock()
+        with self.assertRaises(ValueError):
+            await client.restart(confirm=True, capture_ticket=7)
+        client.channel.send.assert_not_awaited()
+        client.channel.capabilities["assistant_onboard"] = 1
+        self.assertEqual(await client.restart(confirm=True, capture_ticket=7), {"status": "confirm_pending", "boot": 12})
+        client.channel.send.assert_awaited_once_with("system_restart", confirm=True, ticket=7)
+
+    async def test_voice_settings_send_only_temporary_ticketed_writes(self):
+        client = Client.__new__(Client)
+        client._operation = asyncio.Lock()
+        send = AsyncMock(return_value={"volume": 34, "brightness": 85})
+        client.channel = SimpleNamespace(capabilities={"device_settings": 1}, send=send)
+        self.assertEqual(await client.voice_device_settings(), {"volume": 34, "brightness": 85})
+        send.assert_awaited_once_with("device_settings")
+        send.reset_mock()
+        for kwargs in ({"volume": 34}, {"volume": True, "capture_ticket": 7}, {"brightness": 5, "capture_ticket": 7}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                await client.voice_device_settings(**kwargs)
+        send.assert_not_awaited()
+        self.assertEqual(await client.voice_device_settings(volume=34, capture_ticket=7),
+                         {"volume": 34, "brightness": 85})
+        send.assert_awaited_once_with("device_settings", ticket=7, volume=34)
+        send.return_value = {"volume": 34, "brightness": 85}
+        with self.assertRaisesRegex(DeviceError, "invalid_device_settings_reply"):
+            await client.voice_device_settings(brightness=65, capture_ticket=7)
 
     async def test_device_info_exposes_only_valid_diagnostic_summary(self):
         client = object.__new__(Client)

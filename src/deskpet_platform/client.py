@@ -8,6 +8,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import secrets
 import sys
 import tempfile
 import zlib
@@ -16,12 +17,21 @@ from contextlib import suppress
 from PIL import Image, ImageDraw, ImageFont
 
 from .adaptive_speed.config import Config as SpeedConfig
+from .agent_config import (
+    AGENT_CONFIG_CHUNK_BYTES,
+    AGENT_MODES,
+    AGENT_SERVICE_GROUPS,
+    AgentConfigUnconfirmed,
+    encode_agent_config,
+    valid_agent_config_tx,
+)
 from .card_upload import MUSIC_DIRECTORIES, upload_file, upload_usb, validate_music_path, validate_path
 from .channel import Channel, CommandRejected, DeviceError, TextNotVisible
 from .image_display import prepare_image
 from .pairing import DeviceConfig, valid_device_uuid
 from .quota_projection import SOURCES
 from .role_install import MAX_ROLE_ACTIONS, MAX_ROLE_ID_LENGTH, valid_identity
+from .voice_permissions import VOICE_TOOLS
 from .wifi_link import WifiLink
 
 SCREEN_PAGES = ("role", "home", "clock", "settings", "roles", "photos", "weather", "messages")
@@ -144,13 +154,18 @@ class Client:
                 info["diagnostics"] = summary
         return info
 
-    async def restart(self, *, confirm=False):
+    async def restart(self, *, confirm=False, capture_ticket=None):
         if self.channel.capabilities.get("system_restart") != 1:
             raise DeviceError("system_restart_not_supported")
         if type(confirm) is not bool:
             raise ValueError("confirm must be a boolean")
+        fields = {"confirm": True} if confirm else {}
+        if capture_ticket is not None:
+            if (not confirm or type(capture_ticket) is not int or not 0 < capture_ticket <= 0xffffffff
+                    or self.channel.capabilities.get("assistant_onboard") != 1):
+                raise ValueError("重启确认须绑定有效的语音请求。")
+            fields["ticket"] = capture_ticket
         async with self._operation:
-            fields = {"confirm": True} if confirm else {}
             reply = await self.channel.send("system_restart", **fields)
         expected = "confirm_pending" if confirm else "accepted"
         if reply.get("status") != expected:
@@ -603,6 +618,101 @@ class Client:
         if self.channel.capabilities.get('voice_names')!=1:raise DeviceError('voice_names_not_supported')
         async with self._operation:
             return await self.channel.send('voice_names',mode='set' if fields else 'status',**fields)
+
+    def _require_onboard_assistant(self, *, write=False):
+        if self.channel.capabilities.get("assistant_onboard") != 1:
+            raise DeviceError("assistant_onboard_not_supported")
+        if write and getattr(self.link, "wireless", False) is not True:
+            raise DeviceError("assistant_config_requires_paired_wifi")
+
+    async def agent_config_status(self):
+        self._require_onboard_assistant()
+        try:
+            async with self._operation:
+                reply = await self.channel.send("agent_config_status")
+        except CommandRejected:
+            raise CommandRejected("agent_config_status_rejected") from None
+        mode = reply.get("mode")
+        configured = reply.get("configured")
+        tx = reply.get("last_applied_tx")
+        if (mode not in AGENT_MODES or
+                not isinstance(configured, dict) or set(configured) != set(AGENT_SERVICE_GROUPS) or
+                any(type(value) is not bool for value in configured.values()) or
+                tx is not None and not valid_agent_config_tx(tx)):
+            raise DeviceError("invalid_agent_config_status")
+        return {"mode": mode, "configured": configured, "last_applied_tx": tx}
+
+    async def apply_agent_config(self, patch):
+        """Send a validated patch once. A lost commit ACK does not authorize a replay."""
+        self._require_onboard_assistant(write=True)
+        encoded = encode_agent_config(patch)
+        tx = secrets.token_hex(16)
+        async with self._operation:
+            started = False
+            try:
+                reply = await self.channel.send("agent_config_begin", tx=tx, size=len(encoded))
+                started = True
+                if type(reply.get("next_offset")) is not int or reply["next_offset"] != 0:
+                    raise DeviceError("invalid_agent_config_offset")
+                for offset in range(0, len(encoded), AGENT_CONFIG_CHUNK_BYTES):
+                    data = encoded[offset:offset + AGENT_CONFIG_CHUNK_BYTES]
+                    reply = await self.channel.send("agent_config_part", tx=tx, offset=offset,
+                                                    data=base64.b64encode(data).decode("ascii"))
+                    if type(reply.get("next_offset")) is not int or reply["next_offset"] != offset + len(data):
+                        raise DeviceError("invalid_agent_config_offset")
+                try:
+                    reply = await self.channel.send("agent_config_commit", tx=tx)
+                    if reply.get("applied") is not True:
+                        raise DeviceError("invalid_agent_config_commit")
+                except CommandRejected as error:
+                    if error.code != "out_of_memory":
+                        raise
+                    # The device can run out of memory constructing a commit ACK.
+                    started = False
+                    raise AgentConfigUnconfirmed(tx) from None
+                except (OSError, DeviceError, TimeoutError):
+                    # The device may have saved the patch before the ACK was lost.
+                    started = False
+                    raise AgentConfigUnconfirmed(tx) from None
+                started = False
+            except CommandRejected:
+                raise CommandRejected("agent_config_rejected") from None
+            finally:
+                if started and self.channel.online:
+                    with suppress(Exception):
+                        await self.channel.send("agent_config_cancel", tx=tx)
+        return tx
+
+    async def send_voice_permissions(self, enabled):
+        self._require_onboard_assistant(write=True)
+        if not isinstance(enabled, (set, frozenset)) or not enabled <= VOICE_TOOLS.keys():
+            raise ValueError("语音工具授权列表无效。")
+        async with self._operation:
+            reply = await self.channel.send("voice_permissions_set", enabled=sorted(enabled))
+        if reply.get("applied") is not True:
+            raise DeviceError("invalid_voice_permissions_reply")
+
+    async def voice_device_settings(self, *, volume=None, brightness=None, capture_ticket=None):
+        if self.channel.capabilities.get("device_settings") != 1:
+            raise DeviceError("device_settings_not_supported")
+        fields = {}
+        for name, value, minimum in (("volume", volume, 0), ("brightness", brightness, 10)):
+            if value is not None:
+                if type(value) is not int or not minimum <= value <= 100:
+                    raise ValueError("设备设置范围无效。")
+                fields[name] = value
+        if fields:
+            if type(capture_ticket) is not int or not 0 < capture_ticket <= 0xffffffff:
+                raise ValueError("修改设备设置须绑定有效的语音请求。")
+            fields["ticket"] = capture_ticket
+        async with self._operation:
+            reply = await self.channel.send("device_settings", **fields)
+        result = {name: reply.get(name) for name in ("volume", "brightness")}
+        if (type(result["volume"]) is not int or not 0 <= result["volume"] <= 100 or
+                type(result["brightness"]) is not int or not 10 <= result["brightness"] <= 100 or
+                any(result[name] != value for name, value in fields.items() if name != "ticket")):
+            raise DeviceError("invalid_device_settings_reply")
+        return result
 
     async def dashboard_config(self, metric=None, *, rotation=None, interval=None):
         if self.channel.capabilities.get('dashboard_config')!=1:

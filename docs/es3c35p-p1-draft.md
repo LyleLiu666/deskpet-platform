@@ -44,10 +44,11 @@ P1,{"epoch":"demo","seq":4,"boot":4,"ok":true}
 | `battery_status` | `heartbeat` 或 `state` | 新增 `battery` 对象，例如 `{"mv":3920,"percent":null,"power":"unknown","low":false}`。未知读数用 `null`。`power` 取 `unknown`、`battery`、`charging` 或 `external_full`，后两者须满足板端实测判定条件 |
 | `device_info`（扩展） | `device_info` | 沿用现有 `device_info: 1` 能力（不占用已用于 `network_status`/`card_status` 的 `device_diagnostics`）。电脑端白名单保留新增的 `diagnostics` 对象，例如 `{"reset_reason":"watchdog","early_resets":1,"safe_mode":false,"crash_present":true}`。`reset_reason` 是脱敏类别，无法识别时取 `unknown` |
 | `subsystem_recover` | `subsystem_recover`，`target` 取 `sd`、`i2c`、`audio` 或 `wifi` | `{"status":"accepted"}` 表示板端已受理。用 `desk_diagnostics` 查看最近一次执行结果 |
-| `system_restart` | `system_restart`，可选布尔字段 `confirm` | 电脑端维护工具 `desk_restart` 省略 `confirm`（或传 `false`），板端有界收尾后直接软重启并返回 `{"status":"accepted"}`。语音工具触发时传 `confirm: true`（或由板载助手本地弹窗），板端在屏上弹出确认框并返回 `{"status":"confirm_pending"}`，须经用户在屏上实际点按确认后才重启 |
+| `system_restart` | `system_restart`，可选布尔字段 `confirm`。声明 `assistant_onboard` 的设备接收 Base 语音请求时还带当前录音编号 `ticket` | `desk_restart` 省略 `confirm`，板端有界收尾并返回 `{"status":"accepted"}`。语音工具固定传 `confirm: true`，`confirm_pending` 仅表示已请求屏上确认。板端须收到实际点按才重启 |
+| `device_settings` | `device_settings`。查询无业务字段。临时调整时传当前录音编号 `ticket`，以及 `volume`（0–100）和 `brightness`（10–100）中的至少一个 | 返回当前 `volume` 和 `brightness`。语音调整仅对当前会话生效 |
 | `music_control` | `music_control`，`action` 取 `status`、`play`、`pause`、`stop`、`prev`、`next` 或 `shuffle`。`play` 可带相对路径 `path` | 返回操作后的 `state`（`playing`、`paused`、`stopped`）、`path`、`title`、`position_ms`、`volume`（0–100）和 `shuffled`。空曲库时 `path`、`title` 为 `null`。查询以外的失败回包不得报告成功 |
 | `music_library` | `music_list`、`music_delete` | 见下节。导入须同时声明 `card_transfer`，复用已有上传及文件校验回执 |
-| `assistant_onboard` | `agent_config_begin`、`agent_config_part`、`agent_config_commit`、`agent_config_status` | 见配置更新示例。电脑端入口为 `desk_agent_config` |
+| `assistant_onboard` | `agent_config_begin`、`agent_config_part`、`agent_config_commit`、`agent_config_status`、`agent_config_cancel` | 见配置更新示例。电脑端入口为 `desk_agent_config` |
 | `assistant_onboard` | `voice_permissions_set`，`enabled` 为完整工具名数组，例如 `{"enabled":["device_status"]}` | 板端在当前配对下完整保存后返回 `{"applied":true}`。空数组撤销全部授权。新配对同步前默认全关 |
 
 收到 `device_restarting` 表示板端已进入有界的重启收尾窗口。握手、能力、状态、诊断和已受理的传输及角色动作回执仍可查询，重复请求重启返回 `busy`。新的操作请求会被拒绝。设备重新上线后可查询状态，再决定是否重新发起操作。
@@ -88,7 +89,22 @@ P1,{"epoch":"demo","seq":8,"boot":4,"ok":true,"items":[{"path":"media/rain.flac"
 
 一次配置修改使用一个客户端生成的唯一 `tx`，以经过认证的配对和当前连接为边界。`begin` 声明 UTF-8 JSON 补丁的总字节数 `size`，取值 1–4096。每个 `part` 分别用标准 Base64 编码，`offset` 按解码后的字节从 0 连续递增。`next_offset` 返回已接收的字节数。板端每次只暂存一笔修改。缺段、越界或超时即丢弃本次暂存，断线也清理未提交内容。相应错误码为 `invalid_offset`、`invalid_size`、`tx_expired`。未知交易返回 `unknown_tx`。
 
+Platform 使用 32 字符的交易标识，每部分最多 600 原始字节。`agent_config_cancel` 带 `tx`，返回 `cancelled: true` 时已丢弃该交易尚未提交的数据。
+
 `commit` 时校验完整补丁、合并后的配置及容量，只替换补丁中出现的字段。保存成功才返回 `applied=true`，并将 `last_applied_tx` 与配置一并持久化。重连后先查状态再决定是否重新配置。查询返回生效模式、最近成功的交易标识和各组令牌是否已设置。令牌仅在配置写入时传输。
+
+`desk_agent_config` 不带 `config` 时查询。写入和权限同步使用配对后的加密 Wi-Fi 连接。`config` 是字段补丁，例如 `{"mode":"platform"}`。可用字段见下表。
+
+| 字段 | 内容 |
+| --- | --- |
+| `mode` | `platform`、`onboard` 或 `auto` |
+| `chat` | `url`、`token`、`model`、`tool_format`（`native` 或 `json`） |
+| `asr` | `url`、`token`、`model`。空地址和空令牌沿用对话组 |
+| `tts` | `url`、`token`、`model`、`voice` |
+| `persona` | `prompt`、`user_name`、`device_name` |
+| `wake_enabled` | 布尔值 |
+
+按 UTF-8 计算长度。地址、令牌、模型名的上限分别为 256、512、128 字节。提示词最多 1024 字节，音色和各昵称最多 64 字节。地址使用 HTTPS，私网 IPv4 和 IPv6 ULA 字面量可使用 HTTP。提交回执丢失时，Platform 只读取状态并用 `last_applied_tx` 核对，无法核对时返回 `status: "unknown"` 和原 `tx`。
 
 ```text
 P1,{"epoch":"demo","seq":9,"type":"agent_config_begin","tx":"t42","size":15}

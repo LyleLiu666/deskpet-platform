@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict
 from .adaptive_speed.config import Config as SpeedConfig
 from .adaptive_speed.history import Frame, History
 from .adaptive_speed.runtime import AdaptiveRuntime
+from .agent_config import AgentConfigUnconfirmed
 from .agent_speed_probe import AgentSpeedProbe, find_installed_probe
 from .card_upload import MAX_FILE_BYTES, MUSIC_DIRECTORIES, validate_music_path, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
@@ -69,6 +70,7 @@ from .transcription import (
 from .voice_agent import configured_chat_backend
 from .voice_conversation import create_device_conversation
 from .voice_permissions import VOICE_TOOLS, VoicePermissions
+from .voice_tools import voice_tool_requires_confirmation, voice_tool_supported
 from .wifi_link import NO_DEVICE_REPLY_HELP, probe_board
 
 Manual = Literal["operations", "development", "roles"]
@@ -145,6 +147,7 @@ class BoardSession:
         self.voice_conversation = None
         self.voice_session_id = None
         self.voice_permissions = VoicePermissions(path)
+        self.voice_policy_sent = None
         self.voice_tool_snapshot = frozenset()
         self.voice_active_ticket = None
         self.voice_active_client = None
@@ -200,6 +203,7 @@ class BoardSession:
         self.capture_task=None
         conversation = self._detach_voice_conversation()
         self.voice_session_id = None
+        self.voice_policy_sent = None
         self.voice_active_ticket=None
         self.voice_active_client=None
         if self.screen_speech_task and not self.screen_speech_task.done():self.screen_speech_task.cancel()
@@ -271,7 +275,13 @@ class BoardSession:
 
     async def open_wifi(self, config):
         async with asyncio.timeout(WIFI_FALLBACK_TIMEOUT if self.usb_port is not None else None):
-            return await self.client_factory(config).__aenter__()
+            client = await self.client_factory(config).__aenter__()
+        try:
+            await self.sync_onboard_voice_permissions(client)
+            return client
+        except BaseException:
+            await client.close()
+            raise
 
     async def recover_wifi(self, client, heartbeat):
         if (client is None or client is not self.client or self.usb_port is None or
@@ -479,6 +489,7 @@ class BoardSession:
                     sampled_client = self.client
                     if self.client.channel.capabilities.get('message_read_aloud')==1:
                         await self.refresh_read_request(self.client)
+                    await self.sync_onboard_voice_permissions(self.client)
                     await self.refresh_capture(self.client)
                     await self.sync_computer_preferences(sampled_client, heartbeat)
                     self.record_status(heartbeat)
@@ -779,9 +790,8 @@ class BoardSession:
                     await client.queue_transcript(text, capture_ticket=ticket)
                 failure='model';await client.capture_progress(ticket,'thinking')
                 if self.client is not client:raise DeviceError('connection_changed')
-                enabled=self.voice_permissions.enabled()
-                if client.channel.capabilities.get('role_actions')!=1:enabled=enabled-{'list_role_actions','play_role_action'}
-                elif client.channel.capabilities.get('capture_voice_role')!=1:enabled=enabled-{'play_role_action'}
+                enabled = frozenset(name for name in self.voice_permissions.enabled()
+                                    if voice_tool_supported(name, capabilities))
                 if self.voice_conversation is not None and enabled!=self.voice_tool_snapshot:
                     conversation=self._detach_voice_conversation()
                     await conversation.end()
@@ -996,15 +1006,141 @@ class BoardSession:
         async with self.storage_lock:
             if enabled is not None:
                 async with self.voice_permissions.lock():self.voice_permissions.update(enabled)
-            active,status=self.voice_permissions.inspect()
-        capabilities=self.client.channel.capabilities if self.client is not None else None
-        def supported(name):
-            if capabilities is None:return None
-            if name=='device_status':return True
-            if name=='list_role_actions':return capabilities.get('role_actions')==1
-            return capabilities.get('role_actions')==1 and capabilities.get('capture_voice_role')==1
-        return {'status':status,'enabled':sorted(active),'available':[{'name':name,'description':description,
-                'requires_confirmation':False,'device_supported':supported(name)} for name,description in VOICE_TOOLS.items()]}
+        client = self.client
+        sync = None
+        if enabled is not None:
+            async with self.lock:
+                client = self.client
+                sync = 'pending' if client is None else await self.sync_onboard_voice_permissions(client)
+        active, status = self.voice_permissions.inspect()
+        capabilities = client.channel.capabilities if client is not None else None
+        result = {'status': status, 'enabled': sorted(active), 'available': [
+            {'name': name, 'description': description, 'requires_confirmation': voice_tool_requires_confirmation(name),
+             'device_supported': None if capabilities is None else voice_tool_supported(name, capabilities)}
+            for name, description in VOICE_TOOLS.items()
+        ]}
+        if sync is not None:
+            result['onboard_sync'] = sync
+        return result
+
+    def _matches_voice_pairing(self, client, config):
+        paired = client.config
+        return (config.identity == paired.identity and config.key == paired.key and
+                (config.device_id is None or config.device_id == client.device_id))
+
+    async def sync_onboard_voice_permissions(self, client):
+        if client.channel.capabilities.get('assistant_onboard') != 1:
+            return None
+        try:
+            if (getattr(getattr(client, 'link', None), 'wireless', False) is not True or
+                    not self._matches_voice_pairing(client, DeviceConfig.load(self.path))):
+                return 'pending'
+            enabled = self.voice_permissions.enabled()
+            sent = (client, client.channel.epoch, enabled)
+            if self.voice_policy_sent != sent:
+                self.voice_policy_sent = None
+                await client.send_voice_permissions(enabled)
+                self.voice_policy_sent = sent
+        except LINK_ERRORS:
+            return 'pending'
+        return 'applied'
+
+    async def agent_config(self, patch):
+        async with self.lock:
+            client = self.client
+            if client is None:
+                return {'status': 'not_connected'}
+            if client.channel.capabilities.get('assistant_onboard') != 1:
+                return {'status': 'unsupported'}
+            if patch is None:
+                try:
+                    return {'status': 'ok', **await client.agent_config_status()}
+                except LINK_ERRORS:
+                    return {'status': 'unavailable'}
+            if getattr(getattr(client, 'link', None), 'wireless', False) is not True:
+                return {'status': 'requires_paired_wifi'}
+            try:
+                config = DeviceConfig.load(self.path)
+                if not self._matches_voice_pairing(client, config):
+                    return {'status': 'pairing_changed'}
+            except (OSError, ValueError):
+                return {'status': 'pairing_changed'}
+            try:
+                tx = await client.apply_agent_config(patch)
+            except AgentConfigUnconfirmed as error:
+                return await self._resolve_agent_commit(client, config, error.tx)
+            except CommandRejected:
+                return {'status': 'rejected'}
+            except (OSError, DeviceError, TimeoutError):
+                return {'status': 'not_applied'}
+            return {'status': 'applied', 'tx': tx}
+
+    async def _resolve_agent_commit(self, client, config, tx):
+        try:
+            async with asyncio.timeout(STATUS_WIFI_RECOVERY_TIMEOUT):
+                if DeviceConfig.load(self.path) != config:
+                    return {'status': 'unknown', 'tx': tx}
+                if client.channel.online:
+                    status = await client.agent_config_status()
+                else:
+                    await self.drop()
+                    if DeviceConfig.load(self.path) != config:
+                        return {'status': 'unknown', 'tx': tx}
+                    async with self.client_factory(config) as replacement:
+                        if not self._matches_voice_pairing(replacement, config):
+                            return {'status': 'unknown', 'tx': tx}
+                        status = await replacement.agent_config_status()
+                if DeviceConfig.load(self.path) == config and status['last_applied_tx'] == tx:
+                    return {'status': 'applied', 'tx': tx}
+        except LINK_ERRORS:
+            pass
+        return {'status': 'unknown', 'tx': tx}
+
+    async def voice_battery_status(self):
+        async with self.lock:
+            client = self.client
+            if client is None or client is not self.voice_active_client:
+                return {'status': 'not_connected'}
+            if client.channel.capabilities.get('battery_status') != 1:
+                return {'status': 'unsupported'}
+            try:
+                reply = await client.status()
+            except LINK_ERRORS:
+                return {'status': 'unavailable'}
+            return {'status': 'ok', 'battery': battery_view(reply.get('battery'))}
+
+    async def voice_device_settings(self, *, volume, brightness):
+        async with self.lock:
+            client, ticket = self.client, self.voice_active_ticket
+            if client is None or client is not self.voice_active_client or ticket is None:
+                return {'status': 'not_connected'}
+            if client.channel.capabilities.get('device_settings') != 1:
+                return {'status': 'unsupported'}
+            changing = volume is not None or brightness is not None
+            try:
+                result = await client.voice_device_settings(volume=volume, brightness=brightness, capture_ticket=ticket)
+            except CommandRejected as error:
+                if changing and error.code in ('settings_partial', 'settings_timeout'):
+                    return {'status': 'unknown', 'reason': error.code}
+                return {'status': 'rejected'}
+            except (OSError, DeviceError, TimeoutError):
+                return {'status': 'unknown' if changing else 'unavailable'}
+            return {'status': 'ok', **result}
+
+    async def voice_restart(self):
+        async with self.lock:
+            client, ticket = self.client, self.voice_active_ticket
+            if client is None or client is not self.voice_active_client or ticket is None:
+                return {'status': 'not_connected'}
+            if client.channel.capabilities.get('system_restart') != 1:
+                return {'status': 'unsupported'}
+            fields = {'capture_ticket': ticket} if client.channel.capabilities.get('assistant_onboard') == 1 else {}
+            try:
+                return await client.restart(confirm=True, **fields)
+            except CommandRejected:
+                return {'status': 'rejected'}
+            except (OSError, DeviceError, TimeoutError):
+                return {'status': 'unknown'}
 
     async def voice_role_action(self, action, duration_ms):
         """Show the role and play only while this exact voice request is active."""
@@ -2114,6 +2250,24 @@ def speed_windows_view(reply):
         return None
 
 
+def battery_view(value):
+    if not isinstance(value, dict):
+        value = {}
+    power = value.get("power")
+    mv = value.get("mv")
+    percent = value.get("percent")
+    if power not in ("battery", "charging", "external_full"):
+        power = "unknown"
+    valid_mv = type(mv) is int and 0 < mv <= 6000
+    valid_percent = type(percent) is int and 0 <= percent <= 100 and valid_mv and power == "battery"
+    return {
+        "mv": mv if valid_mv else None,
+        "percent": percent if valid_percent else None,
+        "power": power,
+        "low": valid_mv and power == "battery" and value.get("low") is True,
+    }
+
+
 def status_view(reply, capabilities):
     def page_name(key):
         index = reply.get(key)
@@ -2150,22 +2304,8 @@ def status_view(reply, capabilities):
         status["quota_source"] = SOURCES[quota_source]
     if capabilities.get("speed_windows") == 1 and (windows := speed_windows_view(reply)) is not None:
         status["speed_windows"] = windows
-    if capabilities.get("battery_status") == 1:
-        battery = reply.get("battery")
-        if isinstance(battery, dict):
-            power = battery.get("power")
-            mv = battery.get("mv")
-            percent = battery.get("percent")
-            if power not in ("battery", "charging", "external_full"):
-                power = "unknown"
-            valid_mv = type(mv) is int and 0 < mv <= 6000
-            valid_percent = type(percent) is int and 0 <= percent <= 100 and valid_mv and power == "battery"
-            status["battery"] = {
-                "mv": mv if valid_mv else None,
-                "percent": percent if valid_percent else None,
-                "power": power,
-                "low": valid_mv and power == "battery" and battery.get("low") is True,
-            }
+    if capabilities.get("battery_status") == 1 and isinstance(reply.get("battery"), dict):
+        status["battery"] = battery_view(reply["battery"])
     if capabilities.get("weather_device") == 1:
         status["weather"] = {"updated": reply.get("weather_updated") or None,
                              "device_refresh": reply.get("weather_device_refresh") is True}
@@ -2396,10 +2536,20 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         return await sessions.resolve(device_id).voice_names(user_name=user_name,device_name=device_name)
 
     @server.tool()
-    async def desk_voice_tools(enabled: list[Literal['device_status','list_role_actions','play_role_action']] | None = None,
+    async def desk_voice_tools(enabled: list[Literal['device_status', 'list_role_actions', 'play_role_action',
+                                                     'battery_status', 'device_settings', 'device_restart']] | None = None,
                                device_id: str | None = None) -> dict[str, Any]:
-        """查看语音助手可用工具；传入完整 enabled 列表替换授权，空列表撤销全部。无需逐次确认；仅按用户语音请求调用。"""
+        """查看语音助手工具和确认要求，或用完整 enabled 列表替换授权。空列表撤销全部。"""
         return await sessions.resolve(device_id).voice_tool_settings(enabled)
+
+    @server.tool()
+    async def desk_agent_config(config: dict[str, Any] | None = None,
+                                device_id: str | None = None) -> dict[str, Any]:
+        """查询板载助手模式、令牌配置状态和最后已应用的交易，或提交用户明确提供的配置补丁。
+
+        补丁可包含 mode、chat、asr、tts、persona、wake_enabled。令牌只写不读。
+        """
+        return await sessions.resolve(device_id).agent_config(config)
 
     @server.tool()
     async def desk_dashboard_config(

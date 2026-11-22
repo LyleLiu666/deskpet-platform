@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from unittest.mock import AsyncMock
 
@@ -99,3 +100,35 @@ class VoiceToolsTest(unittest.IsolatedAsyncioTestCase):
         result=await agent.turn('做摸摸动作')
         self.assertEqual(result.events[-1].status,'started')
         self.assertEqual(result.text,'操作已开始，尚未确认完成。')
+
+    async def test_unknown_mutation_stops_the_turn_before_the_model_can_repeat_it(self):
+        cases = (
+            ('device_settings', 'voice_device_settings', {'volume': 35, 'brightness': 65},
+             {'status': 'unknown', 'reason': 'settings_partial'}, '设备可能已应用部分设置，请先核对音量和亮度。'),
+            ('device_restart', 'voice_restart', {}, {'status': 'unknown'}, '重启请求结果未知，请先核对设备状态。'),
+        )
+        for name, method, arguments, response, expected_text in cases:
+            with self.subTest(tool=name):
+                invoke = AsyncMock(return_value=response)
+                setattr(self.session, method, invoke)
+                backend = AsyncMock()
+                backend.complete.side_effect = [
+                    {'role': 'assistant', 'content': None, 'tool_calls': [{
+                        'id': identity, 'type': 'function',
+                        'function': {'name': name, 'arguments': json.dumps(arguments)},
+                    }]}
+                    for identity in ('first', 'repeat')
+                ] + [{'role': 'assistant', 'content': '操作完成。'}]
+                agent = VoiceAgent(backend, build_voice_tools(self.session, {name}))
+                result = await agent.turn('执行一次操作')
+                backend.complete.assert_awaited_once()
+                invoke.assert_awaited_once_with(**arguments)
+                self.assertEqual(result.text, expected_text)
+                self.assertEqual([event.status for event in result.events], ['unknown'])
+                self.assertEqual(json.loads(agent.messages[-2]['content'])['status'], 'unknown')
+                self.assertEqual(agent.messages[-1], {'role': 'assistant', 'content': expected_text})
+                backend.complete.side_effect = None
+                backend.complete.return_value = {'role': 'assistant', 'content': '请告诉我接下来要做什么。'}
+                next_turn = await agent.turn('我们先聊点别的')
+                self.assertEqual(next_turn.events, ())
+                invoke.assert_awaited_once()

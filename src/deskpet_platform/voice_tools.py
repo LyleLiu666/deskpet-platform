@@ -3,6 +3,7 @@
 Nothing is enabled by default. The caller must present the available tools and
 confirmation policy, persist the user's choice, and pass that explicit set here.
 """
+from dataclasses import replace
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -25,12 +26,38 @@ class _ActionArgs(BaseModel):
     duration_ms: int | None = Field(default=None, ge=100, le=6000)
 
 
+class _DeviceSettingsArgs(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    volume: int | None = Field(default=None, ge=0, le=100)
+    brightness: int | None = Field(default=None, ge=10, le=100)
+
+
 _TOOLS = {
     'device_status': ('检查该配对设备当前能否与电脑通信，并查看页面和角色状态。', _NoArgs),
     'list_role_actions': ('列出当前角色支持的动作。', _NoArgs),
     'play_role_action': ('让角色做指定动作。started 只表示动作已开始。', _ActionArgs),
     'open_page': ('临时切换到指定页面，不修改默认首页。', _PageArgs),
+    'battery_status': ('查看电压、估算电量与电源状态。没有数据时如实报告未知。', _NoArgs),
+    'device_settings': ('查看或调整当前会话的音量和亮度。省略参数时只查询。', _DeviceSettingsArgs),
+    'device_restart': ('请求在设备屏幕上确认软重启，用户实际点按后才会重启。', _NoArgs),
 }
+_CAPABILITIES = {
+    'device_status': (),
+    'list_role_actions': ('role_actions',),
+    'play_role_action': ('role_actions', 'capture_voice_role'),
+    'open_page': ('screen_views',),
+    'battery_status': ('battery_status',),
+    'device_settings': ('device_settings',),
+    'device_restart': ('system_restart',),
+}
+
+
+def voice_tool_supported(name, capabilities):
+    return name in _CAPABILITIES and all(capabilities.get(item) == 1 for item in _CAPABILITIES[name])
+
+
+def voice_tool_requires_confirmation(name):
+    return name == 'device_restart'
 
 
 def voice_operation_schemas():
@@ -88,8 +115,36 @@ def build_voice_tools(session, enabled, *, authorize=None, permission_lock=None,
         failure={'not_connected':'设备未连接，页面未打开。','unsupported':'设备暂不支持打开这个页面。'}.get(status,'页面未能打开。')
         return ToolOutcome(status=='shown',visible,failure_message=failure if status!='shown' else None)
 
+    async def battery_status():
+        result = await session.voice_battery_status()
+        if result.get('status') != 'ok':
+            return ToolOutcome(False, {'status': result['status']}, failure_message='暂时无法读取电池状态。')
+        return ToolOutcome(True, result['battery'])
+
+    async def device_settings(volume=None, brightness=None):
+        result = await session.voice_device_settings(volume=volume, brightness=brightness)
+        status = result['status']
+        if status == 'ok':
+            return ToolOutcome(True, {name: result[name] for name in ('volume', 'brightness')})
+        if status == 'unknown':
+            message = ('设备可能已应用部分设置，请先核对音量和亮度。' if result.get('reason') == 'settings_partial'
+                       else '调整结果未知，请先核对音量和亮度。')
+            return ToolOutcome(False, {'status': status}, failure_message=message, result_unknown=True)
+        return ToolOutcome(False, {'status': status}, failure_message='目前无法完成音量或亮度操作。')
+
+    async def device_restart():
+        result = await session.voice_restart()
+        status = result['status']
+        if status == 'confirm_pending':
+            return ToolOutcome(True, {'status': status}, completed=False)
+        if status == 'unknown':
+            return ToolOutcome(False, {'status': status}, failure_message='重启请求结果未知，请先核对设备状态。',
+                               result_unknown=True)
+        return ToolOutcome(False, {'status': status}, failure_message='目前无法请求设备重启。')
+
     handlers = {'device_status': device_status, 'list_role_actions': list_role_actions,
-                'play_role_action': play_role_action, 'open_page': open_page}
+                'play_role_action': play_role_action, 'open_page': open_page, 'battery_status': battery_status,
+                'device_settings': device_settings, 'device_restart': device_restart}
     def guarded(tool):
         if authorize is None:return tool
         async def invoke(**arguments):
@@ -103,5 +158,7 @@ def build_voice_tools(session, enabled, *, authorize=None, permission_lock=None,
                 async with permission_lock():return await checked()
             except (TimeoutError,OSError):
                 return ToolOutcome(False,{'status':'unavailable'},failure_message='这项语音操作暂时不可用。')
-        return VoiceTool(tool.name,tool.description,tool.parameters,invoke,tool.requires_confirmation)
-    return [guarded(VoiceTool(name, *_TOOLS[name], handlers[name])) for name in sorted(enabled)]
+        return replace(tool, invoke=invoke)
+    return [guarded(VoiceTool(name, *_TOOLS[name], handlers[name],
+                             requires_confirmation=voice_tool_requires_confirmation(name),
+                             confirmation_on_device=voice_tool_requires_confirmation(name))) for name in sorted(enabled)]

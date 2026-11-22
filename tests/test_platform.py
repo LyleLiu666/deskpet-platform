@@ -1137,12 +1137,16 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
                                                  "desk_set_claude_notifications", "desk_set_antigravity_notifications",
                                                  "desk_set_agent_quota", "desk_notification_setup",
                                                  "desk_set_opencode_notifications", "desk_set_workbuddy_notifications",
+                                                 "desk_agent_config",
                                      "desk_list_notifications", "desk_mark_notification_seen", "desk_message_view", "desk_speak", "desk_read_notification", "desk_voice_names", "desk_voice_tools", "desk_dashboard_config", "desk_appearance_config", "desk_add_theme", "desk_add_wallpaper", "desk_delete_wallpaper", "desk_list_wallpapers"})
                         self.assertIn("昵称不会改变唤醒词", tools["desk_voice_names"].description)
                         voice_tools = await session.call_tool("desk_voice_tools")
                         self.assertFalse(voice_tools.isError)
                         self.assertEqual(voice_tools.structuredContent['status'],'not_paired')
                         self.assertEqual(voice_tools.structuredContent['enabled'],[])
+                        agent_config = await session.call_tool("desk_agent_config")
+                        self.assertFalse(agent_config.isError)
+                        self.assertEqual(agent_config.structuredContent, {"status": "not_connected"})
                         for name in ("desk_list_devices", "desk_notification_setup", "desk_read_manual", "desk_list_wallpapers"):
                             self.assertIs(tools[name].annotations.readOnlyHint, True)
                             self.assertIs(tools[name].annotations.openWorldHint, False)

@@ -15,6 +15,9 @@ VOICE_TOOLS = {
     'device_status': '查看设备连接、页面和角色状态',
     'list_role_actions': '查看当前角色支持的动作',
     'play_role_action': '在工作台显示并播放当前角色的指定动作',
+    'battery_status': '查看电池电压、估算电量和供电状态',
+    'device_settings': '查看或临时调整音量、亮度',
+    'device_restart': '请求在设备屏幕上确认软重启',
 }
 
 

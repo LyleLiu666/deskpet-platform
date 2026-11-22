@@ -5,6 +5,7 @@ import unittest
 import zlib
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call, patch
+from deskpet_platform.channel import CommandRejected
 from deskpet_platform.channel import Channel
 from deskpet_platform.mcp_server import BoardSession
 from deskpet_platform.client import Client, DeviceError
@@ -643,10 +644,80 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             session=self.session(path)
             initial=await session.voice_tool_settings()
             self.assertEqual(initial['enabled'],[])
-            self.assertEqual({item['name'] for item in initial['available']},{'device_status','list_role_actions','play_role_action'})
+            available = {item['name']: item for item in initial['available']}
+            self.assertEqual(set(available), {'device_status', 'list_role_actions', 'play_role_action',
+                                             'battery_status', 'device_settings', 'device_restart'})
+            self.assertTrue(available['device_restart']['requires_confirmation'])
+            self.assertFalse(available['device_settings']['requires_confirmation'])
+            session.client = self.board()
+            legacy = {item['name']: item['device_supported'] for item in (await session.voice_tool_settings())['available']}
+            self.assertTrue(legacy['device_status'])
+            self.assertFalse(legacy['device_restart'])
+            self.assertFalse(legacy['device_settings'])
             updated=await session.voice_tool_settings(['device_status'])
             self.assertEqual(updated['enabled'],['device_status'])
             self.assertEqual((await self.session(path).voice_tool_settings())['enabled'],['device_status'])
+
+    async def test_voice_restart_asks_for_physical_confirmation_and_never_reports_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'device.json'
+            config = DeviceConfig('aa:bb:cc:dd:ee:ff', bytes(range(32)))
+            config.save(path)
+            session = self.session(path)
+            client = self.board()
+            client.channel.capabilities.update(capture_mode=1, voice_names=1, speech_pcm=1, assistant_onboard=1, system_restart=1)
+            client.poll_capture.return_value = {'ticket': 7, 'mode': 'voice'}
+            client.link = Mock(wireless=False)
+            session.client = client
+            await session.voice_tool_settings(['device_restart'])
+            client.restart = AsyncMock(return_value={'status': 'confirm_pending', 'boot': 77})
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.speak_voice_reply = AsyncMock(return_value={'status': 'finished'})
+            session.voice_backend = Mock(complete=AsyncMock(side_effect=[
+                {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'restart', 'type': 'function',
+                  'function': {'name': 'device_restart', 'arguments': '{}'}}]},
+                {'role': 'assistant', 'content': '设备已经重启。'},
+            ]))
+            with patch('deskpet_platform.mcp_server.transcribe_pcm', new_callable=AsyncMock, return_value='请重启'):
+                await session.refresh_capture(client)
+                await session.capture_task
+            client.restart.assert_awaited_once_with(confirm=True, capture_ticket=7)
+            session.voice_backend.complete.assert_awaited_once()
+            session.speak_voice_reply.assert_awaited_once_with('请在设备屏幕上确认这项操作。')
+            client.capture_result.assert_awaited_once_with(7, True)
+
+    async def test_voice_mutations_do_not_replay_after_a_lost_ack_or_new_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = self.session(Path(directory) / 'device.json')
+            old, new = self.board(), self.board()
+            for client in (old, new):
+                client.channel.capabilities.update(assistant_onboard=1, system_restart=1, device_settings=1, battery_status=1)
+                client.restart = AsyncMock()
+                client.voice_device_settings = AsyncMock()
+                client.status = AsyncMock(return_value={'battery': {'mv': 3980, 'percent': 90, 'power': 'unknown', 'low': True}})
+            session.client = session.voice_active_client = old
+            session.voice_active_ticket = 7
+            old.restart.side_effect = TimeoutError
+            self.assertEqual(await session.voice_restart(), {'status': 'unknown'})
+            old.restart.assert_awaited_once_with(confirm=True, capture_ticket=7)
+            old.voice_device_settings.return_value = {'volume': 30, 'brightness': 60}
+            self.assertEqual(await session.voice_device_settings(volume=30, brightness=None),
+                             {'status': 'ok', 'volume': 30, 'brightness': 60})
+            old.voice_device_settings.assert_awaited_once_with(volume=30, brightness=None, capture_ticket=7)
+            old.voice_device_settings.reset_mock(side_effect=True)
+            for code in ('settings_partial', 'settings_timeout'):
+                with self.subTest(code=code):
+                    old.voice_device_settings.side_effect = CommandRejected(code)
+                    self.assertEqual(await session.voice_device_settings(volume=30, brightness=65),
+                                     {'status': 'unknown', 'reason': code})
+            self.assertEqual(old.voice_device_settings.await_count, 2)
+            self.assertEqual(await session.voice_battery_status(),
+                             {'status': 'ok', 'battery': {'mv': 3980, 'percent': None, 'power': 'unknown', 'low': False}})
+            session.client = new
+            self.assertEqual(await session.voice_restart(), {'status': 'not_connected'})
+            self.assertEqual(await session.voice_device_settings(volume=25, brightness=None), {'status': 'not_connected'})
+            new.restart.assert_not_awaited()
+            new.voice_device_settings.assert_not_awaited()
 
     async def test_voice_agent_can_execute_only_authorized_action(self):
         with tempfile.TemporaryDirectory() as directory:
