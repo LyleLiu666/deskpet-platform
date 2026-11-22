@@ -81,6 +81,14 @@ class TranscriptionError(RuntimeError):
     """A sanitized service failure, without audio, credentials or server text."""
 
 
+def _http_failure(status):
+    if status in (401, 403):
+        return 'invalid_token'
+    if status == 429:
+        return 'rate_limited'
+    return 'service_error'
+
+
 async def _dashscope_event(socket, task_id):
     try:
         message = await socket.receive_json()
@@ -168,7 +176,11 @@ async def transcribe_dashscope_pcm(pcm: bytes, service: DashScopeTranscription) 
                     sender.cancel()
                     receiver.cancel()
                     await asyncio.gather(sender, receiver, return_exceptions=True)
-    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+    except aiohttp.WSServerHandshakeError as exc:
+        raise TranscriptionError(_http_failure(exc.status)) from None
+    except asyncio.TimeoutError:
+        raise TranscriptionError('service_timeout') from None
+    except (aiohttp.ClientError, OSError):
         raise TranscriptionError('network_error') from None
 
 
@@ -197,7 +209,7 @@ async def transcribe_pcm(pcm: bytes, *, api_key: str, model: str,
                 data={"model": model}, files={"file": ("speech.wav", wav.getvalue(), "audio/wav")},
             ) as response:
                 if response.status_code != 200:
-                    raise TranscriptionError("service_error")
+                    raise TranscriptionError(_http_failure(response.status_code))
                 if response.headers.get("content-encoding", "identity").lower() != "identity":
                     raise TranscriptionError("invalid_response")
                 body = bytearray()
@@ -205,6 +217,8 @@ async def transcribe_pcm(pcm: bytes, *, api_key: str, model: str,
                     if len(body) + len(chunk) > _MAX_RESPONSE_BYTES:
                         raise TranscriptionError("invalid_response")
                     body.extend(chunk)
+    except httpx.TimeoutException:
+        raise TranscriptionError('service_timeout') from None
     except httpx.HTTPError:
         raise TranscriptionError("network_error") from None
     try:

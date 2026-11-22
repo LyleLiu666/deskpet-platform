@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from aiohttp import ClientConnectionError
 from deskpet_platform.mcp_server import BoardSession
-from deskpet_platform.speech import validate_text, split_speech, synthesize_speech, SpeechTooLong
+from deskpet_platform.speech import validate_text, split_speech, synthesize_speech, SpeechServiceError, SpeechTooLong
 
 class Speech(unittest.IsolatedAsyncioTestCase):
     def test_input_bounds(self):
@@ -44,8 +44,9 @@ class Speech(unittest.IsolatedAsyncioTestCase):
     async def test_synthesis_reports_failure_after_two_attempts(self):
         save = AsyncMock(side_effect=ClientConnectionError('remote failure'))
         with patch('edge_tts.Communicate', return_value=SimpleNamespace(save=save)):
-            with self.assertRaisesRegex(RuntimeError, '在线语音合成暂时不可用'):
+            with self.assertRaisesRegex(SpeechServiceError, '在线语音合成暂时不可用') as error:
                 await synthesize_speech('测试')
+        self.assertEqual(error.exception.code, 'service_unreachable')
         self.assertEqual(save.await_count, 2)
 
     async def test_no_network_when_board_unavailable(self):

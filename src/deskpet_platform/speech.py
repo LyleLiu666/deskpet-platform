@@ -9,6 +9,11 @@ VOICE = 'zh-CN-XiaoyiNeural'
 class SpeechTooLong(ValueError):
     pass
 
+class SpeechServiceError(RuntimeError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__('在线语音合成暂时不可用。')
+
 def split_speech(text,limit=12):
     """Keep each phrase short while preserving all text and punctuation."""
     parts=[];start=0
@@ -31,8 +36,8 @@ def validate_text(text):
 async def synthesize_speech(text):
     """Send only the requested text to Edge TTS; never retain audio files."""
     import edge_tts
-    from aiohttp import ClientConnectionError, ClientError
-    from edge_tts.exceptions import EdgeTTSException
+    from aiohttp import ClientConnectionError, ClientError, WSServerHandshakeError
+    from edge_tts.exceptions import EdgeTTSException, NoAudioReceived, UnexpectedResponse, UnknownResponse
 
     text=validate_text(text)
     with tempfile.TemporaryDirectory(prefix='deskpet-speech-') as directory:
@@ -43,8 +48,15 @@ async def synthesize_speech(text):
             except (ClientConnectionError, asyncio.TimeoutError):
                 # A fresh request rewrites the temporary file if the first stream was cut short.
                 await asyncio.wait_for(edge_tts.Communicate(text,VOICE).save(str(source)),15)
-        except (ClientError, EdgeTTSException, asyncio.TimeoutError):
-            raise RuntimeError('在线语音合成暂时不可用。') from None
+        except WSServerHandshakeError as exc:
+            code = {401: 'invalid_token', 403: 'invalid_token', 429: 'rate_limited'}.get(exc.status, 'service_unreachable')
+            raise SpeechServiceError(code) from None
+        except asyncio.TimeoutError:
+            raise SpeechServiceError('service_timeout') from None
+        except (NoAudioReceived, UnexpectedResponse, UnknownResponse):
+            raise SpeechServiceError('invalid_response') from None
+        except (ClientError, EdgeTTSException):
+            raise SpeechServiceError('service_unreachable') from None
         process=await asyncio.create_subprocess_exec('/usr/bin/afconvert','-f','WAVE','-d','LEI16@16000',
             '-c','1',str(source),str(target),stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL)
         try:await asyncio.wait_for(process.wait(),20)

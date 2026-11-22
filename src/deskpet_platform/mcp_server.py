@@ -32,7 +32,10 @@ from .agent_tool_callback import fit_callback_result
 from .card_upload import MAX_FILE_BYTES, MUSIC_DIRECTORIES, validate_music_path, validate_path
 from .channel import AckTimeout, CommandRejected, DeviceError
 from .device_lock import DeviceBusyError
-from .client import Client, SCREEN_PAGES, DASHBOARD_METRICS, DASHBOARD_ROTATION, DASHBOARD_INTERVALS, _appearance_theme, _appearance_wallpaper
+from .client import (
+    CAPTURE_FAILURE_DETAILS, DASHBOARD_INTERVALS, DASHBOARD_METRICS, DASHBOARD_ROTATION,
+    SCREEN_PAGES, Client, _appearance_theme, _appearance_wallpaper,
+)
 from .codex_hook import configure_codex_hooks, configure_hooks, hook_command
 from .codex_quota import fetch_quota
 from .desktop_launch import launch_notification, supports_desktop_launch
@@ -58,7 +61,7 @@ from .token_metrics import TokenMetrics
 from .usb_setup import probe_usb
 from .usb_link import UsbLink, UsbPort, find_usb_devices, read_usb_identity, reset_native_usb
 from .weather import fetch_relay_weather, fetch_weather
-from .speech import SpeechTooLong, split_speech, synthesize_speech, validate_text
+from .speech import SpeechServiceError, SpeechTooLong, split_speech, synthesize_speech, validate_text
 from .transcription import (
     DashScopeTranscription,
     LocalTranscription,
@@ -68,7 +71,7 @@ from .transcription import (
     transcribe_local_pcm,
     transcribe_pcm,
 )
-from .voice_agent import configured_chat_backend
+from .voice_agent import AgentError, configured_chat_backend
 from .voice_conversation import create_device_conversation
 from .voice_permissions import VOICE_TOOLS, VoicePermissions
 from .board_readouts import BOARD_READOUTS
@@ -843,6 +846,7 @@ class BoardSession:
         received = False
         success = False
         failure = 'recognition'
+        detail = None
         mode=metadata.get('mode','transcript')
         display_reply = mode == 'voice' and capabilities.get('capture_reply_text') == 1
         mode_valid=(mode in ('transcript','voice') and
@@ -868,10 +872,13 @@ class BoardSession:
                 else:
                     key, model = service
                     text=await transcribe_pcm(pcm,api_key=key,model=model)
+                if not isinstance(text, str):
+                    raise TranscriptionError('invalid_response')
+                if not text.strip():
+                    raise TranscriptionError('no_speech')
                 await self._require_active_capture(client, ticket)
                 if mode!='voice':
                     await client.queue_transcript(text,capture_ticket=ticket);return
-                if not isinstance(text,str) or not text.strip():raise ValueError('empty_transcript')
                 if display_reply:
                     await client.queue_transcript(text, capture_ticket=ticket)
                 failure='model';await client.capture_progress(ticket,'thinking')
@@ -942,8 +949,24 @@ class BoardSession:
         except asyncio.CancelledError:
             raise
         except TranscriptionError as exc:
-            if str(exc)=='no_speech' and capabilities.get('capture_no_speech')==1:
+            code = str(exc)
+            if code == 'no_speech' and capabilities.get('capture_no_speech') == 1:
                 failure='no_speech'
+            else:
+                detail = 'service_unreachable' if code in ('network_error', 'service_error') else code
+        except AgentError as exc:
+            detail = {
+                'model_authentication_failed': 'invalid_token',
+                'model_rate_limited': 'rate_limited',
+                'model_invalid_response': 'invalid_response',
+                'model_invalid_tool_calls': 'invalid_response',
+                'model_timeout': 'service_timeout',
+                'model_connection_failed': 'service_unreachable',
+                'model_endpoint_or_model_unavailable': 'service_unreachable',
+                'model_service_failed': 'service_unreachable',
+            }.get(exc.code)
+        except SpeechServiceError as exc:
+            detail = exc.code
         except Exception:
             pass  # Never log credentials, recorded audio or remote response bodies.
         finally:
@@ -955,7 +978,9 @@ class BoardSession:
                     with suppress(Exception):await conversation.end()
             if received and self.client is client:
                 with suppress(OSError, DeviceError, asyncio.TimeoutError):
-                    if not success and (failure=='no_speech' or (mode=='voice' and mode_valid)):
+                    if not success and capabilities.get('capture_failure_detail') == 1 and detail in CAPTURE_FAILURE_DETAILS:
+                        await client.capture_result(ticket, False, failure=detail)
+                    elif not success and (failure=='no_speech' or (mode=='voice' and mode_valid)):
                         await client.capture_result(ticket,False,failure=failure)
                     else:await client.capture_result(ticket, success)
 

@@ -51,6 +51,7 @@ P1,{"epoch":"demo","seq":4,"boot":4,"view":"photo","playing":true,"interval_seco
 | `capture_media_tools` | 带 `ticket` 的 `music_control` 或 `photo_album` | 只接受当前语音对话的执行端和已授权的工具。需要延后开始时返回 `queued:true`，音乐同时返回 `target_path` |
 | `capture_voice_role` | 配对连接中的 `capture_role_view` 和 `capture_role_play` | 以当前语音 `ticket` 校验执行方和 `play_role_action` 授权。在从工作台进入的语音页确认角色已呈现后播放动作 |
 | `capture_speech_cancel_ticket` | `speech_cancel`，可带非零无符号 32 位整数 `ticket` | 带编号时仅取消与该录音关联的播报。编号已失效时返回标准 `ok:true`，其余播报继续。省略编号沿用原有取消命令 |
+| `capture_failure_detail` | 当前录音 `ticket` 的 `capture_result`，`success:false`，`failure` 为约定错误码 | 标准 `ok:true`。设备按当前识别、对话或播报阶段显示故障并保留诊断摘要 |
 | `assistant_onboard` | `agent_config_begin`、`agent_config_part`、`agent_config_commit`、`agent_config_status`、`agent_config_cancel` | 见配置更新示例。电脑端入口为 `desk_agent_config` |
 | `assistant_onboard` | `voice_permissions_set`，`enabled` 为完整工具名数组，例如 `{"enabled":["device_status"]}` | 板端在当前配对下完整保存后返回 `{"applied":true}`。空数组撤销全部授权。新配对同步前默认全关 |
 | `agent_tool_callback` | `agent_tool_poll`、`agent_tool_result` | 经配对 Wi-Fi 将板载助手当前会话中的只读工具请求交给电脑端处理。依赖 `cap_ext` 与 `assistant_onboard` |
@@ -62,6 +63,15 @@ P1,{"epoch":"demo","seq":4,"boot":4,"view":"photo","playing":true,"interval_seco
 软重启若在收尾限时结束时仍有保存工作待确认，下一次启动的 `diagnostics.restart_pending_writes` 提供类别列表。类别取 `card`（文件传输或已取得独占写卡权限的修改）、`inbox`（消息缓存写入）、`merit`（待保存的木鱼敲击）。有记录时且 `reset_reason` 为 `software` 才上报。各类别最多出现一次，供诊断时核对对应数据。
 
 ES3C35P 当前上报滤波后的电池端电压。采样尚未稳定，或连续 6 秒没有有效读数时，`mv` 为 `null`。由于供电状态尚无独立证据，`power` 为 `unknown`，`percent` 为 `null`，`low` 为 `false`。电脑端 `desk_status` 按能力位展示摘要。
+
+## 电脑端语音失败回执
+
+设备在 `capabilities_ext` 中声明 `capture_failure_detail:1` 时，电脑端可在 `capture_result` 的 `success:false` 回执中传 `invalid_token`、`rate_limited`、`invalid_response`、`service_unreachable` 或 `service_timeout`。设备按录音编号校验当前轮次，并用当前处理阶段区分识别、对话和合成故障。传输只携带固定错误码。未声明该能力时沿用原来的失败回执和 `capture_no_speech` 能力门控。
+
+```text
+P1,{"epoch":"demo","seq":14,"type":"capture_result","ticket":7,"success":false,"failure":"service_timeout"}
+P1,{"epoch":"demo","seq":14,"boot":4,"ok":true}
+```
 
 ## 板载助手的电脑端工具回调
 

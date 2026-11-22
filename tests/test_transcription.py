@@ -63,6 +63,13 @@ class TranscriptionTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('secret-key',str(error.exception))
             self.assertNotIn('private audio',str(error.exception))
 
+    async def test_http_failures_keep_only_the_service_failure_code(self):
+        for status, code in ((401, 'invalid_token'), (403, 'invalid_token'), (429, 'rate_limited')):
+            with self.subTest(status=status), self.assertRaises(TranscriptionError) as error:
+                await transcribe_pcm(b'\0\0', api_key='test-key', model='model/name',
+                    transport=httpx.MockTransport(lambda _request: httpx.Response(status, content=b'private')))
+            self.assertEqual(str(error.exception), code)
+
     async def test_invalid_and_oversized_responses_are_rejected(self):
         for response in (
             httpx.Response(200, content=b"x" * 32769),

@@ -64,6 +64,18 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
         client.channel.send.assert_awaited_once_with('capture_result',ticket=7,success=False,failure='no_speech')
         with self.assertRaises(ValueError):await client.capture_result(7,True,failure='no_speech')
 
+    async def test_service_failure_requires_advertised_capability(self):
+        client = Client.__new__(Client)
+        client._operation = asyncio.Lock()
+        client.channel = Mock(capabilities={'capture_mode': 1}, send=AsyncMock())
+        with self.assertRaises(ValueError):
+            await client.capture_result(7, False, failure='invalid_token')
+        client.channel.capabilities['capture_failure_detail'] = 1
+        await client.capture_result(7, False, failure='invalid_token')
+        client.channel.send.assert_awaited_once_with('capture_result', ticket=7, success=False, failure='invalid_token')
+        with self.assertRaises(ValueError):
+            await client.capture_result(7, False, failure='private server response')
+
     async def test_reply_text_uses_ticketed_transcript_transfer(self):
         client = Client.__new__(Client)
         client._operation = asyncio.Lock()
@@ -168,6 +180,62 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             session.voice_backend.complete.assert_not_awaited()
             client.queue_transcript.assert_not_awaited()
             client.capture_result.assert_awaited_once_with(7,False,failure='no_speech')
+
+    async def test_transcription_service_details_fall_back_on_old_firmware(self):
+        from deskpet_platform.transcription import TranscriptionError
+
+        with tempfile.TemporaryDirectory() as directory:
+            session = self.session(Path(directory) / 'device.json')
+            for detail in (0, 1):
+                client = self.board()
+                session.client = client
+                client.channel.capabilities['capture_failure_detail'] = detail
+                with patch('deskpet_platform.mcp_server.transcribe_pcm', side_effect=TranscriptionError('rate_limited')):
+                    await session.refresh_capture(client)
+                    await session.capture_task
+                if detail:
+                    client.capture_result.assert_awaited_once_with(7, False, failure='rate_limited')
+                else:
+                    client.capture_result.assert_awaited_once_with(7, False)
+
+    async def test_empty_online_transcript_is_reported_as_no_speech(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = self.session(Path(directory) / 'device.json')
+            client = self.board()
+            session.client = client
+            client.channel.capabilities['capture_no_speech'] = 1
+            with patch('deskpet_platform.mcp_server.transcribe_pcm', return_value=' \n'):
+                await session.refresh_capture(client)
+                await session.capture_task
+            client.queue_transcript.assert_not_awaited()
+            client.capture_result.assert_awaited_once_with(7, False, failure='no_speech')
+
+    async def test_voice_service_failures_retain_the_processing_stage(self):
+        from deskpet_platform.speech import SpeechServiceError
+        from deskpet_platform.voice_agent import AgentError
+
+        with tempfile.TemporaryDirectory() as directory:
+            session = self.session(Path(directory) / 'device.json')
+            client = self.board()
+            session.client = client
+            client.channel.capabilities.update(capture_mode=1, capture_failure_detail=1, voice_names=1, speech_pcm=1)
+            client.poll_capture.return_value = {'ticket': 7, 'mode': 'voice'}
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.voice_backend = Mock(complete=AsyncMock(side_effect=AgentError('model_timeout')))
+            with patch('deskpet_platform.mcp_server.transcribe_pcm', return_value='你好'):
+                await session.refresh_capture(client)
+                await session.capture_task
+                client.capture_result.assert_awaited_once_with(7, False, failure='service_timeout')
+                client.capture_progress.assert_awaited_once_with(7, 'thinking')
+                client.capture_result.reset_mock()
+                client.capture_progress.reset_mock()
+                session.voice_backend.complete.side_effect = None
+                session.voice_backend.complete.return_value = {'role': 'assistant', 'content': '你好'}
+                session.speak_voice_reply = AsyncMock(side_effect=SpeechServiceError('service_unreachable'))
+                await session.refresh_capture(client)
+                await session.capture_task
+            self.assertEqual(client.capture_progress.await_args_list, [call(7, 'thinking'), call(7, 'speaking')])
+            client.capture_result.assert_awaited_once_with(7, False, failure='service_unreachable')
 
     async def test_local_voice_capture_can_enter_conversation(self):
         from deskpet_platform.transcription import LocalTranscription

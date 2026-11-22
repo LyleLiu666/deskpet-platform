@@ -44,6 +44,7 @@ DASHBOARD_INTERVALS = (5, 10, 20, 30, 60)
 RECOVERY_TARGETS = ("sd", "i2c", "audio", "wifi")
 RECOVERY_STATUSES = ("busy", "failed", "recovered", "reconnecting")
 MUSIC_ACTIONS = ("status", "play", "pause", "stop", "prev", "next", "shuffle")
+CAPTURE_FAILURE_DETAILS = ("invalid_token", "rate_limited", "invalid_response", "service_unreachable", "service_timeout")
 
 def _appearance_theme(value):
     if not isinstance(value,str):raise ValueError('主题须为名称或 JSON 文件名。')
@@ -459,7 +460,8 @@ class Client:
             raise ValueError("录音结果参数无效。")
         if failure is not None:
             allowed = (failure == 'no_speech' and self.channel.capabilities.get('capture_no_speech') == 1) or (
-                failure in ('recognition','model','playback') and self.channel.capabilities.get('capture_mode') == 1)
+                failure in ('recognition','model','playback') and self.channel.capabilities.get('capture_mode') == 1) or (
+                failure in CAPTURE_FAILURE_DETAILS and self.channel.capabilities.get('capture_failure_detail') == 1)
             if success or not allowed:
                 raise ValueError('录音失败状态无效。')
         fields={'ticket':ticket,'success':success}
