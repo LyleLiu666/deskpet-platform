@@ -136,6 +136,25 @@ class AgentSpeedProbeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await probe.close()
 
+    async def test_closed_probe_output_releases_the_shared_lease_without_another_sample(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "probe"
+            executable.write_text("#!/usr/bin/env python3\nimport os,time\nos.close(1)\ntime.sleep(30)\n")
+            executable.chmod(0o700)
+            owner = AgentSpeedProbe(executable)
+            successor = AgentSpeedProbe(executable)
+            try:
+                await owner.sample()
+                first = owner.process
+                await asyncio.wait_for(owner.reader, 4)
+                self.assertIsNotNone(first.returncode)
+                self.assertIsNone(owner.lease)
+                await successor.sample()
+                self.assertIsNotNone(successor.process)
+            finally:
+                await successor.close()
+                await owner.close()
+
     async def test_same_client_new_epoch_reestablishes_initial_token_state(self):
         class Collector:
             metric_version = "fixture"

@@ -183,15 +183,6 @@ class AgentSpeedProbe:
             while True:
                 if (self.last_requested is not None and time.monotonic() - self.last_requested >= 35
                         and not self._shared_requested_recently()):
-                    if process.returncode is None:
-                        with suppress(ProcessLookupError):
-                            process.terminate()
-                        try:
-                            await asyncio.wait_for(process.wait(), 2)
-                        except asyncio.TimeoutError:
-                            with suppress(ProcessLookupError):
-                                process.kill()
-                            await process.wait()
                     break
                 try:
                     line = await asyncio.wait_for(process.stdout.readline(), 2)
@@ -215,9 +206,23 @@ class AgentSpeedProbe:
             pass
         finally:
             self.latest = None
-            if self.lease is not None and process.returncode is not None:
+            await self._stop_process(process)
+            if self.lease is not None:
                 self.lease.__exit__(None, None, None)
                 self.lease = None
+
+    @staticmethod
+    async def _stop_process(process):
+        if process is None or process.returncode is not None:
+            return
+        with suppress(ProcessLookupError):
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.communicate(), 2)
+        except TimeoutError:
+            with suppress(ProcessLookupError):
+                process.kill()
+            await process.communicate()
 
     async def _close(self):
         if self.reader is not None:
@@ -227,15 +232,7 @@ class AgentSpeedProbe:
             self.reader = None
         process, self.process = self.process, None
         self.latest = None
-        if process is not None and process.returncode is None:
-            with suppress(ProcessLookupError):
-                process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), 2)
-            except TimeoutError:
-                with suppress(ProcessLookupError):
-                    process.kill()
-                await process.wait()
+        await self._stop_process(process)
         if self.lease is not None:
             self.lease.__exit__(None, None, None)
             self.lease = None
