@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import json
 import re
+import stat
 import uuid
 import wave
 
@@ -58,6 +59,25 @@ def _local_service(environ):
     return LocalTranscription(*paths)
 
 
+def _dashscope_key(environ):
+    if 'DASHSCOPE_API_KEY' in environ:
+        return environ['DASHSCOPE_API_KEY']
+    path = environ.get('DASHSCOPE_API_KEY_FILE', '')
+    if os.name != 'posix' or not os.path.isabs(path):
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077:
+                return os.read(fd, 131).decode('ascii').removesuffix('\n').removesuffix('\r')
+        finally:
+            os.close(fd)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return None
+
+
 def configured_service(environ):
     """Explicit opt-in only; invalid, missing or conflicting settings disable recording."""
     local = environ.get('DESKPET_ENABLE_LOCAL_TRANSCRIPTION') == '1'
@@ -68,7 +88,7 @@ def configured_service(environ):
     if local:
         return _local_service(environ)
     if dashscope:
-        key = environ.get('DASHSCOPE_API_KEY')
+        key = _dashscope_key(environ)
         workspace = environ.get('DASHSCOPE_WORKSPACE_ID', '')
         if not _valid_key(key) or (workspace and not _DASHSCOPE_WORKSPACE.fullmatch(workspace)):
             return None

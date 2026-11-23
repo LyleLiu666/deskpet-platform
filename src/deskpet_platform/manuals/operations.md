@@ -255,6 +255,7 @@ tool_timeout_sec = 1200
 
 - **配置语音识别服务（在电脑端进程环境变量中三选一，同时开启多种会停用识别）**：
   1. **阿里云百炼（华北 2 · 北京）**：设置 `DESKPET_ENABLE_DASHSCOPE_TRANSCRIPTION=1` 和 `DASHSCOPE_API_KEY`（可选 `DASHSCOPE_WORKSPACE_ID`），电脑通过 WebSocket 调用 `paraformer-realtime-v2` 实时识别。
+     macOS 和 Linux 的后台进程可用 `DASHSCOPE_API_KEY_FILE` 指定单行密钥文件的绝对路径。文件须属于接收器账号、权限为 `0600` 或 `0400`，且不能是符号链接。直接设置的 `DASHSCOPE_API_KEY` 优先。
   2. **硅基流动**：设置 `DESKPET_ENABLE_ONLINE_TRANSCRIPTION=1`、`DESKPET_ASR_API_KEY` 和 `DESKPET_ASR_MODEL`。
   3. **本地 whisper.cpp 识别**：设置 `DESKPET_ENABLE_LOCAL_TRANSCRIPTION=1`，并用绝对路径配置 `DESKPET_LOCAL_ASR_CLI`、`DESKPET_LOCAL_ASR_MODEL` 和 `DESKPET_LOCAL_ASR_VAD_MODEL`（需支持 stdin 与 VAD），录音在电脑本机通过内存管道完成识别。
 - **配置语音唤醒对话模型**：在电脑端额外设置 `LLM_BETA_OPENAI_BASE_URL`、`LLM_BETA_OPENAI_API_KEY` 和 `LLM_BETA_OPENAI_MODEL`。

@@ -2,6 +2,9 @@ import asyncio
 import io
 import gzip
 import json
+import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 import wave
 from unittest.mock import AsyncMock
@@ -15,6 +18,28 @@ from deskpet_platform.transcription import MAX_PCM_BYTES, TranscriptionError, tr
 
 
 class TranscriptionTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(os.name == 'posix', 'requires POSIX file permissions')
+    def test_dashscope_loads_only_private_regular_key_file(self):
+        with TemporaryDirectory() as root:
+            path = Path(root) / 'key'
+            path.write_bytes(b'fixture-key\n')
+            path.chmod(0o600)
+            base = {'DESKPET_ENABLE_DASHSCOPE_TRANSCRIPTION': '1', 'DASHSCOPE_API_KEY_FILE': str(path)}
+            self.assertEqual(configured_service(base).api_key, 'fixture-key')
+            self.assertEqual(configured_service({**base, 'DASHSCOPE_API_KEY': 'override-key'}).api_key,
+                             'override-key')
+            self.assertIsNone(configured_service({**base, 'DASHSCOPE_API_KEY': ''}))
+            alias = Path(root) / 'alias'
+            alias.symlink_to(path)
+            self.assertIsNone(configured_service({**base, 'DASHSCOPE_API_KEY_FILE': str(alias)}))
+            self.assertIsNone(configured_service({**base, 'DASHSCOPE_API_KEY_FILE': root}))
+            path.chmod(0o644)
+            self.assertIsNone(configured_service(base))
+            path.chmod(0o600)
+            for data in (b'abc\nxyz\n', b'a' * 129, b'\xff'):
+                path.write_bytes(data)
+                self.assertIsNone(configured_service(base))
+
     def test_online_recognition_requires_complete_explicit_configuration(self):
         self.assertIsNone(configured_service({}))
         base = {'DESKPET_ENABLE_ONLINE_TRANSCRIPTION': '1', 'DESKPET_ASR_API_KEY': 'test-key', 'DESKPET_ASR_MODEL': 'model/name'}
