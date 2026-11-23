@@ -100,6 +100,13 @@ class MultiBoardContractTests(unittest.IsolatedAsyncioTestCase):
         client.channel.capabilities["assistant_onboard"] = 1
         self.assertEqual(await client.restart(confirm=True, capture_ticket=7), {"status": "confirm_pending", "boot": 12})
         client.channel.send.assert_awaited_once_with("system_restart", confirm=True, ticket=7)
+        client.channel.send.reset_mock()
+        client.channel.capabilities["maintenance_restart_confirm"] = 1
+        self.assertEqual(await client.restart(confirm=True), {"status": "confirm_pending", "boot": 12})
+        client.channel.send.assert_awaited_once_with("maintenance_restart_confirm")
+        client.channel.send.reset_mock()
+        self.assertEqual(await client.restart(confirm=True, capture_ticket=7), {"status": "confirm_pending", "boot": 12})
+        client.channel.send.assert_awaited_once_with("system_restart", confirm=True, ticket=7)
 
     async def test_voice_settings_send_only_temporary_ticketed_writes(self):
         client = Client.__new__(Client)

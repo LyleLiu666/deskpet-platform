@@ -277,7 +277,7 @@ tool_timeout_sec = 1200
   - 若储存卡接触恢复后需重新挂载，在屏幕上重新打开「角色图鉴」或「相册」即可触发介质探测与挂载，随后返回角色页会重新加载上次保存的角色。
 - **子系统恢复与软重启**：
   - 有对应功能的设备，可在「设置 → 系统」分别恢复储存卡、触摸、声音或 Wi-Fi，也可使用 `desk_recover_subsystem(target=...)`，四项分别对应 `sd`、`i2c`、`audio`、`wifi`。`accepted` 表示设备已受理，执行结果见 `desk_diagnostics` 的 `diagnostics.last_subsystem`。
-  - 屏上「重启」需要点按确认。`desk_restart` 会直接请求已配对的设备软重启。收到 `accepted` 后等设备重新连接，再用 `desk_status` 或 `desk_diagnostics` 检查。收到 `restart_ack_lost` 时也先检查状态，避免重复请求。若重启时仍有写入待确认，`diagnostics.restart_pending_writes` 会列出对应类别，便于核对曲库、消息缓存或木鱼计数。
+  - 屏上「重启」需要点按确认。`desk_restart` 默认直接请求已配对的设备软重启。需要屏上确认时传 `confirm=true`。收到 `confirm_pending` 后，用户可在 15 秒内点按确认，取消或超时回到原页。收到 `accepted` 后等设备重新连接，再用 `desk_status` 或 `desk_diagnostics` 检查。收到 `restart_ack_lost` 时也先检查状态，避免重复请求。若重启时仍有写入待确认，`diagnostics.restart_pending_writes` 会列出对应类别，便于核对曲库、消息缓存或木鱼计数。
 - **原生 USB 应急复位（`desk_usb_reset`）**：ES3C35P 的无线和屏上入口都无法响应时，可用数据线连接设备。调用时传入已配对设备的持久 UUID 和已核对的原生 ESP 串口。工具会核对 USB 序列号和配对 MAC，复位后可用 `desk_status` 检查连接。
 - **USB 身份查询与无线断连备用串口（`--usb-port` / `desk_set_usb_fallback`）**：
   - 在终端运行 `deskpet-platform find-usb --device-id <设备UUID> /dev/cu.usbserial-1140`（或在 MCP 中调用 `desk_find_usb_device`），可在不抢占现有 Wi-Fi 控制连接的前提下，读取指定串口上的设备 MAC 与持久 UUID（省略 `--device-id` 可列出所有候选串口的匹配结果）。

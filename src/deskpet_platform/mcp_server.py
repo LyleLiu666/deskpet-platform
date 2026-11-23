@@ -1784,14 +1784,14 @@ class BoardSession:
                 return {"status": "ok", **result}
             return {"status": "ok", **result} if result else {"status": "unsupported"}
 
-    async def restart(self):
+    async def restart(self, *, confirm=False):
         async with self.lock:
             if self.client is None:
                 return {"status": "not_connected", "connection": self.snapshot}
             if self.client.channel.capabilities.get("system_restart") != 1:
                 return {"status": "unsupported"}
             try:
-                return await self.client.restart()
+                return await self.client.restart(confirm=confirm)
             except (AckTimeout, OSError):
                 return {"status": "unknown", "reason": "restart_ack_lost"}
             except CommandRejected as error:
@@ -2674,9 +2674,9 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         return await session.clock_edit(mode, field, step)
 
     @server.tool()
-    async def desk_restart(device_id: str | None = None) -> dict[str, Any]:
-        """重启指定的已配对托肯。accepted 表示已受理，重启结果可重新查询设备状态。"""
-        return await sessions.resolve(device_id).restart()
+    async def desk_restart(device_id: str | None = None, confirm: bool = False) -> dict[str, Any]:
+        """重启指定的已配对托肯。confirm 为 true 时请求屏上确认，confirm_pending 表示正在等点按。"""
+        return await sessions.resolve(device_id).restart(confirm=confirm)
 
     @server.tool()
     async def desk_recover_subsystem(target: Literal["sd", "i2c", "audio", "wifi"],

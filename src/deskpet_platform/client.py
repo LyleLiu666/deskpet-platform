@@ -162,14 +162,18 @@ class Client:
             raise DeviceError("system_restart_not_supported")
         if type(confirm) is not bool:
             raise ValueError("confirm must be a boolean")
+        command = "system_restart"
         fields = {"confirm": True} if confirm else {}
         if capture_ticket is not None:
             if (not confirm or type(capture_ticket) is not int or not 0 < capture_ticket <= 0xffffffff
                     or self.channel.capabilities.get("assistant_onboard") != 1):
                 raise ValueError("重启确认须绑定有效的语音请求。")
             fields["ticket"] = capture_ticket
+        elif confirm and self.channel.capabilities.get("maintenance_restart_confirm") == 1:
+            command = "maintenance_restart_confirm"
+            fields = {}
         async with self._operation:
-            reply = await self.channel.send("system_restart", **fields)
+            reply = await self.channel.send(command, **fields)
         expected = "confirm_pending" if confirm else "accepted"
         if reply.get("status") != expected:
             raise DeviceError("invalid_system_restart_reply")

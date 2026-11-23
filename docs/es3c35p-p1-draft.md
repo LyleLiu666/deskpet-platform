@@ -45,6 +45,7 @@ P1,{"epoch":"demo","seq":4,"boot":4,"view":"photo","playing":true,"interval_seco
 | `device_info`（扩展） | `device_info` | 沿用现有 `device_info: 1` 能力（不占用已用于 `network_status`/`card_status` 的 `device_diagnostics`）。电脑端白名单保留新增的 `diagnostics` 对象，例如 `{"reset_reason":"watchdog","early_resets":1,"safe_mode":false,"crash_present":true}`。`reset_reason` 是脱敏类别，无法识别时取 `unknown` |
 | `subsystem_recover` | `subsystem_recover`，`target` 取 `sd`、`i2c`、`audio` 或 `wifi` | `{"status":"accepted"}` 表示板端已受理。用 `desk_diagnostics` 查看最近一次执行结果 |
 | `system_restart` | `system_restart`，可选布尔字段 `confirm`。声明 `assistant_onboard` 的设备接收 Base 语音请求时还带当前录音编号 `ticket` | `desk_restart` 省略 `confirm`，板端有界收尾并返回 `{"status":"accepted"}`。语音工具固定传 `confirm: true`，`confirm_pending` 仅表示已请求屏上确认。板端须收到实际点按才重启 |
+| `maintenance_restart_confirm` | 配对加密连接中的 `maintenance_restart_confirm`，仅含公共报文字段 | `desk_restart(confirm=true)` 优先使用此能力，返回 `{"status":"confirm_pending"}`。设备显示电脑端请求及 15 秒时限，单独确认后重启。未配对链路返回 `encrypted_link_required` |
 | `device_settings` | `device_settings`。查询无业务字段。临时调整时传当前录音编号 `ticket`，以及 `volume`（0–100）和 `brightness`（10–100）中的至少一个 | 返回当前 `volume` 和 `brightness`。语音调整仅对当前会话生效 |
 | `music_control` | `music_control`，`action` 取 `status`、`play`、`pause`、`stop`、`prev`、`next` 或 `shuffle`。`play` 可带相对路径 `path` | 返回操作后的 `state`（`playing`、`paused`、`stopped`）、`path`、`title`、`position_ms`、`volume`（0–100）和 `shuffled`。空曲库时 `path`、`title` 为 `null`。查询以外的失败回包不得报告成功 |
 | `music_library` | `music_list`、`music_delete` | 见下节。导入须同时声明 `card_transfer`，复用已有上传及文件校验回执 |
