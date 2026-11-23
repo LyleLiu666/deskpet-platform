@@ -12,6 +12,7 @@ import asyncio
 import time
 
 from deskpet_platform import notifications
+from deskpet_platform.channel import CommandRejected
 from deskpet_platform.codex_hook import install_hook, remove_hook, receive, receive_event
 from deskpet_platform.mcp_server import BoardSession
 from deskpet_platform.pairing import DeviceConfig
@@ -531,6 +532,8 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 channel = type("Channel", (), {"capabilities": {"message_card_summary": 1}})()
                 pending = [{"id": older_question["id"], "created": int(older_question["created_at"])}]
                 sent = []
+                block_ack = True
+                block_commit = True
 
                 async def pending_notice_feedback(self):
                     return [], clear, self.pending.copy()
@@ -538,12 +541,24 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 async def acknowledge_notice_reads(self, ids):
                     assert ids == [older_question["id"]]
                     assert shared.home_summary()["response_count"] == 1
+                    if self.block_ack:
+                        raise CommandRejected("low_battery_readonly")
                     self.pending.clear()
 
                 async def sync_messages(self, records, **fields):
+                    if self.block_commit:
+                        raise CommandRejected("low_battery_readonly")
                     self.sent.append((records, fields))
 
             session.client = board = Device()
+            await session.refresh_messages()
+            self.assertEqual(len(board.pending), 1)
+            self.assertEqual(len(board.sent), 0)
+            board.block_ack = False
+            await session.refresh_messages()
+            self.assertEqual(board.pending, [])
+            self.assertEqual(len(board.sent), 0)
+            board.block_commit = False
             await session.refresh_messages()
             self.assertEqual(len(board.sent), 1)
             rows, fields = board.sent[-1]

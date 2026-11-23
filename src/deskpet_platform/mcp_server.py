@@ -621,7 +621,12 @@ class BoardSession:
             await asyncio.to_thread(self.notifications.mark_seen_many, ids, grouped_completions=card_summary)
         acknowledged = ids + [item["id"] for item in dismissals]
         if acknowledged:
-            await client.acknowledge_notice_reads(acknowledged)
+            try:
+                await client.acknowledge_notice_reads(acknowledged)
+            except CommandRejected as error:
+                if error.code != "low_battery_readonly":
+                    raise
+                return
 
         fields = {}
         stamp = None
@@ -638,6 +643,8 @@ class BoardSession:
             try:
                 await client.sync_messages(records, **fields)
             except CommandRejected as error:
+                if error.code == "low_battery_readonly":
+                    return
                 if not card_summary or error.code not in ("notice_cache_busy", "notice_cache_commit_failed"):
                     raise
                 # A local read/clear can invalidate a snapshot while it is being sent.
