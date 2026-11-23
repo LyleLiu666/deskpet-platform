@@ -164,11 +164,37 @@ class MultiBoardContractTests(unittest.IsolatedAsyncioTestCase):
         client.channel.send.return_value = dict(info, diagnostics=dict(summary, restart_pending_writes=categories))
         self.assertEqual((await client.device_info())["diagnostics"], summary)
 
+    async def test_device_info_reports_retained_low_battery_write_results(self):
+        client = object.__new__(Client)
+        client._operation = asyncio.Lock()
+        info = {"board": "synthetic", "chip": "esp32s3", "profile": "core",
+                "partition_id": "synthetic-dual", "screen": [480, 320], "modules": ["core"]}
+        summary = {"reset_reason": "software", "early_resets": 0,
+                   "safe_mode": False, "crash_present": False}
+        retained = {"level": 3, "test": True, "previous_boot": True, "pending": [],
+                    "timed_out": ["card", "inbox"], "failed": ["card"], "upload": "cleanup_failed"}
+        client.channel = SimpleNamespace(capabilities={"device_info": 1}, send=AsyncMock())
+        client.channel.send.return_value = dict(info, diagnostics=dict(
+            summary, low_battery_writes=dict(retained, path="synthetic")))
+        self.assertEqual((await client.device_info())["diagnostics"]["low_battery_writes"], retained)
+        for fields in ({"level": True}, {"previous_boot": "true"}, {"pending": None},
+                       {"timed_out": ["card", "card"]}, {"failed": ["serial-token"]}):
+            with self.subTest(fields=fields):
+                client.channel.send.return_value = dict(
+                    info, diagnostics=dict(summary, low_battery_writes=dict(retained, **fields)))
+                self.assertEqual((await client.device_info())["diagnostics"], summary)
+        client.channel.send.return_value = dict(info, diagnostics=dict(
+            summary, low_battery_writes=dict(retained, upload="synthetic")))
+        result = (await client.device_info())["diagnostics"]["low_battery_writes"]
+        self.assertNotIn("upload", result)
+
     async def test_diagnostics_refreshes_safe_mode_without_requiring_card_support(self):
         with tempfile.TemporaryDirectory() as directory:
             session = BoardSession(Path(directory) / "device.json")
             summary = {"reset_reason": "watchdog", "early_resets": 3, "safe_mode": True,
                        "crash_present": False}
+            summary["low_battery_writes"] = {"level": 2, "test": False, "previous_boot": True,
+                                              "pending": ["merit"], "timed_out": [], "failed": []}
             session.client = SimpleNamespace(channel=SimpleNamespace(capabilities={"device_info": 1}),
                                              device_info=AsyncMock(return_value={"diagnostics": summary}))
             result = await session.diagnostics(include_card=True)

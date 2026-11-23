@@ -150,12 +150,33 @@ class Client:
                         and subsystem.get("status") in RECOVERY_STATUSES):
                     summary["last_subsystem"] = {"target": subsystem["target"], "status": subsystem["status"]}
                 pending = diagnostics.get("restart_pending_writes")
-                if (reason == "software" and isinstance(pending, list) and 0 < len(pending) <= 3
-                        and all(name in ("card", "inbox", "merit") for name in pending)
-                        and len(set(pending)) == len(pending)):
+                if reason == "software" and pending and self._valid_write_categories(pending):
                     summary["restart_pending_writes"] = pending.copy()
+                battery_writes = self._battery_write_diagnostics(diagnostics.get("low_battery_writes"))
+                if battery_writes is not None:
+                    summary["low_battery_writes"] = battery_writes
                 info["diagnostics"] = summary
         return info
+
+    @staticmethod
+    def _valid_write_categories(value):
+        return (isinstance(value, list) and len(value) <= 3 and
+                all(name in ("card", "inbox", "merit") for name in value) and len(set(value)) == len(value))
+
+    @classmethod
+    def _battery_write_diagnostics(cls, value):
+        if (not isinstance(value, dict) or type(value.get("level")) is not int or value["level"] not in (2, 3)
+                or type(value.get("test")) is not bool or type(value.get("previous_boot")) is not bool):
+            return None
+        categories = ("pending", "timed_out", "failed")
+        if not all(cls._valid_write_categories(value.get(key)) for key in categories):
+            return None
+        summary = {key: value[key] for key in ("level", "test", "previous_boot")}
+        summary.update({key: value[key].copy() for key in categories})
+        upload = value.get("upload")
+        if upload in ("cancelled", "close_failed", "cleanup_failed"):
+            summary["upload"] = upload
+        return summary
 
     async def restart(self, *, confirm=False, capture_ticket=None):
         if self.channel.capabilities.get("system_restart") != 1:
