@@ -61,6 +61,8 @@ P1,{"epoch":"demo","seq":4,"boot":4,"view":"photo","playing":true,"interval_seco
 
 收到 `low_battery_readonly` 表示低电保护已暂停新的 TF 卡写入。状态和素材列表仍可查询。电脑端保留消息同步状态，下一轮同步时再尝试写入和确认。已受理的后台上传若因低电收尾超时而取消，`card_fetch_status` 会在关闭连接和清理临时文件后返回同一个错误。清理失败仍返回 `card_transfer_failed`，并附 `card_cancel_close` 或 `card_cancel_cleanup`。ES3C35P 当前仅在诊断固件中验证该保护。
 
+低电降载期间，`music_control` 的 `play`、`prev` 和 `next` 返回 `low_battery`，已有播放停止。状态查询与曲库读取继续可用。解除保护后由用户重新发起播放。该行为当前用于 ES3C35P 诊断固件。
+
 诊断摘要有可选的 `crash_pc` 和 `crash_lr`，分别为有效的崩溃指令地址和返回地址，采用无符号 32 位整数。可选的 `last_subsystem` 记录本次启动后最近一次完成的子系统操作，包含 `target` 和 `status`。状态取 `busy`、`failed`、`recovered` 或 `reconnecting`。Wi-Fi 的 `reconnecting` 表示已开始重连，连接结果仍由网络状态确认。安全模式可只提供 `device_info` 摘要。
 
 软重启若在收尾限时结束时仍有保存工作待确认，下一次启动的 `diagnostics.restart_pending_writes` 提供类别列表。类别取 `card`（文件传输或已取得独占写卡权限的修改）、`inbox`（消息缓存写入）、`merit`（待保存的木鱼敲击）。有记录时且 `reset_reason` 为 `software` 才上报。各类别最多出现一次，供诊断时核对对应数据。
