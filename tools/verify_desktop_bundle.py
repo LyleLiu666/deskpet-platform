@@ -58,7 +58,7 @@ asyncio.run(verify())
 
 
 def verify(archive, fixture):
-    with tempfile.TemporaryDirectory(prefix="DeskPet 搭搭 clean install ") as temporary:
+    with tempfile.TemporaryDirectory(prefix="DeskPet 托肯 clean install ") as temporary:
         root = Path(temporary).resolve()
         source = root / "source"
         shutil.unpack_archive(archive, source, filter="data" if archive.name.endswith(".tar.gz") else None)

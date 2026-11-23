@@ -1,25 +1,25 @@
 # DeskPet Platform
 
-**搭搭（DeskPet）** 的电脑端连接程序。装好后，桌上的搭搭小屏幕就能和你平时用的编程 Agent（Codex、Claude Code、Antigravity、OpenCode、WorkBuddy 等）联动：
+**托肯（DeskPet）** 的电脑端连接程序。装好后，桌上的托肯小屏幕就能和你平时用的编程 Agent（Codex、Claude Code、Antigravity、OpenCode、WorkBuddy 等）联动：
 
 - **看着它干活**：角色动作随实时 Token 输出速度换档，还能顺手看额度、电脑 CPU / 内存、时钟、天气和相册。
-- **做完了叫你**：Agent 跑完长任务，或者停下来等你拍板、回答问题时，搭搭会在桌面上弹出提醒。
+- **做完了叫你**：Agent 跑完长任务，或者停下来等你拍板、回答问题时，托肯会在桌面上弹出提醒。
 - **自己换角色**：可以先装内置生成的示例角色体验，也可以安装现成的 `.zip` 角色包，或者让具备生图能力的 Agent 帮你定制专属角色。
 
-如果你手里是**已刷好固件的搭搭**，直接往下看开始安装即可；如果是刚买的空白开发板（仅兼容 **ESP32-2432S028 双 USB 版**：ST7789 屏幕、XPT2046 触摸、4 MiB Flash），请先按[刷机说明](docs/flash.md)刷入首刷包。
+如果你手里是**已刷好固件的托肯**，直接往下看开始安装即可；如果是刚买的空白开发板（仅兼容 **ESP32-2432S028 双 USB 版**：ST7789 屏幕、XPT2046 触摸、4 MiB Flash），请先按[刷机说明](docs/flash.md)刷入首刷包。
 
-[交给你的 Agent 安装](#交给你的-agent-安装) · [给搭搭加一个角色](#给搭搭加一个角色) · [手动安装](#手动安装) · [手机扫码打开本页](#开始使用二维码) · [许可证与致谢](#许可证与致谢)
+[交给你的 Agent 安装](#交给你的-agent-安装) · [给托肯加一个角色](#给托肯加一个角色) · [手动安装](#手动安装) · [手机扫码打开本页](#开始使用二维码) · [许可证与致谢](#许可证与致谢)
 
 ## 交给你的 Agent 安装
 
 首次使用**不需要**自己下载本仓库，也不用记命令：
 
-1. 给搭搭通电（**推荐直接用能传数据的 USB 线插在电脑上**，后面配对最省事；插充电头也可以）。
-2. 手机留在手边，等会儿用来扫屏幕二维码给搭搭连 2.4 GHz Wi-Fi。
+1. 给托肯通电（**推荐直接用能传数据的 USB 线插在电脑上**，后面配对最省事；插充电头也可以）。
+2. 手机留在手边，等会儿用来扫屏幕二维码给托肯连 2.4 GHz Wi-Fi。
 3. 把下面整段话复制给你平时用的编程 Agent（Windows 用户请在原生 Windows 环境里运行 Agent，不要在 WSL 里装）：
 
 ```text
-请帮我在这台电脑上安装「搭搭」电脑端，连上我的搭搭小屏幕，并配好当前 Agent 的消息提醒。
+请帮我在这台电脑上安装「托肯」电脑端，连上我的托肯小屏幕，并配好当前 Agent 的消息提醒。
 
 先读 https://github.com/LyleLiu666/deskpet-platform 的 README.md 和操作手册
 src/deskpet_platform/manuals/operations.md。
@@ -49,16 +49,16 @@ src/deskpet_platform/manuals/operations.md。
    如果当前对话还读不到刚注册的 MCP，请清楚告诉我怎么新开一个对话继续第 2 步。
 
 2. 配网与配对：
-   用 desk_list_devices 检查是否已有配对（已有则复用对应 device_id，新加另一台搭搭
+   用 desk_list_devices 检查是否已有配对（已有则复用对应 device_id，新加另一台托肯
    时传 add_device=true；空白开发板先按 docs/flash.md 核对板型与首刷包）。
-   若搭搭还没连 Wi-Fi，请引导我在搭搭上打开 Wi-Fi 二维码（新板首页直接点「点击连接 Wi-Fi」，
+   若托肯还没连 Wi-Fi，请引导我在托肯上打开 Wi-Fi 二维码（新板首页直接点「点击连接 Wi-Fi」，
    或进菜单「桌面设置 → Wi-Fi」，参考固件长按屏幕 3 秒），用手机扫左右两个码连上
-   2.4 GHz Wi-Fi，并确认电脑和搭搭在同一个可互访的局域网里。
+   2.4 GHz Wi-Fi，并确认电脑和托肯在同一个可互访的局域网里。
    配对方式二选一：
-   - 如果搭搭正用 USB 数据线插在电脑上，优先用 find-usb（或 desk_find_usb_device）
+   - 如果托肯正用 USB 数据线插在电脑上，优先用 find-usb（或 desk_find_usb_device）
      确认串口和身份，再调 desk_pair_usb 直接配对，省去手传长配对码（注意 Windows
      不支持通过 USB credentials_file 配网，仍先用手机扫码连 Wi-Fi）。
-   - 如果搭搭没插电脑 USB，调 desk_pair_begin 打开本机配对网页，引导我在搭搭首页
+   - 如果托肯没插电脑 USB，调 desk_pair_begin 打开本机配对网页，引导我在托肯首页
      点「点击配对电脑」（或进「桌面设置 → 电脑配对」）用手机扫码复制配对码，粘贴到刚才弹出的本机网页里。
    最后用 desk_status 确认已连上。连不上时先问我屏幕显示什么，再按手册排查局域网
    隔离、VPN/代理、macOS 局域网权限或旧固件所需的 Windows 防火墙设置。
@@ -74,7 +74,7 @@ src/deskpet_platform/manuals/operations.md。
    desk_set_workbuddy_notifications(enabled=true, edition=...)），并问我要不要顺便
    给电脑上其他常用的受支持 Agent 也打开提醒。若换过安装目录，重新调用一次即可更新旧路径。
    按返回结果用大白话告诉我需要配合的操作（例如 Codex 进 /hooks 或设置里的 Hooks
-   信任刚加的搭搭条目；Antigravity 先开新会话验证，未加载时再重启；OpenCode / WorkBuddy
+   信任刚加的托肯条目；Antigravity 先开新会话验证，未加载时再重启；OpenCode / WorkBuddy
    重启客户端）。
    若当前系统或客户端暂不支持提醒钩子，直接说明原因，不要强行调用报错。
 
@@ -82,30 +82,30 @@ src/deskpet_platform/manuals/operations.md。
    - 若已开启当前 Agent 的提醒：请我新开一个对话随便发句短消息等回复结束，让钩子真实
      触发一次；再帮我用 desk_list_notifications（当前客户端在支持列表内时也可跑
      deskpet-platform doctor --client <客户端>）核对完成事件与设备显示回执，并请我
-     看一眼搭搭屏幕，确认跳出了清晰可读、没有方块乱码的中文提醒（手动发文字只算测连接，
+     看一眼托肯屏幕，确认跳出了清晰可读、没有方块乱码的中文提醒（手动发文字只算测连接，
      不算钩子验收；待答复提醒等以后实际遇到提问时再看）。若提示设备 busy，提醒我关掉
      占用连接的其他会话。
    - 若当前环境不支持提醒钩子：用 desk_show_text 发一句中文测试文字，请我确认屏幕上
      中文显示正常、没有乱码方块。
    - 若启用了测速：调用 desk_token_status 确认测速状态正常。
    - 顺手看一下 desk_status：如果储存卡上还没有装过角色，告诉我可以一句话先装一个
-     Pocket Bot 示例角色动起来；如果我想看额度，按操作手册配置并教我在搭搭「监控设置」切换。
+     Pocket Bot 示例角色动起来；如果我想看额度，按操作手册配置并教我在托肯「监控设置」切换。
 
 5. 收尾汇总：
    最后用好懂的话分别告诉我「设备连接」「完成提醒」「待答复提醒」「实时测速」四项的结果：
    标明「已验证」（附依据）、「已配置待确认」（还差哪一步）或「未启用」（原因及日后开启方式）。
 ```
 
-## 给搭搭加一个角色
+## 给托肯加一个角色
 
-搭搭出厂固件不预装角色素材。连好 MCP 之后，直接用日常说话的方式吩咐你的 Agent 就行：
+托肯出厂固件不预装角色素材。连好 MCP 之后，直接用日常说话的方式吩咐你的 Agent 就行：
 
 - **想先装个官方示例看它动起来**（无需准备图片，也无需 Agent 具备生图能力）：
-  > 帮我生成内置的 Pocket Bot 示例角色并装到搭搭上，装好后在搭搭屏幕上打开「角色图鉴」试播一下。
+  > 帮我生成内置的 Pocket Bot 示例角色并装到托肯上，装好后在托肯屏幕上打开「角色图鉴」试播一下。
 - **已有现成的角色 `.zip` 包**（无需 Agent 具备生图能力）：
-  > 帮我检查一下下载目录里的「小企鹅.zip」角色包是否符合规范，确认没问题后装到我的搭搭上，并在「角色图鉴」里确认能找到它。
+  > 帮我检查一下下载目录里的「小企鹅.zip」角色包是否符合规范，确认没问题后装到我的托肯上，并在「角色图鉴」里确认能找到它。
 - **想定制全新的专属角色**（**需你使用的 Agent 具备生图能力 / 接入生图工具**；若 Agent 无生图能力，你也可以自己准备好透明 PNG 序列帧交给它打包）：
-  > 请先调用 `desk_read_manual(topic="roles")` 阅读自定义角色指南。帮我制作一只「奶油色小猫」角色（或参考我附上的图片）：平时乖巧眨眼，随打字速度加快从慢走变成开心奔跑，点击屏幕时挥爪，任务完成时跳起来庆祝。请先生成角色造型与基础循环动作，用 `desk_check_role` 导出电脑上的 320 × 240 首页合成预览图给我确认；等我满意后再补齐全部动作并安装到搭搭上。
+  > 请先调用 `desk_read_manual(topic="roles")` 阅读自定义角色指南。帮我制作一只「奶油色小猫」角色（或参考我附上的图片）：平时乖巧眨眼，随打字速度加快从慢走变成开心奔跑，点击屏幕时挥爪，任务完成时跳起来庆祝。请先生成角色造型与基础循环动作，用 `desk_check_role` 导出电脑上的 320 × 240 首页合成预览图给我确认；等我满意后再补齐全部动作并安装到托肯上。
 
 更多对话示例、画布尺寸与防抖验收要求见[自定义角色指南](src/deskpet_platform/manuals/roles.md)（Agent 也可直接调用 `desk_read_manual(topic="roles")` 读取）。
 
@@ -166,13 +166,13 @@ claude mcp add --scope user deskpet -- "/绝对路径/.venv/bin/deskpet-platform
 
 其他支持 stdio MCP 的客户端（如 Antigravity、OpenCode、WorkBuddy 等）使用相同的可执行文件绝对路径与 `["mcp"]` 参数（跳过测速时加 `"--no-token-probe"`）。设置完成后**新开一个 Agent 会话**使其生效。
 
-### 4. 给搭搭联网并完成配对
+### 4. 给托肯联网并完成配对
 
-1. **连 Wi-Fi**：给搭搭通电，打开屏幕上的 Wi-Fi 配网二维码（首页点「点击连接 Wi-Fi」，或从菜单进入「桌面设置 → Wi-Fi」，参考固件长按屏幕 3 秒），用手机先扫左码连热点、再扫右码选 2.4 GHz Wi-Fi 填密码。完成后让电脑和搭搭处在同一局域网。
-2. **配对连接**（一台搭搭同一时间只能被一个程序连接）：
+1. **连 Wi-Fi**：给托肯通电，打开屏幕上的 Wi-Fi 配网二维码（首页点「点击连接 Wi-Fi」，或从菜单进入「桌面设置 → Wi-Fi」，参考固件长按屏幕 3 秒），用手机先扫左码连热点、再扫右码选 2.4 GHz Wi-Fi 填密码。完成后让电脑和托肯处在同一局域网。
+2. **配对连接**（一台托肯同一时间只能被一个程序连接）：
    - **插着电脑 USB 数据线时**：用 MCP 的 `desk_find_usb_device`（或终端 `deskpet-platform find-usb <串口>`）确认串口与设备身份，再调 `desk_pair_usb` 即可配对（macOS / Linux 还可通过 `0600` 私有凭据文件同一步配网）。
-   - **无线供电时**：在 Agent 里调用 `desk_pair_begin` 打开本机配对网页（或在终端运行 `deskpet-platform pair`），点搭搭首页「点击配对电脑」（或进「桌面设置 → 电脑配对」）用手机扫码复制配对码，粘贴到本机完成验证。
-3. **验证连接与持续更新**：在 Agent 中调用 `desk_status` 检查连接，跑一次对话后可用 `desk_token_status` 查看测速读数。关闭 Agent 窗口期间仍希望屏幕持续刷新速度、CPU / 内存、额度和天气时，可在后台运行 `.venv/bin/deskpet-platform service`（打开新 Agent 会话需要控制搭搭时会自动交接，关闭后自动恢复）。支持的固件还可开启电脑 CPU / 内存使用率显示（默认关闭），或用 `desk_list_role_sources`、`desk_check_role`、`desk_install_role` 检查并安装本地角色包。
+   - **无线供电时**：在 Agent 里调用 `desk_pair_begin` 打开本机配对网页（或在终端运行 `deskpet-platform pair`），点托肯首页「点击配对电脑」（或进「桌面设置 → 电脑配对」）用手机扫码复制配对码，粘贴到本机完成验证。
+3. **验证连接与持续更新**：在 Agent 中调用 `desk_status` 检查连接，跑一次对话后可用 `desk_token_status` 查看测速读数。关闭 Agent 窗口期间仍希望屏幕持续刷新速度、CPU / 内存、额度和天气时，可在后台运行 `.venv/bin/deskpet-platform service`（打开新 Agent 会话需要控制托肯时会自动交接，关闭后自动恢复）。支持的固件还可开启电脑 CPU / 内存使用率显示（默认关闭），或用 `desk_list_role_sources`、`desk_check_role`、`desk_install_role` 检查并安装本地角色包。
 
 ### 5. 开启消息提醒并在新会话验证
 
@@ -181,7 +181,7 @@ claude mcp add --scope user deskpet -- "/绝对路径/.venv/bin/deskpet-platform
    - Claude Code：`desk_set_claude_notifications(enabled=true)`
    - Antigravity / OpenCode / WorkBuddy（macOS 与 Linux）：分别调用 `desk_set_antigravity_notifications(enabled=true)`、`desk_set_opencode_notifications(enabled=true)`、`desk_set_workbuddy_notifications(enabled=true, edition=...)`（Windows 目前仅支持 Codex 和 Claude Code 提醒）。
 2. **完成信任或加载**：Codex 需进入 `/hooks` 或设置中的 Hooks 审核并信任新增条目；Claude Code 与 Antigravity 直接打开新会话验证（Antigravity 若新会话未加载再重启客户端）；OpenCode 与 WorkBuddy 需重启客户端。
-3. **验证屏幕提醒**：**新开一个会话**发一句短消息等回复结束，确认搭搭屏幕上弹出清晰可读的中文完成提醒（也可用 `desk_list_notifications` 或 `deskpet-platform doctor --client <客户端>` 核对回执；待答复提醒在后续实际触发提问时单独验收）。
+3. **验证屏幕提醒**：**新开一个会话**发一句短消息等回复结束，确认托肯屏幕上弹出清晰可读的中文完成提醒（也可用 `desk_list_notifications` 或 `deskpet-platform doctor --client <客户端>` 核对回执；待答复提醒在后续实际触发提问时单独验收）。
 
 ### 常用文档与示例
 

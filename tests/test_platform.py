@@ -503,7 +503,7 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
             status = await session.get_status()
             self.assertNotIn('reason', status)
             self.assertIn('防火墙', status['next_step'])
-            self.assertIn('填写搭搭显示的 IP', status['next_step'])
+            self.assertIn('填写托肯显示的 IP', status['next_step'])
 
     async def test_busy_status_distinguishes_automatic_handoff(self):
         with tempfile.TemporaryDirectory() as directory:

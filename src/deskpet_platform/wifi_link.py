@@ -12,8 +12,8 @@ from .wifi_secure import RecordCodec,proof,session_key
 DISCOVERY_PORT=34915
 DIRECT_PREFIX = b"DESK-DIRECT-1,"
 NO_DEVICE_REPLY_HELP = (
-    "没有收到搭搭的连接。确认电脑和搭搭在同一局域网，自动发现失败时在配对页填写搭搭显示的 IP。"
-    "如使用 VPN 或代理，请检查局域网流量是否通行。如果搭搭使用需要回连电脑的旧固件，"
+    "没有收到托肯的连接。确认电脑和托肯在同一局域网，自动发现失败时在配对页填写托肯显示的 IP。"
+    "如使用 VPN 或代理，请检查局域网流量是否通行。如果托肯使用需要回连电脑的旧固件，"
     "请检查 Windows 防火墙是否允许 DeskPet 的 Python 进程在当前受信任的网络接收入站连接。"
     "macOS 请检查局域网权限。"
 )

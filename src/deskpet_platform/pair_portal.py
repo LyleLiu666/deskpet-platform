@@ -11,16 +11,16 @@ from urllib.parse import parse_qs
 from .wifi_link import NO_DEVICE_REPLY_HELP
 
 PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>连接搭搭</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>连接托肯</title>
 <style>body{font:16px system-ui;color:#203632;background:#eef4f2;margin:0}
 main{max-width:560px;margin:8vh auto;padding:24px}form{background:white;padding:24px;border-radius:12px}
 p{line-height:1.6}input,button{box-sizing:border-box;width:100%;font:inherit;padding:12px;margin:8px 0;
 border-radius:6px;border:1px solid #759088}button{background:#206b58;color:white;border:0}</style>
-<main><h1>连接搭搭</h1>{notice}<p>让搭搭连上 Wi-Fi，在桌面设置里打开「电脑配对」。用手机扫码复制，
+<main><h1>连接托肯</h1>{notice}<p>让托肯连上 Wi-Fi，在桌面设置里打开「电脑配对」。用手机扫码复制，
 再通过可信方式粘贴到这台电脑。</p>
 <form method="post"><label>配对码<input name="code" type="password" autocomplete="off" required></label>
-<label>搭搭的局域网地址（找不到设备时填写）<input name="address" maxlength="15" inputmode="decimal"></label>
-<button>连接搭搭</button><p>配对码只提交到这台电脑，不需要发到聊天里。</p></form></main></html>"""
+<label>托肯的局域网地址（找不到设备时填写）<input name="address" maxlength="15" inputmode="decimal"></label>
+<button>连接托肯</button><p>配对码只提交到这台电脑，不需要发到聊天里。</p></form></main></html>"""
 PAIRED = "已验证并保存配对信息。可以关闭此页面，在聊天中查看连接状态。"
 NOTICE = "{notice}"
 
@@ -82,7 +82,7 @@ class PairPortal:
                 if state == "paired":
                     return self.page(200, PAIRED)
                 if state == "checking":
-                    return self.page(200, "正在验证搭搭，请等待提交结果。")
+                    return self.page(200, "正在验证托肯，请等待提交结果。")
                 self.form()
 
             def do_POST(self):
@@ -103,7 +103,7 @@ class PairPortal:
                     return self.form(400, "配对信息无效，请重新输入。")
                 with portal.lock:
                     if portal.state == "checking" and time.monotonic() - portal.created < portal.lifetime:
-                        return self.page(409, "正在验证搭搭，请等待上一次提交的结果。")
+                        return self.page(409, "正在验证托肯，请等待上一次提交的结果。")
                     if portal.state != "waiting" or time.monotonic() - portal.created >= portal.lifetime:
                         return self.page(410, "配对页面已使用或过期。")
                     portal.state = "checking"

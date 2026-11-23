@@ -4,7 +4,7 @@
 
 ## 背景说明
 
-macOS 对交互式终端与登录后台进程的「本地网络（Local Network）」权限分别独立管理：即使你在终端或 IDE 中已能正常连接搭搭，也不代表脱离终端的 `launchd` 后台服务拥有局域网访问权限。
+macOS 对交互式终端与登录后台进程的「本地网络（Local Network）」权限分别独立管理：即使你在终端或 IDE 中已能正常连接托肯，也不代表脱离终端的 `launchd` 后台服务拥有局域网访问权限。
 
 Apple 官方文档说明，后台守护进程需要具备明确的[应用归属（App Attribution）](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)，且关联可执行文件需与宿主应用的 [Team Identifier 匹配](https://developer.apple.com/documentation/servicemanagement/updating-helper-executables-from-earlier-versions-of-macos)。
 

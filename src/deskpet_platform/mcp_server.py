@@ -2563,14 +2563,14 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     server = FastMCP(
         "DeskPet Platform", lifespan=lifespan,
-        instructions="首次设置搭搭时，调用 desk_notification_setup 查看 Codex、Claude Code、Antigravity、"
+        instructions="首次设置托肯时，调用 desk_notification_setup 查看 Codex、Claude Code、Antigravity、"
                      "OpenCode、WorkBuddy 和 WorkBuddy AI 的提醒支持、配置状态和启用工具。"
                      "向用户说明可以为日常使用的客户端启用提醒，按用户选择配置。"
                      "配置 Agent 额度后，按工具返回的 notification_setup 提示说明对应的提醒接入。"
-                     "用户想给搭搭添加、制作或安装角色时，先读 desk_read_manual(topic=roles)。"
+                     "用户想给托肯添加、制作或安装角色时，先读 desk_read_manual(topic=roles)。"
                      "从描述或参考图生成全新角色动画需当前 Agent 具备生图能力（或由用户提供序列帧素材/使用代码绘制），"
                      "制作时按指南先用 desk_check_role 导出 320x240 首页预览供用户确认，再补齐动作与安装验收。"
-                     "也可在电脑上生成内置 Pocket Bot 体验角色包，或将已有角色包安装到指定搭搭的储存卡。",
+                     "也可在电脑上生成内置 Pocket Bot 体验角色包，或将已有角色包安装到指定托肯的储存卡。",
     )
 
     async def add_pairing(config, registration=None):
@@ -2600,12 +2600,12 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool()
     async def desk_find_usb_device(ports: list[str], device_id: str | None = None) -> dict[str, Any]:
-        """读取指定 USB 串口上搭搭设备的持久 UUID 和 MAC，可按 UUID 查当前串口。查询无需配对，不接管控制。"""
+        """读取指定 USB 串口上托肯设备的持久 UUID 和 MAC，可按 UUID 查当前串口。查询无需配对，不接管控制。"""
         return await asyncio.to_thread(find_usb_devices, ports, device_id)
 
     @server.tool()
     async def desk_set_usb_fallback(port: str, device_id: str) -> dict[str, Any]:
-        """为已配对的搭搭更新本次 MCP 运行中的备用串口。传入持久 UUID 和查到的串口。保留当前 Wi-Fi 控制。"""
+        """为已配对的托肯更新本次 MCP 运行中的备用串口。传入持久 UUID 和查到的串口。保留当前 Wi-Fi 控制。"""
         if not valid_device_uuid(device_id):
             raise ValueError("请提供已配对设备的持久 UUID。")
         return await sessions.resolve(device_id).set_usb_fallback(port, device_id)
@@ -2619,7 +2619,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
     def desk_read_manual(topic: Manual = "operations") -> str:
-        """读取操作手册、SDK 二次开发手册或自定义角色指南。制作、体验或安装角色请选择 roles。无需连接搭搭。"""
+        """读取操作手册、SDK 二次开发手册或自定义角色指南。制作、体验或安装角色请选择 roles。无需连接托肯。"""
         return read_manual(topic)
 
     @server.resource("deskpet://manual/operations")
@@ -2634,7 +2634,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.resource("deskpet://manual/roles", name="添加自定义角色", mime_type="text/markdown")
     def roles_manual() -> str:
-        """给搭搭添加角色的对话示例、可运行样例和制作步骤。"""
+        """给托肯添加角色的对话示例、可运行样例和制作步骤。"""
         return read_manual("roles")
 
     @server.tool()
@@ -2675,7 +2675,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool()
     async def desk_restart(device_id: str | None = None) -> dict[str, Any]:
-        """重启指定的已配对搭搭。accepted 表示已受理，重启结果可重新查询设备状态。"""
+        """重启指定的已配对托肯。accepted 表示已受理，重启结果可重新查询设备状态。"""
         return await sessions.resolve(device_id).restart()
 
     @server.tool()
@@ -2694,7 +2694,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     @server.tool()
     async def desk_voice_names(user_name: str | None = None, device_name: str | None = None,
                                device_id: str | None = None) -> dict[str, Any]:
-        """查看或修改保存在搭搭上的用户和设备昵称。用户昵称可为空；昵称不会改变唤醒词。"""
+        """查看或修改保存在托肯上的用户和设备昵称。用户昵称可为空；昵称不会改变唤醒词。"""
         return await sessions.resolve(device_id).voice_names(user_name=user_name,device_name=device_name)
 
     @server.tool()
@@ -2832,7 +2832,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
                         and portal.status()["state"] in ("waiting", "checking"))
             if not reusable:
                 if portal is not None and not await asyncio.to_thread(portal.close, only_if_idle=True):
-                    raise ValueError("正在验证搭搭，请等待本次配对结束，再打开新的配对页面。")
+                    raise ValueError("正在验证托肯，请等待本次配对结束，再打开新的配对页面。")
                 portal = PairPortal(add_pairing_from_portal if add_device else session.pair_from_portal).start()
                 portal_mode = add_device
             opened = await asyncio.to_thread(webbrowser.open, portal.url) if open_browser else False
@@ -2867,7 +2867,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool()
     async def desk_upload_files(files: list[CardFile], device_id: str | None = None) -> dict[str, Any]:
-        """将普通文件传到搭搭储存卡的 desk/ 或 photos/。source 是绝对路径。角色资源请用 desk_install_role。"""
+        """将普通文件传到托肯储存卡的 desk/ 或 photos/。source 是绝对路径。角色资源请用 desk_install_role。"""
         if any(item.path.startswith("roles/") for item in files):
             raise ValueError("请用 desk_install_role 校验并安装角色资源。")
         session = sessions.resolve(device_id)
@@ -2881,7 +2881,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool()
     async def desk_list_role_sources(directory: str | None = None, device_id: str | None = None) -> dict[str, Any]:
-        """查询电脑上的角色候选目录，无需连接搭搭；可覆盖启动时配置的绝对路径，安装时会完整校验。"""
+        """查询电脑上的角色候选目录，无需连接托肯；可覆盖启动时配置的绝对路径，安装时会完整校验。"""
         client = None
         if device_id is not None or len(sessions.registry.list()) < 2:
             client = sessions.resolve(device_id).client
@@ -2890,12 +2890,12 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool()
     async def desk_create_role_example(destination: str) -> dict[str, str]:
-        """在本机生成用于体验安装和图鉴播放的 Pocket Bot 技术样例。destination 为新的 ZIP 文件绝对路径。无需连接搭搭。"""
+        """在本机生成用于体验安装和图鉴播放的 Pocket Bot 技术样例。destination 为新的 ZIP 文件绝对路径。无需连接托肯。"""
         return await asyncio.to_thread(create_role_example, destination)
 
     @server.tool()
     async def desk_check_role(source: str, preview_dir: str | None = None) -> dict[str, Any]:
-        """在电脑上检查角色资源、首页活动范围与多帧主体稳定性；可选输出 320x240 首页合成与互动预览。source 和 preview_dir 均为绝对路径。无需连接搭搭。"""
+        """在电脑上检查角色资源、首页活动范围与多帧主体稳定性；可选输出 320x240 首页合成与互动预览。source 和 preview_dir 均为绝对路径。无需连接托肯。"""
         from .role_install import prepare_role
         from .role_layout import inspect_role_layout, render_role_home_previews
         from .role_staging import stage_role
@@ -2933,7 +2933,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
     @server.tool()
     async def desk_install_role(source: str, device_id: str | None = None,
                                 variant: str | None = None) -> dict[str, Any]:
-        """先在电脑上校验角色包，成功后才传到搭搭储存卡并启用。图鉴角色使用 role1 ZIP。可用 desk_check_role 单独检查。source 是绝对路径或已配置角色素材目录中的角色 ID；按 ID 安装时可指定 variant。"""
+        """先在电脑上校验角色包，成功后才传到托肯储存卡并启用。图鉴角色使用 role1 ZIP。可用 desk_check_role 单独检查。source 是绝对路径或已配置角色素材目录中的角色 ID；按 ID 安装时可指定 variant。"""
         session = sessions.resolve(device_id)
         if not Path(source).is_absolute() and valid_identity(source):
             if session.client is None:
@@ -3094,7 +3094,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
             lambda command, previous, *, enabled: configure(path, command, enabled=enabled, previous_commands=previous))
         result = {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path)}
         if enabled:
-            result["next_step"] = "打开新的 Antigravity 会话确认搭搭收到真实提醒；若未加载再重启客户端。"
+            result["next_step"] = "打开新的 Antigravity 会话确认托肯收到真实提醒；若未加载再重启客户端。"
         return result
 
     @server.tool()
@@ -3109,7 +3109,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
                 refresh_changed = await asyncio.to_thread(shared_quota_store.set_antigravity_refresh, enabled)
                 changed = changed or refresh_changed
         result = {"status": "configured" if enabled else "disabled", "changed": changed, "config": str(path),
-                  "next_step": ("在搭搭的监控设置中选择对应来源，打开该 Agent 会话并检查额度；"
+                  "next_step": ("在托肯的监控设置中选择对应来源，打开该 Agent 会话并检查额度；"
                                 "账号未提供额度或状态栏被覆盖时显示 --。" if enabled else
                                 "已移除本程序的额度采集设置。")}
         if enabled:
@@ -3147,7 +3147,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool()
     async def desk_list_notifications(limit: int = 30, device_id: str | None = None) -> dict[str, Any]:
-        """查看搭搭自己的会话提醒，不读取或修改客户端的未读状态。"""
+        """查看托肯自己的会话提醒，不读取或修改客户端的未读状态。"""
         session = sessions.resolve(device_id)
         await asyncio.to_thread(session.notifications.sync)
         items = await asyncio.to_thread(session.notifications.list, limit)
@@ -3169,13 +3169,13 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
         identity: int | None = None,
         device_id: str | None = None,
     ) -> dict[str, Any]:
-        """用 list 打开屏幕提醒列表。标准固件在搭搭屏幕上直接翻页和打开详情；旧版/参考固件支持远程翻页、查看和标记，open 和 mark_seen 需要通知编号。"""
+        """用 list 打开屏幕提醒列表。标准固件在托肯屏幕上直接翻页和打开详情；旧版/参考固件支持远程翻页、查看和标记，open 和 mark_seen 需要通知编号。"""
         session = sessions.resolve(device_id)
         return await session.message_view(mode, identity)
 
     @server.tool()
     async def desk_mark_notification_seen(identity: int, device_id: str | None = None) -> dict[str, Any]:
-        """只标记搭搭的一条提醒为已查看，不改变客户端里的未读状态。"""
+        """只标记托肯的一条提醒为已查看，不改变客户端里的未读状态。"""
         session = sessions.resolve(device_id)
         return {"updated": await asyncio.to_thread(session.notifications.mark_seen, identity)}
 

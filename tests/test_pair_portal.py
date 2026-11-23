@@ -84,7 +84,7 @@ class PairPortalTests(unittest.TestCase):
             self.assertEqual(failure.code, 400)
             self.assertEqual(failure.headers["Cache-Control"], "no-store")
             retry = failure.read().decode()
-        self.assertIn("没有收到搭搭", retry)
+        self.assertIn("没有收到托肯", retry)
         self.assertIn('<form method="post">', retry)
         with urllib.request.urlopen(request("192.168.1.2")) as response:
             self.assertEqual(response.status, 200)
@@ -133,7 +133,7 @@ class PairPortalTests(unittest.TestCase):
                     submit("second-test-code")
                 with error.exception as busy:
                     self.assertEqual(busy.code, 409)
-                    self.assertIn("正在验证搭搭", busy.read().decode())
+                    self.assertIn("正在验证托肯", busy.read().decode())
                 self.assertEqual(portal.status()["state"], "checking")
             finally:
                 release.set()

@@ -98,7 +98,7 @@ def main():
     workbuddy.add_argument("--edition", choices=EDITIONS, default="workbuddy")
     commands.add_parser("notification-worker", help="在后台发送待处理的提醒")
     commands.add_parser("receiver-worker", help="在后台发送独立设备的提醒")
-    live = commands.add_parser("service", help="持续保持已配对搭搭在线并更新速度、电脑状态、额度、天气与提醒")
+    live = commands.add_parser("service", help="持续保持已配对托肯在线并更新速度、电脑状态、额度、天气与提醒")
     live.add_argument("--shared-config", type=Path, help="可选：共享提醒和额度来源的原设备配置")
     live.add_argument("--usb-port", help="可选：已核验的 USB 备用串口")
     live_probe = live.add_mutually_exclusive_group()
@@ -189,7 +189,7 @@ def main():
         encoding = sys.stdout.encoding or "utf-8"
         print(json.dumps(result, ensure_ascii=encoding.lower() not in ("utf-8", "utf8")))
     except KeyError:
-        parser.exit(2, "找不到所选搭搭，请用 doctor 查看已配对设备。\n")
+        parser.exit(2, "找不到所选托肯，请用 doctor 查看已配对设备。\n")
     except FileNotFoundError:
         parser.exit(2, "尚未配对，请运行 deskpet-platform pair。\n")
     except (OSError, RuntimeError, ValueError, TimeoutError) as error:

@@ -153,10 +153,10 @@ class VoiceToolsTest(unittest.IsolatedAsyncioTestCase):
             {'role': 'assistant', 'content': '正在为你播放。'},
         ]
         agent = VoiceAgent(backend, build_voice_tools(self.session, {'music_control'}))
-        turn = await agent.turn('在搭搭播放海')
+        turn = await agent.turn('在托肯播放海')
         self.session.voice_music_control.assert_awaited_once_with('play', 'music/海.flac')
         self.assertEqual(turn.events[-1].status, 'deferred')
-        self.assertEqual(turn.text, '已排队，实际播放状态以搭搭显示为准。')
+        self.assertEqual(turn.text, '已排队，实际播放状态以托肯显示为准。')
 
     async def test_unknown_mutation_stops_the_turn_before_the_model_can_repeat_it(self):
         cases = (

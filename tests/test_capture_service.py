@@ -220,7 +220,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             session.client = client
             client.channel.capabilities.update(capture_mode=1, capture_failure_detail=1, voice_names=1, speech_pcm=1)
             client.poll_capture.return_value = {'ticket': 7, 'mode': 'voice'}
-            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '托肯'})
             session.voice_backend = Mock(complete=AsyncMock(side_effect=AgentError('model_timeout')))
             with patch('deskpet_platform.mcp_server.transcribe_pcm', return_value='你好'):
                 await session.refresh_capture(client)
@@ -245,7 +245,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             client.channel.capabilities.update(capture_mode=1,role_actions=1,voice_names=1,speech_pcm=1)
             client.poll_capture.return_value={'ticket':7,'bytes':2,'crc32':0,'mode':'voice'}
             backend=type('Backend',(),{})();backend.complete=AsyncMock(return_value={'role':'assistant','content':'你好，我在。'})
-            session.voice_backend=backend;session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
+            session.voice_backend=backend;session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'托肯'})
             session.speak_voice_reply=AsyncMock(return_value={'status':'finished','duration_ms':1})
             with patch('deskpet_platform.mcp_server.transcribe_local_pcm',new_callable=AsyncMock,return_value='你好'):
                 await session.refresh_capture(client);await session.capture_task
@@ -261,11 +261,11 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             session.client = client
             session.capture_service = DashScopeTranscription('test-key')
             with patch('deskpet_platform.mcp_server.transcribe_dashscope_pcm',
-                       new_callable=AsyncMock, return_value='你好搭搭') as transcribe:
+                       new_callable=AsyncMock, return_value='你好托肯') as transcribe:
                 await session.refresh_capture(client)
                 await session.capture_task
             transcribe.assert_awaited_once()
-            client.queue_transcript.assert_awaited_once_with('你好搭搭', capture_ticket=7)
+            client.queue_transcript.assert_awaited_once_with('你好托肯', capture_ticket=7)
             client.capture_result.assert_awaited_once_with(7, True)
 
     async def test_active_capture_does_not_poll_or_start_a_second_task(self):
@@ -316,7 +316,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             backend = type('Backend', (), {})()
             backend.complete = AsyncMock(return_value={'role': 'assistant', 'content': '收到'})
             session.voice_backend = backend
-            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '托肯'})
             session.speak_voice_reply = AsyncMock(return_value={'status': 'finished', 'duration_ms': 1})
             old_entered, old_cancelled, finish_old = asyncio.Event(), asyncio.Event(), asyncio.Event()
             calls = 0
@@ -441,7 +441,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             client.channel.capabilities.update(capture_mode=1, capture_reply_text=1, voice_names=1, speech_pcm=1)
             client.poll_capture.return_value = {'ticket': 7, 'mode': 'voice'}
             session.voice_backend = Mock(complete=AsyncMock())
-            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '托肯'})
 
             async def recognize(*_args, **_kwargs):
                 client.capture_active.return_value = False
@@ -465,7 +465,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             client.channel.capabilities.update(capture_mode=1, capture_reply_text=1, voice_names=1, speech_pcm=1)
             client.poll_capture.return_value = {'ticket': 7, 'mode': 'voice'}
             await session.voice_tool_settings(['device_status'])
-            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '托肯'})
             session.get_status = AsyncMock(return_value={'connection': 'wifi'})
             session.speak_voice_reply = AsyncMock()
 
@@ -495,7 +495,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             backend=type('Backend',(),{})()
             backend.complete=AsyncMock(return_value={'role':'assistant','content':'你好，我在。'})
             session.voice_backend=backend
-            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
+            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'托肯'})
             session.speak_voice_reply=AsyncMock(return_value={'status':'finished','duration_ms':1})
             phase = Mock()
             phase.attach_mock(client.queue_transcript, 'display')
@@ -543,7 +543,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
                 try:await asyncio.Event().wait()
                 finally:cancelled.set()
             backend=type('Backend',(),{})();backend.complete=AsyncMock(side_effect=complete);session.voice_backend=backend
-            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
+            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'托肯'})
             session.speak_voice_reply=AsyncMock()
             with patch('deskpet_platform.mcp_server.transcribe_pcm',new_callable=AsyncMock,return_value='你好'):
                 await session.refresh_capture(client);await asyncio.wait_for(entered.wait(),1)
@@ -558,7 +558,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             client.poll_capture.return_value={'ticket':7,'bytes':2,'crc32':0,'mode':'voice'}
             backend=type('Backend',(),{})();backend.complete=AsyncMock(return_value={'role':'assistant','content':'你好'})
             session.voice_backend=backend
-            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
+            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'托肯'})
             entered=asyncio.Event();cancelled=asyncio.Event()
             client.capture_active.side_effect = lambda _ticket: not entered.is_set()
             async def speak(_text):
@@ -593,7 +593,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
                 return {'role': 'assistant', 'content': '收到'}
 
             session.voice_backend = Mock(complete=AsyncMock(side_effect=complete))
-            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '托肯'})
             session.speak_voice_reply = AsyncMock(return_value={'status': 'finished'})
             phase.attach_mock(client.queue_transcript, 'display')
             phase.attach_mock(client.capture_progress, 'progress')
@@ -637,7 +637,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             backend = type('Backend', (), {})()
             backend.complete = AsyncMock(side_effect=complete)
             session.voice_backend = backend
-            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '托肯'})
             session.speak_voice_reply = AsyncMock(return_value={'status': 'finished'})
             with patch('deskpet_platform.mcp_server.transcribe_pcm', new_callable=AsyncMock,
                        side_effect=['第一句', '追问', '重新进来']):
@@ -664,7 +664,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             ]
             backend = Mock(complete=AsyncMock(return_value={'role': 'assistant', 'content': '收到'}))
             session.voice_backend = backend
-            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '托肯'})
             session.speak_voice_reply = AsyncMock(return_value={'status': 'finished'})
             clock = Mock()
             clock.monotonic.return_value = 10
@@ -705,7 +705,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             session.client=client;backend=type('Backend',(),{})()
             backend.complete=AsyncMock(return_value={'role':'assistant','content':'你好'})
             session.voice_backend=backend
-            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
+            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'托肯'})
             with patch('deskpet_platform.mcp_server.transcribe_pcm',new_callable=AsyncMock,return_value='你好'), \
                  patch('deskpet_platform.mcp_server.synthesize_speech',new_callable=AsyncMock,return_value=b'12'):
                 await session.refresh_capture(client);await asyncio.wait_for(playing.wait(),1)
@@ -722,7 +722,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             client.channel.capabilities.update(capture_mode=1,role_actions=1,voice_names=1,speech_pcm=1)
             client.poll_capture.return_value={'ticket':7,'bytes':2,'crc32':0,'mode':'voice'}
             await session.voice_tool_settings(['list_role_actions'])
-            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
+            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'托肯'})
             session.list_actions=AsyncMock(return_value={'status':'ok','actions':['touched']})
             session.speak_voice_reply=AsyncMock(return_value={'status':'finished'})
             entered=asyncio.Event();resume=asyncio.Event();rounds=0
@@ -820,7 +820,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             session.client = client
             await session.voice_tool_settings(['device_restart'])
             client.restart = AsyncMock(return_value={'status': 'confirm_pending', 'boot': 77})
-            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '托肯'})
             session.speak_voice_reply = AsyncMock(return_value={'status': 'finished'})
             session.voice_backend = Mock(complete=AsyncMock(side_effect=[
                 {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'restart', 'type': 'function',
@@ -875,7 +875,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             client.channel.capabilities.update(capture_mode=1,role_actions=1,voice_names=1,speech_pcm=1)
             client.poll_capture.return_value={'ticket':7,'bytes':2,'crc32':0,'mode':'voice'}
             await session.voice_tool_settings(['list_role_actions'])
-            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
+            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'托肯'})
             session.list_actions=AsyncMock(return_value={'status':'ok','actions':['touched']})
             session.speak_voice_reply=AsyncMock(return_value={'status':'finished'})
             backend=type('Backend',(),{})();backend.complete=AsyncMock(side_effect=[
@@ -896,7 +896,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             client.channel.capabilities.update(capture_mode=1,voice_names=1,speech_pcm=1)
             client.poll_capture.return_value={'ticket':7,'bytes':2,'crc32':0,'mode':'voice'}
             await session.voice_tool_settings(['device_status'])
-            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
+            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'托肯'})
             session.speak_voice_reply=AsyncMock(return_value={'status':'finished'})
             calls=[]
             async def complete(messages,tools):
@@ -919,7 +919,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             client.list_actions=AsyncMock(return_value=['idle','touched'])
             client.capture_role_view=AsyncMock();client.capture_role_play=AsyncMock(return_value={'action_status':'started'})
             await session.voice_tool_settings(['play_role_action'])
-            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
+            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'托肯'})
             session.speak_voice_reply=AsyncMock(return_value={'status':'finished'})
             backend=type('Backend',(),{})();backend.complete=AsyncMock(side_effect=[
                 {'role':'assistant','content':None,'tool_calls':[{'id':'one','type':'function',
@@ -938,7 +938,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             client.channel.capabilities.update(capture_mode=1,voice_names=1,speech_pcm=1)
             client.poll_capture.return_value={'ticket':7,'bytes':2,'crc32':0,'mode':'voice'}
             await session.voice_tool_settings(['play_role_action'])
-            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'搭搭'})
+            session.voice_names=AsyncMock(return_value={'status':'ok','user_name':'','device_name':'托肯'})
             session.speak_voice_reply=AsyncMock(return_value={'status':'finished'})
             backend=type('Backend',(),{})();backend.complete=AsyncMock(return_value={'role':'assistant','content':'你好'})
             session.voice_backend=backend
@@ -960,7 +960,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             client.capture_role_view = AsyncMock()
             client.capture_role_play = AsyncMock(side_effect=TimeoutError('no action receipt'))
             await session.voice_tool_settings(['play_role_action'])
-            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '搭搭'})
+            session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '托肯'})
             session.speak_voice_reply = AsyncMock(return_value={'status': 'finished'})
             backend = Mock(complete=AsyncMock(return_value={
                 'role': 'assistant', 'content': None, 'tool_calls': [{
@@ -974,4 +974,4 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
                 await session.capture_task
             backend.complete.assert_awaited_once()
             client.capture_role_play.assert_awaited_once_with(7, 1, 0)
-            session.speak_voice_reply.assert_awaited_once_with('角色动作结果未知，请先查看搭搭。')
+            session.speak_voice_reply.assert_awaited_once_with('角色动作结果未知，请先查看托肯。')

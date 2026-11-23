@@ -12,7 +12,7 @@ class VoiceNamesTest(unittest.IsolatedAsyncioTestCase):
     def client(self):
         client=Client.__new__(Client);client._operation=asyncio.Lock()
         client.channel=type('Channel',(),{})();client.channel.capabilities={'voice_names':1}
-        client.channel.send=AsyncMock(return_value={'user_name':'小刘','device_name':'搭搭'})
+        client.channel.send=AsyncMock(return_value={'user_name':'小刘','device_name':'托肯'})
         return client
 
     async def test_read_and_partial_write(self):
@@ -38,8 +38,8 @@ class VoiceNamesTest(unittest.IsolatedAsyncioTestCase):
             session=BoardSession(Path(directory)/'device.json',no_token_probe=True)
             self.assertEqual((await session.voice_names())['status'],'not_connected')
             client=self.client();session.client=client
-            self.assertEqual(await session.voice_names(device_name='搭搭'),
-                             {'status':'ok','user_name':'小刘','device_name':'搭搭'})
+            self.assertEqual(await session.voice_names(device_name='托肯'),
+                             {'status':'ok','user_name':'小刘','device_name':'托肯'})
             client.channel.send.return_value={'user_name':'小刘','device_name':''}
             with self.assertRaises(DeviceError):await session.voice_names()
             client.channel.capabilities={}

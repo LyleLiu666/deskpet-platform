@@ -27,9 +27,9 @@ class TextDisplayTests(unittest.TestCase):
 
         with patch("deskpet_platform.client.sys.platform", "win32"), patch(
                 "deskpet_platform.client.ImageFont.truetype", side_effect=bundled_only):
-            bitmap = _bitmap("搭搭测试：任务完成 7391")
+            bitmap = _bitmap("托肯测试：任务完成 7391")
             self.assertTrue(any(bitmap))
-            self.assertNotEqual(bitmap, _bitmap("搭搭测试：需要应答 7391"))
+            self.assertNotEqual(bitmap, _bitmap("托肯测试：需要应答 7391"))
 
     def test_chinese_and_two_lines_are_rendered(self):
         chinese = _bitmap("你好，桌宠！")

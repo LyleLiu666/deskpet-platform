@@ -44,7 +44,7 @@ class AgentConfigTests(unittest.IsolatedAsyncioTestCase):
         patch = {"mode": "auto", "chat": {"url": "http://192.168.3.4:3000/v1", "token": "s" * 512,
                                           "model": "model", "tool_format": "json"},
                  "asr": {"token": "a" * 512}, "tts": {"token": "t" * 512},
-                 "persona": {"prompt": prompt, "user_name": "我", "device_name": "搭搭"}, "wake_enabled": False}
+                 "persona": {"prompt": prompt, "user_name": "我", "device_name": "托肯"}, "wake_enabled": False}
         prefix = "http://192.168.3.4:3000/v1/"
         for group in ("chat", "asr", "tts"):
             patch[group]["url"] = prefix + "x" * (256 - len(prefix))

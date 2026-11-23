@@ -420,7 +420,7 @@ class VoiceAgent:
                     content='已取消这项操作。'
                     message={'role':'assistant','content':content}
                 elif any(event.status=='deferred' for event in self._events):
-                    content='已排队，实际播放状态以搭搭显示为准。'
+                    content='已排队，实际播放状态以托肯显示为准。'
                     message={'role':'assistant','content':content}
                 elif any(event.status=='started' for event in self._events):
                     content='操作已开始，尚未确认完成。'

@@ -135,7 +135,7 @@ class AntigravityFeedbackTests(unittest.TestCase):
         with closing(sqlite3.connect(db_path)) as db, db:
             db.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, preview TEXT)")
             db.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?)",
-                       (session, "  搭搭通知标题测试 \n ", "private preview snippet"))
+                       (session, "  托肯通知标题测试 \n ", "private preview snippet"))
         event = {"hookEventName": "Stop", "terminationReason": "NO_TOOL_CALL", "fullyIdle": True,
                  "conversationId": session, "executionNum": 0, "transcriptPath": str(transcript),
                  "workspacePaths": [], "lastUserInput": "private prompt"}
@@ -143,7 +143,7 @@ class AntigravityFeedbackTests(unittest.TestCase):
             self.assertTrue(antigravity_feedback.deliver(self.store, event))
         records = self.store.list()
         self.assertEqual([(r["source"], r["title"], r["category"]) for r in records],
-                         [("antigravity", "搭搭通知标题测试", "completed")])
+                         [("antigravity", "托肯通知标题测试", "completed")])
         raw = self.store.path.read_bytes()
         self.assertNotIn(b"private prompt", raw)
         self.assertNotIn(b"private preview", raw)

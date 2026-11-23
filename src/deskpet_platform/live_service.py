@@ -54,7 +54,7 @@ async def run_live_service(
         try:
             acquire(service_lock, blocking=False)
         except BlockingIOError:
-            raise RuntimeError("该配置的搭搭持续连接服务已在运行。") from None
+            raise RuntimeError("该配置的托肯持续连接服务已在运行。") from None
 
         shared_inbox = NotificationStore(owner_config.parent / "notifications.sqlite3")
         quota_store = QuotaStore(owner_config.parent / "agent-quota.sqlite3")
