@@ -11,11 +11,12 @@ import os
 from pathlib import Path
 import json
 import re
-import stat
 import uuid
 import wave
 
 import httpx
+
+from .credential_file import read_private_key_file
 
 MAX_PCM_BYTES = 24000 * 2 * 120
 _MAX_RESPONSE_BYTES = 32768
@@ -62,20 +63,7 @@ def _local_service(environ):
 def _dashscope_key(environ):
     if 'DASHSCOPE_API_KEY' in environ:
         return environ['DASHSCOPE_API_KEY']
-    path = environ.get('DASHSCOPE_API_KEY_FILE', '')
-    if os.name != 'posix' or not os.path.isabs(path):
-        return None
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        try:
-            info = os.fstat(fd)
-            if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077:
-                return os.read(fd, 131).decode('ascii').removesuffix('\n').removesuffix('\r')
-        finally:
-            os.close(fd)
-    except (OSError, UnicodeError, ValueError):
-        return None
-    return None
+    return read_private_key_file(environ.get('DASHSCOPE_API_KEY_FILE', ''), max_bytes=130)
 
 
 def configured_service(environ):

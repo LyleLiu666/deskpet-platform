@@ -14,6 +14,8 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import BaseModel, ValidationError
 
+from .credential_file import read_private_key_file
+
 MAX_RESPONSE_BYTES = 128 * 1024
 MAX_TOOL_RESULT_BYTES = 4096
 MAX_TOOL_ROUNDS = 6
@@ -225,6 +227,8 @@ def configured_chat_backend(environ):
     base=environ.get('LLM_BETA_OPENAI_BASE_URL')
     key=environ.get('LLM_BETA_OPENAI_API_KEY')
     model=environ.get('LLM_BETA_OPENAI_MODEL')
+    if key is None:
+        key=read_private_key_file(environ.get('LLM_BETA_OPENAI_API_KEY_FILE', ''), max_bytes=4096)
     if not all(isinstance(value,str) and value.strip() for value in (base,key,model)):
         return None
     thinking = environ.get('LLM_BETA_OPENAI_ENABLE_THINKING')

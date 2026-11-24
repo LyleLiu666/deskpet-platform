@@ -1,5 +1,8 @@
 import asyncio
 import json
+import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -187,6 +190,21 @@ class ChatBackendTest(unittest.IsolatedAsyncioTestCase):
         for missing in values:
             self.assertIsNone(configured_chat_backend({k:v for k,v in values.items() if k!=missing}))
         self.assertIsNone(configured_chat_backend({**values,'LLM_BETA_OPENAI_BASE_URL':'http://example.test'}))
+
+    @unittest.skipUnless(os.name == 'posix', 'private credential files require POSIX permissions')
+    def test_voice_backend_reads_private_key_file(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'model.key'
+            path.write_text('test-key\n')
+            path.chmod(0o600)
+            values = {'LLM_BETA_OPENAI_BASE_URL':'https://example.test/v1',
+                      'LLM_BETA_OPENAI_MODEL':'model', 'LLM_BETA_OPENAI_API_KEY_FILE':str(path)}
+            self.assertIsInstance(configured_chat_backend(values), ChatBackend)
+            path.chmod(0o644)
+            self.assertIsNone(configured_chat_backend(values))
+            self.assertIsInstance(configured_chat_backend({**values,'LLM_BETA_OPENAI_API_KEY':'direct-key'}),
+                                  ChatBackend)
+
     async def test_sends_messages_tools_and_preserves_reasoning_for_next_call(self):
         captured=[]
         async def reply(request):

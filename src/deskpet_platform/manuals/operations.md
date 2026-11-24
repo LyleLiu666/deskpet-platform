@@ -259,6 +259,7 @@ tool_timeout_sec = 1200
   2. **硅基流动**：设置 `DESKPET_ENABLE_ONLINE_TRANSCRIPTION=1`、`DESKPET_ASR_API_KEY` 和 `DESKPET_ASR_MODEL`。
   3. **本地 whisper.cpp 识别**：设置 `DESKPET_ENABLE_LOCAL_TRANSCRIPTION=1`，并用绝对路径配置 `DESKPET_LOCAL_ASR_CLI`、`DESKPET_LOCAL_ASR_MODEL` 和 `DESKPET_LOCAL_ASR_VAD_MODEL`（需支持 stdin 与 VAD），录音在电脑本机通过内存管道完成识别。
 - **配置语音唤醒对话模型**：在电脑端额外设置 `LLM_BETA_OPENAI_BASE_URL`、`LLM_BETA_OPENAI_API_KEY` 和 `LLM_BETA_OPENAI_MODEL`。
+  - macOS 和 Linux 的后台接收器也可用 `LLM_BETA_OPENAI_API_KEY_FILE` 指向私有的单行密钥文件，权限为 `0600` 或 `0400`。直接设置的 `LLM_BETA_OPENAI_API_KEY` 优先。
   - 对话服务支持 JSON 模式时，可设置 `LLM_BETA_OPENAI_TOOL_FORMAT=json`。模型判断用户要执行的操作，电脑按当前设备授权决定是否调用。服务支持推理开关时，可用 `LLM_BETA_OPENAI_ENABLE_THINKING=false` 缩短对话等待。
 - **昵称与语音工具授权（`desk_voice_names` / `desk_voice_tools`）**：
   - `desk_voice_names` 可查看或修改保存在托肯上的用户昵称与设备昵称（用户昵称可为空；修改昵称不会改变唤醒词）。
