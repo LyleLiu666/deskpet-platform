@@ -617,22 +617,23 @@ class NotificationStore:
         """Acknowledge backlog through the board's unread inbox summary."""
         now = time.time()
         cutoff = now - LEGACY_TOAST_MAX_AGE_SECONDS
-        eligible = """seen IS NULL
-            AND (category!='response' OR (resolved IS NULL AND dismissed IS NULL))"""
+        eligible = f"seen IS NULL AND (category='completed' OR ({OPEN_QUESTION}))"
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            recent, = db.execute(f"""SELECT COUNT(*) FROM notifications
-                WHERE {eligible} AND shown IS NULL AND created>=?""", (cutoff,)).fetchone()
-            # Leave one fresh event eligible for its normal toast and animation.
-            db.execute(f"""UPDATE notifications SET shown=COALESCE(shown,?), action_pending=0
+            fresh = db.execute(f"""SELECT id FROM notifications AS n
+                WHERE {eligible} AND shown IS NULL AND created>=?
+                ORDER BY category='response' DESC,id DESC LIMIT 1""", (cutoff,)).fetchone()
+            # A burst still gets one toast and tone. Only the presentation is
+            # coalesced, leaving every unread item and unanswered request in the inbox.
+            db.execute(f"""UPDATE notifications AS n SET shown=COALESCE(shown,?), action_pending=0
                 WHERE {eligible} AND (shown IS NULL OR action_pending=1)
-                AND (created<? OR (? AND shown IS NULL))""", (now, cutoff, recent > 1))
+                AND (created<? OR (shown IS NULL AND id!=?))""", (now, cutoff, fresh[0] if fresh else 0))
 
     def next_pending(self, *, text_only=False):
         # Shown legacy records have no action flag. Only an explicit retry keeps a shown record pending.
         with closing(self._connect()) as db:
-            row = db.execute("""SELECT id,title,shown,action_pending,source,category FROM notifications
-                WHERE seen IS NULL AND (category!='response' OR (resolved IS NULL AND dismissed IS NULL))
+            row = db.execute(f"""SELECT id,title,shown,action_pending,source,category FROM notifications AS n
+                WHERE seen IS NULL AND (category='completed' OR ({OPEN_QUESTION}))
                   AND (shown IS NULL OR (? AND action_pending=1))
                 ORDER BY id LIMIT 1""", (not text_only,)).fetchone()
         return {"id": row[0], "title": row[1], "shown": row[2] is not None, "action_pending": row[3],
@@ -680,6 +681,11 @@ class NotificationStore:
     def resolve_agent_event(self, source, session, event_id):
         """Remember a response even if its opening event is delivered later."""
         return self.resolve_agent_events(source, session, (event_id,))
+
+    def open_codex_questions(self):
+        with closing(self._connect()) as db:
+            return db.execute("""SELECT session,turn,parent_turn FROM notifications
+                WHERE source='codex' AND category='response' AND resolved IS NULL AND dismissed IS NULL""").fetchall()
 
     def resolve_agent_events(self, source, session, event_ids, *, remember_missing=True):
         """Close a tool's settled requests in a single inbox update."""

@@ -1,7 +1,9 @@
+from contextlib import closing
 import io
 import json
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -80,6 +82,38 @@ class CodexFeedbackTests(unittest.TestCase):
         self.assertEqual(codex_feedback.deliver(self.store, self.answer([0])), 0)
         codex_feedback.deliver(self.store, self.event)
         self.assertEqual(self.store.home_summary()["response_sources"][0]["count"], 1)
+
+    def test_reconcile_native_failures_answers_aborts_and_archives(self):
+        home = Path(self.temp.name)
+        live = "01020304-0000-4000-8000-000000000001"
+        archived = "01020304-0000-4000-8000-000000000002"
+        rollout = home / "sessions" / "live.jsonl"
+        rollout.parent.mkdir()
+        with closing(sqlite3.connect(home / "state_5.sqlite")) as state, state:
+            state.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT, archived INTEGER)")
+            state.executemany("INSERT INTO threads VALUES (?,?,?)", ((live, str(rollout), 0), (archived, "", 1)))
+        for call, turn in (("failed", "one"), ("call_123", "two"), ("aborted", "three"), ("still-live", "four")):
+            codex_feedback.deliver(self.store, {**self.event, "session_id": live, "tool_use_id": call, "turn_id": turn})
+        codex_feedback.deliver(self.store, {**self.event, "session_id": archived})
+        events = [
+            ("response_item", {"type": "function_call_output", "call_id": "failed",
+                               "output": "failed to parse function arguments: duplicate field"}),
+            ("response_item", {"type": "function_call_output", "call_id": "still-live", "output": '{"accepted":true}'}),
+            ("event_msg", {"type": "task_complete", "turn_id": "four"}),
+            ("event_msg", {"type": "turn_aborted", "turn_id": "three"}),
+            ("event_msg", {"type": "user_message", "message": self.answer([0])["prompt"]}),
+        ]
+        rollout.write_text("".join(json.dumps({"type": kind, "payload": payload}) + "\n" for kind, payload in events))
+        reconcile = codex_feedback.QuestionReconciler(self.store, home)
+        self.assertEqual(reconcile.run(), 7)
+        self.assertEqual(self.store.home_summary()["response_count"], 3)
+        self.assertEqual(reconcile.run(), 0)
+        with rollout.open("a") as stream:
+            stream.write(json.dumps({"type": "event_msg", "payload": {
+                "type": "user_message", "message": self.answer([1])["prompt"],
+            }}) + "\n")
+        self.assertEqual(reconcile.run(), 1)
+        self.assertEqual(self.store.home_summary()["response_count"], 2)
 
     def test_answered_retry_does_not_restore_the_earlier_call(self):
         initial = {**self.event, "tool_use_id": "failed-call"}

@@ -45,6 +45,7 @@ from .device_registry import DeviceRegistry
 from .device_sessions import DeviceSessions
 from .image_display import prepare_photo, prepare_photo_with_fullscreen, prepare_jpeg_photo
 from .notifications import NotificationStore, codex_home, deliver_next, notification_text, request_worker_yield
+from .codex_feedback import QuestionReconciler
 from .notification_cache import NotificationCache
 from .notification_view import NotificationView
 from .pair_portal import PairPortal
@@ -184,6 +185,8 @@ class BoardSession:
         self.touches = asyncio.Queue(maxsize=32)
         self.dropped_touches = 0
         self.notifications = NotificationStore(Path(path).parent / "notifications.sqlite3", source=notification_source)
+        self.codex_questions = QuestionReconciler(notification_source or self.notifications)
+        self.codex_questions_due = 0.0
         self.notification_view = NotificationView(self.notifications)
         self.notification_cache = NotificationCache(self.notifications)
         self.next_notification_attempt = 0.0
@@ -525,6 +528,10 @@ class BoardSession:
                     self.record_status(heartbeat)
                     notification_sync_ok = True
                     try:
+                        now = time.monotonic()
+                        if now >= self.codex_questions_due:
+                            self.codex_questions_due = now + 5
+                            await asyncio.to_thread(self.codex_questions.run)
                         await asyncio.to_thread(self.notifications.sync)
                     except (OSError, sqlite3.Error, ValueError):
                         notification_sync_ok = False

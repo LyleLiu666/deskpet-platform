@@ -350,14 +350,18 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(store.get(request)["resolved"])
                 self.assertTrue(store.get(fresh)["shown"])
 
-    def test_legacy_inbox_groups_multiple_recent_pending_alerts(self):
+    def test_legacy_inbox_keeps_one_audible_alert_when_several_arrive_together(self):
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
             store.add_agent_event("codex", "s", "one", "completed", "One")
-            store.add_agent_event("claude_code", "s", "two", "response", "Two")
+            response = store.add_agent_event("claude_code", "s", "two", "response", "Two")
+            store.add_agent_event("codex", "s2", "three", "completed", "Three")
             store.summarize_legacy_backlog()
+            store.summarize_legacy_backlog()
+            self.assertEqual(store.next_pending()["id"], response)
+            self.assertEqual(store.unseen_count(for_device=True), 3)
+            store.mark_shown(response)
             self.assertIsNone(store.next_pending())
-            self.assertEqual(store.unseen_count(for_device=True), 2)
 
     async def test_poll_summarizes_backlog_only_for_legacy_message_cache_boards(self):
         from unittest.mock import AsyncMock
