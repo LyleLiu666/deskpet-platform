@@ -201,6 +201,25 @@ class MultiBoardContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, {"status": "ok", "diagnostics": summary})
             self.assertEqual(session.device_info, (session.client, {"diagnostics": summary}))
 
+    async def test_device_info_preserves_valid_wake_diagnostics(self):
+        client = object.__new__(Client)
+        client._operation = asyncio.Lock()
+        info = {"board": "synthetic", "chip": "esp32s3", "profile": "assistant",
+                "partition_id": "synthetic-dual", "screen": [480, 320], "modules": ["core"]}
+        summary = {"reset_reason": "software", "early_resets": 0,
+                   "safe_mode": False, "crash_present": False}
+        wake = {"enabled": False, "listening": False, "detections": 0xffffffff, "blocks": 0}
+        client.channel = SimpleNamespace(capabilities={"device_info": 1}, send=AsyncMock())
+        client.channel.send.return_value = dict(info, diagnostics=dict(summary, wake=dict(wake, extra="synthetic")))
+        self.assertEqual((await client.device_info())["diagnostics"], dict(summary, wake=wake))
+        for invalid in (None, {}, {**wake, "enabled": 1}, {**wake, "listening": "false"},
+                        {**wake, "detections": True}, {**wake, "blocks": -1}, {**wake, "blocks": 0x100000000}):
+            with self.subTest(wake=invalid):
+                client.channel.send.return_value = dict(info, diagnostics=dict(summary, wake=invalid))
+                self.assertEqual((await client.device_info())["diagnostics"], summary)
+        client.channel.send.return_value = dict(info, diagnostics=summary)
+        self.assertEqual((await client.device_info())["diagnostics"], summary)
+
     async def test_device_info_is_opt_in_and_checks_geometry(self):
         client = object.__new__(Client)
         client._operation = asyncio.Lock()

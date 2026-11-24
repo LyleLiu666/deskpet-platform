@@ -69,6 +69,8 @@ P1,{"epoch":"demo","seq":4,"boot":4,"view":"photo","playing":true,"interval_seco
 
 可选字段 `diagnostics.low_battery_writes` 记录最近一次低电收尾。必填字段为 `level`（2 或 3）、`test`（是否为诊断回放）、`previous_boot`（记录是否来自较早的启动），以及 `pending`、`timed_out`、`failed` 三个类别数组。数组沿用 `card`、`inbox`、`merit`，各类别最多出现一次。可选的 `upload` 为 `cancelled`、`close_failed` 或 `cleanup_failed`。是否超时与最终是否失败分别记录。RTC 保留内存可跨软件重启提供该字段，彻底失电时可能无法保留。
 
+助手固件可返回 `diagnostics.wake`。其中 `enabled` 表示开关已开启，`listening` 表示当前正在监听，两者均为布尔值。`detections` 和 `blocks` 为本次启动后的无符号 32 位计数，分别记录唤醒检测次数和读到的 10 毫秒音频块数。
+
 ES3C35P 当前上报滤波后的电池端电压。采样尚未稳定，或连续 6 秒没有有效读数时，`mv` 为 `null`。由于供电状态尚无独立证据，`power` 为 `unknown`，`percent` 为 `null`，`low` 为 `false`。电脑端 `desk_status` 按能力位展示摘要。
 
 ## 电脑端语音失败回执

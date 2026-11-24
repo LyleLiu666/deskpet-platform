@@ -155,6 +155,12 @@ class Client:
                 battery_writes = self._battery_write_diagnostics(diagnostics.get("low_battery_writes"))
                 if battery_writes is not None:
                     summary["low_battery_writes"] = battery_writes
+                wake = diagnostics.get("wake")
+                if (isinstance(wake, dict)
+                        and all(type(wake.get(key)) is bool for key in ("enabled", "listening"))
+                        and all(type(wake.get(key)) is int and 0 <= wake[key] <= 0xffffffff
+                                for key in ("detections", "blocks"))):
+                    summary["wake"] = {key: wake[key] for key in ("enabled", "listening", "detections", "blocks")}
                 info["diagnostics"] = summary
         return info
 
