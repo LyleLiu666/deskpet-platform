@@ -1,5 +1,6 @@
 """Local stdio MCP. Credentials are loaded from private disk storage."""
 import asyncio
+from collections import deque
 from contextlib import asynccontextmanager, suppress
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import asdict, replace
@@ -61,7 +62,7 @@ from .token_metrics import TokenMetrics
 from .usb_setup import probe_usb
 from .usb_link import UsbLink, UsbPort, find_usb_devices, read_usb_identity, reset_native_usb
 from .weather import fetch_relay_weather, fetch_weather
-from .speech import SpeechServiceError, SpeechTooLong, split_speech, synthesize_speech, validate_text
+from .speech import SpeechServiceError, SpeechTooLong, split_speech, synthesize_speech, synthesize_speech_mp3, validate_text
 from .transcription import (
     DashScopeTranscription,
     LocalTranscription,
@@ -71,7 +72,7 @@ from .transcription import (
     transcribe_local_pcm,
     transcribe_pcm,
 )
-from .voice_agent import AgentError, configured_chat_backend
+from .voice_agent import AgentError, ChatBackend, configured_chat_backend
 from .voice_conversation import create_device_conversation
 from .voice_permissions import VOICE_TOOLS, VoicePermissions
 from .board_readouts import BOARD_READOUTS
@@ -112,9 +113,14 @@ class _CaptureVoiceBackend:
         self.backend = backend
         self.require_active = require_active
 
-    async def complete(self, messages, tools):
+    @property
+    def supports_first_phrase(self):
+        return isinstance(self.backend, ChatBackend) and self.backend.supports_first_phrase
+
+    async def complete(self, messages, tools, *, on_first_phrase=None):
         await self.require_active()
-        message = await self.backend.complete(messages, tools)
+        options = {'on_first_phrase': on_first_phrase} if on_first_phrase is not None else {}
+        message = await self.backend.complete(messages, tools, **options)
         # The cancellation poll can be asleep when the model responds.
         await self.require_active()
         return message
@@ -695,8 +701,15 @@ class BoardSession:
         text=validate_text(text)
         return await self._speak_text(text,read_ticket=read_ticket)
 
-    async def speak_voice_reply(self,text, *, capture_ticket=None):
+    async def speak_voice_reply(self, text, *, capture_ticket=None, continuation: asyncio.Future[str] | None = None):
         """Read a bounded assistant reply as one interruptible, serialized operation."""
+        return await self._speak_text(
+            self._normalize_voice_reply(text), capture_ticket=capture_ticket,
+            expected_client=self.voice_active_client, continuation=continuation,
+        )
+
+    @staticmethod
+    def _normalize_voice_reply(text):
         try:
             if not isinstance(text,str) or len(text.encode('utf-8'))>8192:
                 raise ValueError
@@ -706,35 +719,76 @@ class BoardSession:
             if not text:raise ValueError
         except (ValueError,UnicodeError):
             raise ValueError('语音回复为空或格式无效。') from None
-        return await self._speak_text(text,capture_ticket=capture_ticket,expected_client=self.voice_active_client)
+        return text
 
-    async def _speak_text(self,text, *, read_ticket=None,capture_ticket=None,expected_client=None):
-        speech_request={}
-        if read_ticket is not None:speech_request['read_ticket']=read_ticket
-        if capture_ticket is not None:speech_request['capture_ticket']=capture_ticket
+    async def _speak_text(self, text, *, read_ticket=None, capture_ticket=None, expected_client=None, continuation=None):
+        speech_request = {}
+        if read_ticket is not None:
+            speech_request['read_ticket'] = read_ticket
+        if capture_ticket is not None:
+            speech_request['capture_ticket'] = capture_ticket
+
         async with self.speech_lock:
             async with self.lock:
-                client=self.client
+                client = self.client
                 if client is None or (expected_client is not None and client is not expected_client):
-                    return {"status":"not_connected","connection":self.snapshot}
-                if client.channel.capabilities.get("speech_pcm")!=1:return {"status":"unsupported"}
-                if read_ticket is not None and client.channel.capabilities.get("read_speech_ticket")!=1:
-                    return {"status":"read_cancel_not_supported"}
-            parts=split_speech(text);duration=0
-            while parts:
-                part=parts.pop(0)
-                if not part.strip():continue
-                async with self.lock:
-                    if self.client is not client:return {"status":"not_connected","connection":self.snapshot}
-                try:pcm=await synthesize_speech(part)
-                except SpeechTooLong:
-                    if len(part)<2:raise
-                    middle=len(part)//2;parts[0:0]=[part[:middle],part[middle:]];continue
-                if self.client is not client:return {"status":"not_connected","connection":self.snapshot}
-                # Playback is bound to this client and each board command has its own lock.
-                result=await client.play_speech_pcm(pcm,**speech_request)
-                duration+=result['duration_ms']
-            return {"status":"finished","duration_ms":duration}
+                    return {"status": "not_connected", "connection": self.snapshot}
+                channel = client.channel
+                use_mp3 = channel.capabilities.get("speech_mp3") == 1
+                if not use_mp3 and channel.capabilities.get("speech_pcm") != 1:
+                    return {"status": "unsupported"}
+                if read_ticket is not None and channel.capabilities.get("read_speech_ticket") != 1:
+                    return {"status": "read_cancel_not_supported"}
+                epoch = getattr(channel, "epoch", None)
+
+            def connection_matches():
+                return (self.client is client and getattr(channel, "online", True)
+                        and getattr(channel, "epoch", None) == epoch)
+
+            synthesize = synthesize_speech_mp3 if use_mp3 else synthesize_speech
+            play = client.play_speech_mp3 if use_mp3 else client.play_speech_pcm
+            parts = deque(part for part in split_speech(text) if part.strip())
+            prefetch = use_mp3 or continuation is not None
+
+            async def next_clip():
+                nonlocal continuation
+                if not parts and continuation is not None:
+                    remaining = await asyncio.shield(continuation)
+                    continuation = None
+                    if remaining:
+                        parts.extend(part for part in split_speech(self._normalize_voice_reply(remaining)) if part.strip())
+                while parts and connection_matches():
+                    part = parts.popleft()
+                    try:
+                        return await synthesize(part)
+                    except SpeechTooLong:
+                        if len(part) < 2:
+                            raise
+                        middle = len(part) // 2
+                        parts.extendleft(half for half in (part[middle:], part[:middle]) if half.strip())
+                return None
+
+            duration = 0
+            pending = None
+            try:
+                while parts or continuation is not None or pending is not None:
+                    if not connection_matches():
+                        return {"status": "not_connected", "connection": self.snapshot}
+                    request, pending = pending, None
+                    audio = await (request if request is not None else next_clip())
+                    if not connection_matches():
+                        return {"status": "not_connected", "connection": self.snapshot}
+                    if audio is None:
+                        break
+                    if prefetch and (parts or continuation is not None):
+                        pending = asyncio.create_task(next_clip())
+                    result = await play(audio, **speech_request)
+                    duration += result['duration_ms']
+                return {"status": "finished", "duration_ms": duration}
+            finally:
+                if pending is not None:
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
 
     async def read_notification(self,identity, *, read_ticket=None):
         item=await asyncio.to_thread(self.notifications.get,identity)
@@ -931,8 +985,27 @@ class BoardSession:
                     if capabilities.get('capture_speech_ticket')==1:
                         return await self.speak_voice_reply(reply_text,capture_ticket=ticket)
                     return await self.speak_voice_reply(reply_text)
+
+                async def speak_stream(first_phrase, *, continuation):
+                    nonlocal failure
+                    failure = 'playback'
+                    # The model stream can receive text between cancellation polls.
+                    await self._require_active_capture(client, ticket)
+                    await client.capture_progress(ticket, 'speaking')
+                    if self.client is not client:
+                        raise DeviceError('connection_changed')
+                    return await self.speak_voice_reply(first_phrase, capture_ticket=ticket,
+                                                        continuation=continuation)
+
+                async def show_streamed_reply(full_reply):
+                    if display_reply:
+                        await client.queue_transcript(full_reply, capture_ticket=ticket, kind='reply')
+
                 self.voice_active_ticket=ticket;self.voice_active_client=client
-                try:reply=await self.voice_conversation.turn(text,speak_reply=speak_reply)
+                try:
+                    stream = speak_stream if capabilities.get('capture_speech_ticket') == 1 else None
+                    reply = await self.voice_conversation.turn(text, speak_reply=speak_reply, speak_stream=stream,
+                                                               show_streamed_reply=show_streamed_reply)
                 finally:
                     if self.voice_active_client is client and self.voice_active_ticket==ticket:
                         self.voice_active_ticket=None;self.voice_active_client=None
@@ -962,6 +1035,7 @@ class BoardSession:
             else:
                 detail = 'service_unreachable' if code in ('network_error', 'service_error') else code
         except AgentError as exc:
+            failure = 'model'
             detail = {
                 'model_authentication_failed': 'invalid_token',
                 'model_rate_limited': 'rate_limited',

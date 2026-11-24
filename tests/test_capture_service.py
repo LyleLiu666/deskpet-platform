@@ -5,11 +5,15 @@ import unittest
 import zlib
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call, patch
+
+import httpx
+
 from deskpet_platform.channel import CommandRejected
 from deskpet_platform.channel import Channel
 from deskpet_platform.mcp_server import BoardSession
 from deskpet_platform.client import Client, DeviceError
 from deskpet_platform.pairing import DeviceConfig
+from deskpet_platform.voice_agent import ChatBackend
 
 class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_capture_check_rejects_malformed_or_unsupported_reply(self):
@@ -508,6 +512,96 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(phase.mock_calls, [call.speech('你好，我在。'), call.display('你好', capture_ticket=7)])
             client.capture_result.assert_awaited_once_with(7,True)
             client.poll_capture.assert_awaited_once_with(voice_ready=True)
+
+    async def test_native_no_tool_voice_starts_speaking_before_the_rest_of_the_answer(self):
+        def frame(delta, finish=None):
+            value = {'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]}
+            return b'data: ' + json.dumps(value, ensure_ascii=False).encode() + b'\r\n\r\n'
+
+        for termination in ('stop', 'length', 'disconnected', 'cancelled'):
+            with self.subTest(termination=termination), tempfile.TemporaryDirectory() as directory:
+                session = self.session(Path(directory) / 'device.json')
+                client = self.board()
+                session.client = client
+                client.channel.capabilities.update(capture_mode=1, capture_reply_text=1, capture_speech_ticket=1,
+                                                   capture_failure_detail=1, voice_names=1, speech_pcm=1)
+                client.poll_capture.return_value = {'ticket': 7, 'mode': 'voice'}
+                session.voice_names = AsyncMock(return_value={'status': 'ok', 'user_name': '', 'device_name': '托肯'})
+                started = asyncio.Event()
+                tail_ready = asyncio.Event()
+                speech_cancelled = asyncio.Event()
+                stream_closed = asyncio.Event()
+                spoken = []
+
+                class Stream(httpx.AsyncByteStream):
+                    async def __aiter__(self):
+                        first = frame({'role': 'assistant', 'reasoning_content': '隐藏', 'content': '  第一句。'})
+                        yield first[:-8]
+                        yield first[-8:]
+                        await started.wait()
+                        if termination == 'cancelled':
+                            await asyncio.Event().wait()
+                        if termination == 'disconnected':
+                            raise httpx.ReadError('connection closed')
+                        yield frame({'content': '\n第二句'})
+                        yield frame({'content': '。'}, termination)
+                        yield b'data: [DONE]\n\n'
+
+                    async def aclose(self):
+                        stream_closed.set()
+
+                def response(request):
+                    payload = json.loads(request.content)
+                    self.assertIs(payload['stream'], True)
+                    self.assertIs(payload['enable_thinking'], False)
+                    self.assertNotIn('tools', payload)
+                    return httpx.Response(200, headers={'content-type': 'text/event-stream'}, stream=Stream())
+
+                async def synthesize(text):
+                    if text == '第二句。':
+                        tail_ready.set()
+                    return text.encode()
+
+                async def play(pcm, *, capture_ticket):
+                    self.assertEqual(capture_ticket, 7)
+                    spoken.append(pcm.decode())
+                    if len(spoken) == 1:
+                        started.set()
+                        try:
+                            # The tail has to synthesize while the first clip is still playing.
+                            await tail_ready.wait()
+                        except asyncio.CancelledError:
+                            speech_cancelled.set()
+                            raise
+                    return {'status': 'finished', 'duration_ms': 1}
+
+                if termination == 'cancelled':
+                    client.capture_active.side_effect = lambda _ticket: not started.is_set()
+                session.voice_backend = ChatBackend('https://example.test/v1', 'test-key', 'model',
+                                                    enable_thinking=False, transport=httpx.MockTransport(response))
+                client.play_speech_pcm = AsyncMock(side_effect=play)
+                with patch('deskpet_platform.mcp_server.transcribe_pcm', return_value='你好'), \
+                     patch('deskpet_platform.mcp_server.synthesize_speech', side_effect=synthesize):
+                    await session.refresh_capture(client)
+                    await asyncio.wait_for(session.capture_task, 2)
+
+                self.assertTrue(stream_closed.is_set())
+                self.assertEqual(client.capture_progress.await_args_list, [call(7, 'thinking'), call(7, 'speaking')])
+                if termination == 'stop':
+                    self.assertEqual(spoken, ['第一句。', '第二句。'])
+                    client.queue_transcript.assert_has_awaits([
+                        call('你好', capture_ticket=7), call('第一句。\n第二句。', capture_ticket=7, kind='reply'),
+                    ])
+                    self.assertEqual(session.voice_conversation.agent.messages[-1]['content'], '  第一句。\n第二句。')
+                    client.capture_result.assert_awaited_once_with(7, True)
+                else:
+                    self.assertEqual(spoken, ['第一句。'])
+                    client.queue_transcript.assert_awaited_once_with('你好', capture_ticket=7)
+                    failure = {'length': 'invalid_response', 'disconnected': 'service_unreachable',
+                               'cancelled': 'playback'}[termination]
+                    client.capture_result.assert_awaited_once_with(7, False, failure=failure)
+                    self.assertIsNone(session.voice_conversation)
+                    self.assertTrue(speech_cancelled.is_set())
 
     async def test_voice_mode_without_model_discards_audio_and_reports_failure(self):
         with tempfile.TemporaryDirectory() as directory:

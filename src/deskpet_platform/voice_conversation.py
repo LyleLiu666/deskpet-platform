@@ -48,19 +48,33 @@ class VoiceConversation:
         self._needs_reset = False
         self._end_lock = asyncio.Lock()
 
-    async def turn(self, text, *, speak_reply=None):
-        return await self._run(self.agent.turn, text, speak_reply=speak_reply)
+    async def turn(self, text, *, speak_reply=None, speak_stream=None, show_streamed_reply=None):
+        return await self._run(self.agent.turn, text, speak_reply=speak_reply, speak_stream=speak_stream,
+                               show_streamed_reply=show_streamed_reply)
 
     async def confirm(self, identity, approved):
         return await self._run(self.agent.confirm, identity, approved)
 
-    async def _run(self, operation, *args, speak_reply=None):
+    async def _run(self, operation, *args, speak_reply=None, speak_stream=None, show_streamed_reply=None):
         if self._active is not None or self._closing or self._needs_reset:
             raise ConversationBusy('conversation_busy_or_requires_end')
         self._active = asyncio.current_task()
+        first_phrase = None
+        continuation = None
+        streamed_playback = None
+
+        async def start_phrase(phrase):
+            nonlocal first_phrase, continuation, streamed_playback
+            first_phrase = phrase
+            continuation = asyncio.get_running_loop().create_future()
+            streamed_playback = asyncio.create_task(speak_stream(phrase, continuation=continuation))
+
         try:
             try:
-                result = await operation(*args)
+                options = {'on_first_phrase': start_phrase} if speak_stream is not None else {}
+                result = await operation(*args, **options)
+                if first_phrase is not None and (not result.text or not result.text.startswith(first_phrase)):
+                    raise AgentError('model_invalid_response')
             except AgentError as error:
                 if not isinstance(error, AgentBusy) and error.code != 'unknown_confirmation':
                     self._needs_reset = True
@@ -69,7 +83,13 @@ class VoiceConversation:
                 # A failed model/tool round may leave a partial protocol history.
                 self._needs_reset = True
                 raise
-            playback = await (speak_reply or self.speak_reply)(result.text) if result.text else None
+            if streamed_playback is None:
+                playback = await (speak_reply or self.speak_reply)(result.text) if result.text else None
+            else:
+                if show_streamed_reply is not None:
+                    await show_streamed_reply(result.text)
+                continuation.set_result(result.text[len(first_phrase):].strip())
+                playback = await streamed_playback
             return ConversationResult(result, playback)
         except asyncio.CancelledError:
             # The model or tool may have been interrupted midway. Do not reuse
@@ -77,7 +97,13 @@ class VoiceConversation:
             self._needs_reset = True
             raise
         finally:
-            self._active = None
+            try:
+                if streamed_playback is not None:
+                    streamed_playback.cancel()
+                    continuation.cancel()
+                    await asyncio.gather(streamed_playback, return_exceptions=True)
+            finally:
+                self._active = None
 
     async def end(self):
         """Stop active work, then discard conversation history and confirmations."""

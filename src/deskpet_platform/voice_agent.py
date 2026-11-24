@@ -5,6 +5,7 @@ Callers must surface pending confirmations and choose the authorized tool set.
 """
 import asyncio
 import copy
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import json
 import secrets
@@ -20,6 +21,7 @@ MAX_RESPONSE_BYTES = 128 * 1024
 MAX_TOOL_RESULT_BYTES = 4096
 MAX_TOOL_ROUNDS = 6
 MAX_CONTEXT_BYTES = 128 * 1024
+MAX_REPLY_BYTES = 8192
 
 
 class AgentError(RuntimeError):
@@ -103,12 +105,19 @@ class ChatBackend:
         self._tool_format = tool_format
         self._enable_thinking = enable_thinking
 
-    async def complete(self, messages, tools):
+    @property
+    def supports_first_phrase(self):
+        return self._tool_format == 'native' and self._enable_thinking is False
+
+    async def complete(self, messages, tools, *, on_first_phrase=None):
         if self._tool_format == 'json':
             return await self._complete_json_turn(messages, tools)
         payload = {'model': self._model, 'messages': messages, 'stream': False, 'max_tokens': 1024}
         if tools:
             payload.update(tools=[tool.schema() for tool in tools], tool_choice='auto', parallel_tool_calls=False)
+        elif on_first_phrase is not None and self.supports_first_phrase:
+            payload['stream'] = True
+            return await self._request_spoken_reply(payload, on_first_phrase)
         return await self._request(payload)
 
     async def _complete_json_turn(self, messages, tools):
@@ -179,7 +188,8 @@ class ChatBackend:
             pass
         raise AgentError('model_invalid_response')
 
-    async def _request(self, payload):
+    @asynccontextmanager
+    async def _response(self, payload):
         if self._enable_thinking is not None:
             payload['enable_thinking'] = self._enable_thinking
         try:
@@ -195,14 +205,29 @@ class ChatBackend:
                     if response.status_code != 200:raise AgentError('model_service_failed')
                     if response.headers.get('content-encoding', 'identity').lower() != 'identity':
                         raise AgentError('model_invalid_response')
-                    body = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        if len(body) + len(chunk) > MAX_RESPONSE_BYTES:raise AgentError('model_invalid_response')
-                        body.extend(chunk)
+                    yield response
         except httpx.TimeoutException:
             raise AgentError('model_timeout') from None
         except httpx.HTTPError:
             raise AgentError('model_connection_failed') from None
+
+    @staticmethod
+    async def _response_chunks(response):
+        size = 0
+        async for chunk in response.aiter_bytes():
+            size += len(chunk)
+            if size > MAX_RESPONSE_BYTES:
+                raise AgentError('model_invalid_response')
+            yield chunk
+
+    async def _request(self, payload):
+        async with self._response(payload) as response:
+            return await self._read_response(response)
+
+    async def _read_response(self, response):
+        body = bytearray()
+        async for chunk in self._response_chunks(response):
+            body.extend(chunk)
         try:
             result = json.loads(body)
             if not isinstance(result,dict):raise ValueError
@@ -220,6 +245,80 @@ class ChatBackend:
             return message
         except (KeyError, ValueError, TypeError, UnicodeError, json.JSONDecodeError):
             raise AgentError('model_invalid_response') from None
+
+    async def _spoken_events(self, response):
+        buffer = bytearray()
+        fields = []
+        async for chunk in self._response_chunks(response):
+            buffer.extend(chunk)
+            while True:
+                newline = buffer.find(b'\n')
+                if newline < 0:
+                    break
+                line = bytes(buffer[:newline]).removesuffix(b'\r')
+                del buffer[:newline + 1]
+                if line.startswith(b'data:'):
+                    fields.append(line[5:].removeprefix(b' '))
+                elif not line and fields:
+                    yield b'\n'.join(fields)
+                    fields.clear()
+        if buffer or fields:
+            raise AgentError('model_invalid_response')
+
+    async def _request_spoken_reply(self, payload, on_first_phrase):
+        async with self._response(payload) as response:
+            content_type = response.headers.get('content-type', '').split(';', 1)[0].lower().strip()
+            if content_type == 'application/json':
+                return await self._read_response(response)
+            if content_type != 'text/event-stream':
+                raise AgentError('model_invalid_response')
+            content = ''
+            stopped = False
+            first_phrase_sent = False
+            async for event in self._spoken_events(response):
+                if event == b'[DONE]':
+                    if stopped and _valid_reply(content):
+                        return {'role': 'assistant', 'content': content}
+                    break
+                try:
+                    frame = json.loads(event, object_pairs_hook=_object_without_duplicate_keys)
+                    if not isinstance(frame, dict):
+                        raise ValueError
+                    if frame.get('error') is not None:
+                        raise AgentError('model_service_failed')
+                    choices = frame['choices']
+                    if choices == [] and stopped and isinstance(frame.get('usage'), dict):
+                        continue
+                    if stopped or not isinstance(choices, list) or len(choices) != 1:
+                        raise ValueError
+                    choice = choices[0]
+                    delta = choice['delta']
+                    if (type(choice.get('index')) is not int or choice['index'] != 0 or not isinstance(delta, dict) or
+                            delta.get('role') not in (None, 'assistant') or delta.get('tool_calls') or
+                            delta.get('function_call')):
+                        raise ValueError
+                    finish = choice['finish_reason']
+                    if finish not in (None, 'stop'):
+                        raise ValueError
+                    piece = delta.get('content')
+                    if piece is not None:
+                        if not isinstance(piece, str):
+                            raise ValueError
+                        content += piece
+                        if (not _safe_reply_text(content) or
+                                any((ord(char) < 32 and char not in '\n\r\t') or ord(char) == 127
+                                    for char in piece)):
+                            raise ValueError
+                    stopped = finish == 'stop'
+                except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
+                    raise AgentError('model_invalid_response') from None
+
+                if not first_phrase_sent and not stopped:
+                    phrase = _first_sentence(content)
+                    if phrase:
+                        await on_first_phrase(phrase)
+                        first_phrase_sent = True
+        raise AgentError('model_invalid_response')
 
 
 def configured_chat_backend(environ):
@@ -246,6 +345,27 @@ def _object_without_duplicate_keys(pairs):
         if key in result:raise ValueError('duplicate_key')
         result[key] = value
     return result
+
+
+def _safe_reply_text(text):
+    return len(text.encode('utf-8')) <= MAX_REPLY_BYTES and '<think>' not in text and '</think>' not in text
+
+
+def _valid_reply(text):
+    try:
+        return isinstance(text, str) and bool(text.strip()) and _safe_reply_text(text)
+    except UnicodeError:
+        return False
+
+
+def _first_sentence(text):
+    text = text.lstrip()
+    for index, char in enumerate(text):
+        if index == 0:
+            continue
+        if char in '。！？!?' or (char == '.' and text[index + 1:index + 2].isspace()):
+            return text[:index + 1]
+    return None
 
 
 class VoiceAgent:
@@ -281,7 +401,7 @@ class VoiceAgent:
         self._seen_calls = set()
         self._events = []
 
-    async def turn(self, text):
+    async def turn(self, text, *, on_first_phrase=None):
         try:
             valid=isinstance(text,str) and bool(text.strip()) and len(text.encode('utf-8'))<=4096
         except UnicodeError:
@@ -292,7 +412,7 @@ class VoiceAgent:
             if self._pending:raise AgentBusy('confirmation_pending')
             self._events = []
             self.messages.append({'role': 'user', 'content': text})
-            return await self._advance_checked()
+            return await self._advance_checked(on_first_phrase=on_first_phrase)
 
     async def confirm(self, identity, approved):
         if type(approved) is not bool:raise ValueError('invalid_confirmation')
@@ -323,9 +443,9 @@ class VoiceAgent:
             self._seen_calls.clear()
             self._events.clear()
 
-    async def _advance_checked(self):
+    async def _advance_checked(self, *, on_first_phrase=None):
         try:
-            return await self._advance()
+            return await self._advance(on_first_phrase=on_first_phrase)
         except AgentError as error:
             raise AgentError(error.code,self._events) from None
 
@@ -400,21 +520,19 @@ class VoiceAgent:
             first_turn = boundary
         raise AgentError('context_limit_reached')
 
-    async def _advance(self):
+    async def _advance(self, *, on_first_phrase=None):
         for _ in range(MAX_TOOL_ROUNDS):
             self._fit_context()
-            message = await self.backend.complete(copy.deepcopy(self.messages), list(self.tools.values()))
+            stream = (on_first_phrase is not None and not self.tools and not self._events and
+                      getattr(self.backend, 'supports_first_phrase', False) is True)
+            options = {'on_first_phrase': on_first_phrase} if stream else {}
+            message = await self.backend.complete(copy.deepcopy(self.messages), list(self.tools.values()), **options)
             if not isinstance(message, dict) or message.get('role') != 'assistant':raise AgentError('model_invalid_response')
             calls = message.get('tool_calls') or []
             if not isinstance(calls, list) or len(calls) > 1:raise AgentError('model_invalid_tool_calls')
             if not calls:
                 content = message.get('content')
-                try:
-                    valid=(isinstance(content,str) and bool(content.strip()) and len(content.encode('utf-8'))<=8192 and
-                           '<think>' not in content and '</think>' not in content)
-                except UnicodeError:
-                    valid=False
-                if not valid:
+                if not _valid_reply(content):
                     raise AgentError('model_invalid_response')
                 if any(event.status=='failed' for event in self._events):
                     failure=next(event for event in self._events if event.status=='failed')

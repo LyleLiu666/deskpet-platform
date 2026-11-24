@@ -32,6 +32,7 @@ from .image_display import prepare_image
 from .pairing import DeviceConfig, valid_device_uuid
 from .quota_projection import SOURCES
 from .role_install import MAX_ROLE_ACTIONS, MAX_ROLE_ID_LENGTH, valid_identity
+from .speech import SPEECH_MAX_MS, speech_mp3_duration_ms
 from .voice_permissions import VOICE_TOOLS
 from .board_readouts import BOARD_READOUTS, board_readout
 from .wifi_link import WifiLink
@@ -579,11 +580,25 @@ class Client:
                 raise
 
     async def play_speech_pcm(self, pcm, *, poll_interval=.1, read_ticket=None, capture_ticket=None):
-        """Play 16 kHz mono PCM16, clearing the device buffer on failure."""
+        """Play up to five seconds of 16 kHz mono PCM16."""
         if not isinstance(pcm,bytes) or not 0<len(pcm)<=160000 or len(pcm)%2:
             raise ValueError("语音音频须为不超过五秒的 16 kHz 单声道 PCM。")
         if self.channel.capabilities.get("speech_pcm") != 1:
             raise DeviceError("speech_not_supported")
+        return await self._play_speech(pcm, "speech_commit", round(len(pcm)/32),
+                                       poll_interval=poll_interval, read_ticket=read_ticket,
+                                       capture_ticket=capture_ticket)
+
+    async def play_speech_mp3(self, audio, *, poll_interval=.1, read_ticket=None, capture_ticket=None):
+        """Play a short raw Edge TTS MP3 stream on a capable board."""
+        speech_mp3_duration_ms(audio)
+        if self.channel.capabilities.get("speech_mp3") != 1:
+            raise DeviceError("speech_mp3_not_supported")
+        return await self._play_speech(audio, "speech_commit_mp3", None,
+                                       poll_interval=poll_interval, read_ticket=read_ticket,
+                                       capture_ticket=capture_ticket)
+
+    async def _play_speech(self, audio, commit, duration_ms, *, poll_interval, read_ticket, capture_ticket):
         if read_ticket is not None and capture_ticket is not None:
             raise ValueError("一段语音只能绑定一个请求。")
         if read_ticket is not None:
@@ -628,25 +643,29 @@ class Client:
 
         async with self._speech:
             try:
-                fields={"bytes":len(pcm),"crc32":zlib.crc32(pcm)}
+                fields={"bytes":len(audio),"crc32":zlib.crc32(audio)}
                 if read_ticket is not None:fields["read_ticket"]=read_ticket
                 if capture_ticket is not None:fields["capture_ticket"]=capture_ticket
                 await speech_command("speech_begin", **fields)
                 if getattr(getattr(self.channel, "transport", None), "wireless", False) is True:
                     window = 384 * SPEECH_CHUNK_WINDOW
-                    for start in range(0, len(pcm), window):
-                        chunks = [(offset, pcm[offset:offset+384].hex())
-                                  for offset in range(start, min(start+window, len(pcm)), 384)]
+                    for start in range(0, len(audio), window):
+                        chunks = [(offset, audio[offset:offset+384].hex())
+                                  for offset in range(start, min(start+window, len(audio)), 384)]
                         await speech_command("speech_chunk", chunks=chunks)
                 else:
-                    for offset in range(0, len(pcm), 384):
-                        await speech_command("speech_chunk", offset=offset, data=pcm[offset:offset+384].hex())
-                await speech_command("speech_commit")
+                    for offset in range(0, len(audio), 384):
+                        await speech_command("speech_chunk", offset=offset, data=audio[offset:offset+384].hex())
+                reply = await speech_command(commit)
+                if duration_ms is None:
+                    duration_ms = reply.get("duration_ms") if isinstance(reply, dict) else None
+                    if type(duration_ms) is not int or not 0 < duration_ms <= SPEECH_MAX_MS:
+                        raise DeviceError("invalid_speech_duration")
                 async with asyncio.timeout(15):
                     while True:
                         result = await speech_command("speech_status")
                         status=result.get("speech_status")
-                        if status=="finished":return {"status":"finished","duration_ms":round(len(pcm)/32)}
+                        if status=="finished":return {"status":"finished","duration_ms":duration_ms}
                         if status not in ("queued","playing"):raise DeviceError("speech_"+str(status))
                         await asyncio.sleep(poll_interval)
             except BaseException:

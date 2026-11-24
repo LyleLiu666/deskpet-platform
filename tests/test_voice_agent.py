@@ -218,6 +218,36 @@ class ChatBackendTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured[0]['tools'][0]['function']['name'],'board_status')
         self.assertEqual(captured[0]['messages'][0]['content'],'设备状态')
 
+    async def test_first_phrase_never_streams_tool_capable_or_json_turns(self):
+        for tool_format, tools in (
+            ('native', [VoiceTool('device_restart', '重新启动', NoArgs, AsyncMock(), requires_confirmation=True)]),
+            ('json', []),
+        ):
+            with self.subTest(tool_format=tool_format):
+                def send(request):
+                    payload = json.loads(request.content)
+                    self.assertIs(payload['stream'], False)
+                    if tools:
+                        self.assertEqual(payload['tools'][0]['function']['name'], 'device_restart')
+                        message = {**call('device_restart'), 'content': '已经重新启动。'}
+                        finish = 'tool_calls'
+                    else:
+                        message = {'role': 'assistant', 'content': '{"reply":"你好。"}'}
+                        finish = 'stop'
+                    return httpx.Response(200, json={'choices': [{'finish_reason': finish, 'message': message}]})
+
+                backend = ChatBackend('https://example.test/v1', 'key', 'model', transport=httpx.MockTransport(send),
+                                      tool_format=tool_format, enable_thinking=False)
+                on_phrase = AsyncMock()
+                result = await VoiceAgent(backend, tools).turn('你好', on_first_phrase=on_phrase)
+                on_phrase.assert_not_awaited()
+                if tools:
+                    self.assertIsNone(result.text)
+                    self.assertEqual(result.confirmation.tool, 'device_restart')
+                    tools[0].invoke.assert_not_awaited()
+                else:
+                    self.assertEqual(result.text, '你好。')
+
     async def test_json_tool_mode_routes_receipt_as_data_and_unavailable_as_feedback(self):
         payloads = []
         outputs = iter(({'reply':'好的，叫它青柠。'}, {'tool':'board_status','arguments':{}},
