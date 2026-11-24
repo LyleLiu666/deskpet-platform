@@ -350,18 +350,38 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(store.get(request)["resolved"])
                 self.assertTrue(store.get(fresh)["shown"])
 
-    def test_legacy_inbox_keeps_one_audible_alert_when_several_arrive_together(self):
+    async def test_legacy_inbox_coalesces_only_after_a_confirmed_toast(self):
+        from unittest.mock import AsyncMock
+        with tempfile.TemporaryDirectory() as directory:
+            store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
+            completion = store.add_agent_event("codex", "s", "one", "completed", "One")
+            remaining = store.add_agent_event("claude_code", "s", "two", "response", "Two")
+            withdrawn = store.add_agent_event("codex", "s2", "three", "response", "Three")
+            store.summarize_legacy_backlog()
+            self.assertEqual(store.next_pending(legacy_batch=True)["id"], withdrawn)
+            store.resolve_response(withdrawn)
+            board = type("Board", (), {"channel": type("Channel", (), {"capabilities": {}})()})()
+            board.show_text = AsyncMock(return_value={"status": "expired"})
+            self.assertFalse(await notifications.deliver_next(board, store, legacy_batch=True))
+            self.assertFalse(store.get(completion)["shown"])
+            self.assertFalse(store.get(remaining)["shown"])
+            board.show_text.return_value = {"status": "shown"}
+            self.assertTrue(await notifications.deliver_next(board, store, legacy_batch=True))
+            self.assertIn("Claude Code", board.show_text.call_args.args[0])
+            self.assertEqual(store.unseen_count(for_device=True), 2)
+            self.assertIsNone(store.next_pending())
+
+    async def test_a_notice_arriving_during_send_stays_pending(self):
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
             store.add_agent_event("codex", "s", "one", "completed", "One")
-            response = store.add_agent_event("claude_code", "s", "two", "response", "Two")
-            store.add_agent_event("codex", "s2", "three", "completed", "Three")
-            store.summarize_legacy_backlog()
-            store.summarize_legacy_backlog()
-            self.assertEqual(store.next_pending()["id"], response)
-            self.assertEqual(store.unseen_count(for_device=True), 3)
-            store.mark_shown(response)
-            self.assertIsNone(store.next_pending())
+            class Board:
+                channel = type("Channel", (), {"capabilities": {}})()
+                async def show_text(self, text):
+                    store.add_agent_event("codex", "s2", "two", "response", "Two")
+                    return {"status": "shown"}
+            self.assertTrue(await notifications.deliver_next(Board(), store, legacy_batch=True))
+            self.assertEqual(store.next_pending()["title"], "Two")
 
     async def test_poll_summarizes_backlog_only_for_legacy_message_cache_boards(self):
         from unittest.mock import AsyncMock

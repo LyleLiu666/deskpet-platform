@@ -572,7 +572,7 @@ class BoardSession:
                           heartbeat.get("pet_page") == 0 and time.monotonic() >= self.next_notification_attempt):
                         self.next_notification_attempt = time.monotonic() + 4
                         try:
-                            await deliver_next(self.client, self.notifications)
+                            await deliver_next(self.client, self.notifications, legacy_batch=channel.capabilities.get("message_cache") == 1)
                         except (sqlite3.Error, ValueError):
                             self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
                 except FileNotFoundError as error:

@@ -206,6 +206,9 @@ class NotificationStore:
             db.execute("""CREATE TABLE IF NOT EXISTS notification_resolutions (
                 source TEXT NOT NULL, session TEXT NOT NULL, event_id TEXT NOT NULL, resolved REAL NOT NULL,
                 PRIMARY KEY(source,session,event_id))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS deferred_codex_completions (
+                session TEXT NOT NULL, turn TEXT NOT NULL, title TEXT NOT NULL,
+                workspace TEXT, workspace_context TEXT, PRIMARY KEY(session,turn))""")
             db.execute("""CREATE TABLE IF NOT EXISTS notification_attention (
                 id INTEGER PRIMARY KEY CHECK(id=1), through_id INTEGER NOT NULL)""")
             projection_schema = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='notification_response_projections'"
@@ -281,7 +284,10 @@ class NotificationStore:
                 AND parent_turn=? AND category='response' AND resolved IS NULL
                 AND NOT ({SUPERSEDED_QUESTION}) LIMIT 1""", (session, turn)).fetchone()
             if pending:
+                db.execute("INSERT OR IGNORE INTO deferred_codex_completions VALUES (?,?,?,?,?)",
+                           (session, turn, title, workspace, json.dumps(context) if context else None))
                 return None
+            db.execute("DELETE FROM deferred_codex_completions WHERE session=? AND turn=?", (session, turn))
             return self._insert(db, "codex", session, turn, "completed", title, None, workspace=workspace, context=context)
 
     def add_agent_event(self, source, session, event_id, category, title, *, parent_turn=None, response_group=None,
@@ -620,24 +626,34 @@ class NotificationStore:
         eligible = f"seen IS NULL AND (category='completed' OR ({OPEN_QUESTION}))"
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            fresh = db.execute(f"""SELECT id FROM notifications AS n
-                WHERE {eligible} AND shown IS NULL AND created>=?
-                ORDER BY category='response' DESC,id DESC LIMIT 1""", (cutoff,)).fetchone()
-            # A burst still gets one toast and tone. Only the presentation is
-            # coalesced, leaving every unread item and unanswered request in the inbox.
             db.execute(f"""UPDATE notifications AS n SET shown=COALESCE(shown,?), action_pending=0
                 WHERE {eligible} AND (shown IS NULL OR action_pending=1)
-                AND (created<? OR (shown IS NULL AND id!=?))""", (now, cutoff, fresh[0] if fresh else 0))
+                AND created<?""", (now, cutoff))
 
-    def next_pending(self, *, text_only=False):
+    def next_pending(self, *, text_only=False, legacy_batch=False):
         # Shown legacy records have no action flag. Only an explicit retry keeps a shown record pending.
+        batch = None
+        eligible = f"seen IS NULL AND (category='completed' OR ({OPEN_QUESTION}))"
         with closing(self._connect()) as db:
-            row = db.execute(f"""SELECT id,title,shown,action_pending,source,category FROM notifications AS n
-                WHERE seen IS NULL AND (category='completed' OR ({OPEN_QUESTION}))
-                  AND (shown IS NULL OR (? AND action_pending=1))
-                ORDER BY id LIMIT 1""", (not text_only,)).fetchone()
-        return {"id": row[0], "title": row[1], "shown": row[2] is not None, "action_pending": row[3],
-                "source": row[4], "category": row[5]} if row else None
+            row = None
+            if legacy_batch:
+                cutoff = time.time() - LEGACY_TOAST_MAX_AGE_SECONDS
+                row = db.execute(f"""SELECT id,title,shown,action_pending,source,category,MAX(id) OVER ()
+                    FROM notifications AS n WHERE {eligible} AND shown IS NULL AND created>=?
+                    ORDER BY category='response' DESC,id DESC LIMIT 1""", (cutoff,)).fetchone()
+                if row:
+                    batch = (row[6], cutoff)
+            if row is None:
+                row = db.execute(f"""SELECT id,title,shown,action_pending,source,category FROM notifications AS n
+                    WHERE {eligible} AND (shown IS NULL OR (? AND action_pending=1))
+                    ORDER BY id LIMIT 1""", (not text_only,)).fetchone()
+        if row is None:
+            return None
+        item = {"id": row[0], "title": row[1], "shown": row[2] is not None, "action_pending": row[3],
+                "source": row[4], "category": row[5]}
+        if batch:
+            item["batch"] = batch
+        return item
 
     def pending_attention(self):
         with closing(self._connect()) as db:
@@ -661,11 +677,16 @@ class NotificationStore:
                 ORDER BY id DESC LIMIT 1""").fetchone()
         return {"id": row[0], "title": row[1], "source": row[2], "category": row[3]} if row else None
 
-    def mark_shown(self, identity):
+    def mark_shown(self, identity, *, batch=None):
         with closing(self._connect()) as db, db:
             now = time.time()
             db.execute("UPDATE notifications SET shown=COALESCE(shown,?), displayed=COALESCE(displayed,?) WHERE id=?",
                        (now, now, identity))
+            if batch:
+                through, cutoff = batch
+                db.execute(f"""UPDATE notifications AS n SET shown=?, action_pending=0
+                    WHERE id<=? AND created>=? AND shown IS NULL AND seen IS NULL
+                    AND (category='completed' OR ({OPEN_QUESTION}))""", (now, through, cutoff))
 
     def mark_seen(self, identity):
         with closing(self._connect()) as db, db:
@@ -687,16 +708,38 @@ class NotificationStore:
             return db.execute("""SELECT session,turn,parent_turn FROM notifications
                 WHERE source='codex' AND category='response' AND resolved IS NULL AND dismissed IS NULL""").fetchall()
 
-    def resolve_agent_events(self, source, session, event_ids, *, remember_missing=True):
+    def resolve_agent_events(self, source, session, event_ids, *, remember_missing=True, abandoned=False):
         """Close a tool's settled requests in a single inbox update."""
         with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
             now = time.time()
             events = [(source, session, event_id, now) for event_id in event_ids]
             if remember_missing:
                 db.executemany("INSERT OR IGNORE INTO notification_resolutions VALUES (?,?,?,?)", events)
-            return db.executemany("""UPDATE notifications SET resolved=? WHERE source=? AND session=? AND turn=?
+            changed = db.executemany("""UPDATE notifications SET resolved=? WHERE source=? AND session=? AND turn=?
                 AND category='response' AND resolved IS NULL""",
                                   ((now, source, session, event_id) for source, session, event_id, now in events)).rowcount
+            if source == "codex" and changed:
+                self._release_codex_completions(db, session, events, abandoned)
+            return changed
+
+    def _release_codex_completions(self, db, session, events, abandoned):
+        for _, _, event_id, _ in events:
+            deferred = db.execute(f"""SELECT d.turn,d.title,d.workspace,d.workspace_context
+                FROM deferred_codex_completions AS d JOIN notifications AS response
+                ON response.session=d.session AND response.parent_turn=d.turn
+                WHERE d.session=? AND response.source='codex' AND response.turn=?
+                AND (? OR NOT EXISTS (SELECT 1 FROM notifications AS n
+                    WHERE n.source='codex' AND n.session=d.session AND n.parent_turn=d.turn
+                    AND n.category='response' AND n.resolved IS NULL AND NOT ({SUPERSEDED_QUESTION})))""",
+                                  (session, event_id, abandoned)).fetchone()
+            if deferred is None:
+                continue
+            turn, title, workspace, context = deferred
+            if not abandoned:
+                self._insert(db, "codex", session, turn, "completed", title, None, workspace=workspace,
+                             context=json.loads(context) if context else None)
+            db.execute("DELETE FROM deferred_codex_completions WHERE session=? AND turn=?", (session, turn))
 
     def resolve_session_requests(self, source, session):
         """Settle current requests without affecting another turn in this session."""
@@ -731,8 +774,8 @@ class NotificationStore:
                 LIMIT 1""", (include_unconfirmed,)).fetchone() is not None
 
 
-async def deliver_next(client, store):
-    item = store.next_pending()
+async def deliver_next(client, store, *, legacy_batch=False):
+    item = store.next_pending(legacy_batch=legacy_batch)
     if item is None:
         return False
     pending = False
@@ -751,7 +794,7 @@ async def deliver_next(client, store):
     elif item["category"] == "response" and item["action_pending"] is None:
         store.set_action_pending(item["id"], False)
     if item["shown"]:
-        item = store.next_pending(text_only=True)
+        item = store.next_pending(text_only=True, legacy_batch=legacy_batch)
         if item is None:
             return not pending
         # Keep an untried completion action eligible; a response request has
@@ -767,7 +810,7 @@ async def deliver_next(client, store):
         return False
     if receipt.get("status") not in ("shown", "finished"):
         return False
-    store.mark_shown(item["id"])
+    store.mark_shown(item["id"], batch=item.get("batch"))
     return not pending
 
 

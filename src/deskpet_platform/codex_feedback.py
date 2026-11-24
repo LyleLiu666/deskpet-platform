@@ -126,65 +126,71 @@ class QuestionReconciler:
                 continue
             filename, archived = threads[session]
             if archived == 1:
-                settled = questions
+                settled, abandoned = set(), questions
             else:
-                settled, progress = self._read(session, filename, questions)
+                settled, abandoned, progress = self._read(session, filename, questions)
                 if progress is not None:
                     checked[session] = progress
+            if abandoned:
+                updated += self.store.resolve_agent_events("codex", session, abandoned,
+                                                           remember_missing=False, abandoned=True)
             if settled:
-                updated += self.store.resolve_agent_events("codex", session, settled, remember_missing=False)
+                updated += self.store.resolve_agent_events("codex", session, settled.difference(abandoned),
+                                                           remember_missing=False)
         self.checked = checked
         return updated
 
     def _read(self, session, filename, questions):
         if not isinstance(filename, str) or not filename:
-            return set(), None
+            return set(), set(), None
         try:
             path = Path(filename).resolve()
             if path.suffix != ".jsonl" or not path.is_relative_to((self.home / "sessions").resolve()):
-                return set(), None
+                return set(), set(), None
             stat = path.stat()
             if not path.is_file():
-                return set(), None
+                return set(), set(), None
             key = (path, stat.st_dev, stat.st_ino)
             targets = frozenset(questions.items())
             previous, offset, known = self.checked.get(session, (None, 0, frozenset()))
             if key != previous or offset > stat.st_size or not targets.issubset(known):
                 offset = 0
-            settled = set()
+            settled, abandoned = set(), set()
             with path.open("rb") as stream:
                 stream.seek(offset)
                 for line in stream:
                     if not line.endswith(b"\n"):
                         break
                     offset += len(line)
-                    settled.update(self._outcomes(line, questions))
+                    answered, interrupted = self._outcomes(line, questions)
+                    settled.update(answered)
+                    abandoned.update(interrupted)
         except (OSError, ValueError, RuntimeError):
-            return set(), None
-        return settled, (key, offset, targets)
+            return set(), set(), None
+        return settled, abandoned, (key, offset, targets)
 
     @staticmethod
     def _outcomes(line, questions):
         try:
             record = json.loads(line)
         except (ValueError, UnicodeError):
-            return ()
+            return (), ()
         payload = record.get("payload") if isinstance(record, dict) else None
         if not isinstance(payload, dict):
-            return ()
+            return (), ()
         kind = payload.get("type")
         if record.get("type") == "event_msg":
             if kind == "turn_aborted" and isinstance(payload.get("turn_id"), str):
-                return [identity for identity, turn in questions.items() if turn == payload["turn_id"]]
+                return (), [identity for identity, turn in questions.items() if turn == payload["turn_id"]]
             if kind == "user_message":
-                return [identity for identity in answers(payload.get("message")) if identity in questions]
+                return [identity for identity in answers(payload.get("message")) if identity in questions], ()
         if record.get("type") == "response_item" and kind == "function_call_output" and _closed_async_call(payload.get("output")):
             try:
                 return [identity for index in range(3)
-                        if (identity := question_id(payload.get("call_id"), index)) in questions]
+                        if (identity := question_id(payload.get("call_id"), index)) in questions], ()
             except ValueError:
-                return ()
-        return ()
+                return (), ()
+        return (), ()
 
 
 def deliver(store, event):
@@ -195,7 +201,7 @@ def deliver(store, event):
         raise ValueError("invalid_feedback_session")
     kind = event.get("hook_event_name")
     if kind == "UserPromptSubmit":
-        return sum(store.resolve_agent_event("codex", session, identity) for identity in answers(event.get("prompt")))
+        return store.resolve_agent_events("codex", session, answers(event.get("prompt")))
     if kind not in ("PreToolUse", "PostToolUse") or event.get("tool_name") not in (TOOL, CLI_TOOL):
         return 0
     details = event.get("tool_input")

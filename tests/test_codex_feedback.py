@@ -65,8 +65,20 @@ class CodexFeedbackTests(unittest.TestCase):
         stop = {"hook_event_name": "Stop", "session_id": "session-1", "turn_id": "turn-1"}
         self.assertIsNone(self.store.add_codex_event(stop))
         self.assertIsNotNone(self.store.add_codex_event({**stop, "turn_id": "other-turn"}))
+        codex_feedback.deliver(self.store, self.answer([0]))
+        self.assertEqual(self.store.home_summary()["completed_count"], 1)
         codex_feedback.deliver(self.store, self.answer([0, 1]))
+        self.assertEqual(len([item for item in self.store.list() if item["category"] == "completed"]), 2)
         self.assertIsNotNone(self.store.add_codex_event(stop))
+
+    def test_failed_question_releases_a_stop_received_earlier(self):
+        codex_feedback.deliver(self.store, self.event)
+        stop = {"hook_event_name": "Stop", "session_id": "session-1", "turn_id": "turn-1"}
+        self.assertIsNone(self.store.add_codex_event(stop))
+        codex_feedback.deliver(self.store, {**self.event, "hook_event_name": "PostToolUse",
+                                          "tool_response": "failed to parse function arguments: duplicate field"})
+        self.assertEqual(self.store.home_summary()["response_count"], 0)
+        self.assertEqual(self.store.home_summary()["completed_count"], 1)
 
     def test_unrelated_content_and_sessions_cannot_resolve_questions(self):
         codex_feedback.deliver(self.store, self.event)
@@ -95,6 +107,10 @@ class CodexFeedbackTests(unittest.TestCase):
         for call, turn in (("failed", "one"), ("call_123", "two"), ("aborted", "three"), ("still-live", "four")):
             codex_feedback.deliver(self.store, {**self.event, "session_id": live, "tool_use_id": call, "turn_id": turn})
         codex_feedback.deliver(self.store, {**self.event, "session_id": archived})
+        for session, turn in ((live, "one"), (live, "three"), (archived, "turn-1")):
+            self.assertIsNone(self.store.add_codex_event({
+                "hook_event_name": "Stop", "session_id": session, "turn_id": turn,
+            }))
         events = [
             ("response_item", {"type": "function_call_output", "call_id": "failed",
                                "output": "failed to parse function arguments: duplicate field"}),
@@ -107,6 +123,7 @@ class CodexFeedbackTests(unittest.TestCase):
         reconcile = codex_feedback.QuestionReconciler(self.store, home)
         self.assertEqual(reconcile.run(), 7)
         self.assertEqual(self.store.home_summary()["response_count"], 3)
+        self.assertEqual(len([item for item in self.store.list() if item["category"] == "completed"]), 1)
         self.assertEqual(reconcile.run(), 0)
         with rollout.open("a") as stream:
             stream.write(json.dumps({"type": "event_msg", "payload": {
