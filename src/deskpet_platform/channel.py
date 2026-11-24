@@ -1,4 +1,4 @@
-"""One-in-flight device channel. A timeout invalidates the epoch, never retries a play."""
+"""Serialized device exchanges. A timeout invalidates the epoch instead of replaying a command."""
 import asyncio
 import json
 import time
@@ -8,6 +8,8 @@ from collections import deque
 # Wi-Fi authenticates plaintext records up to this size; USB's receive limit is
 # larger. Requests retain their separate 1024-byte bound.
 MAX_RESPONSE_BYTES = 1152
+# Leave room for unsolicited events in the Wi-Fi reader queue.
+SPEECH_CHUNK_WINDOW = 16
 
 
 class DeviceError(RuntimeError):
@@ -130,18 +132,54 @@ class Channel:
                 self.online = False
                 raise
 
+    def _request_line(self, seq, kind, fields):
+        packet = dict(epoch=self.epoch, seq=seq, type=kind, **fields)
+        line = ('P1,' + json.dumps(packet, separators=(',', ':'), ensure_ascii=True) + '\n').encode()
+        if len(line) > 1024:
+            raise DeviceError('line_too_long')
+        return line
+
+    async def send_speech_chunks(self, chunks):
+        """Pipeline one bounded group of ordered speech chunks on the paired link."""
+        if not 1 <= len(chunks) <= SPEECH_CHUNK_WINDOW:
+            raise ValueError('invalid speech chunk group')
+        async with self.lock:
+            if not self.online:
+                raise DeviceError('handshake_required')
+            first_seq = self.seq + 1
+            lines = [
+                self._request_line(seq, 'speech_chunk', {'offset': offset, 'data': data})
+                for seq, (offset, data) in enumerate(chunks, start=first_seq)
+            ]
+            self.seq += len(lines)
+            deadline = time.monotonic() + self.timeout
+            ignored = deque(maxlen=8)
+            rejection = None
+            expected = first_seq
+            try:
+                await asyncio.wait_for(self.transport.write_records(lines), self.timeout)
+                for expected in range(first_seq, self.seq + 1):
+                    response = await self._read_response(expected, deadline, ignored)
+                    if response['ok'] is False and rejection is None:
+                        rejection = CommandRejected(str(response.get('error', 'unknown')), response.get('stage'))
+            except asyncio.TimeoutError:
+                self.online = False
+                raise AckTimeout(f'ack_timeout: speech_chunk; seq={expected}; ignored={list(ignored)}') from None
+            except (DeviceError, OSError, asyncio.CancelledError):
+                self.online = False
+                raise
+            if rejection is not None:
+                raise rejection
+
     async def _exchange(self, kind, fields, clock_epoch=None, timeout=None):
         if {'epoch','seq','type'} & fields.keys():
             raise DeviceError('invalid_fields: reserved envelope')
         self.seq+=1
-        line=('P1,'+json.dumps(dict(epoch=self.epoch,seq=self.seq,type=kind,**fields),separators=(',',':'),ensure_ascii=True)+'\n').encode()
-        if len(line)>1024:
-            raise DeviceError('line_too_long')
-        batch=line
+        batch = self._request_line(self.seq, kind, fields)
         if clock_epoch is not None:
             if type(clock_epoch) is not int or not 1700000000<clock_epoch<2147483647:
                 raise DeviceError('invalid_clock')
-            batch=f'T1,{clock_epoch}\n'.encode()+line
+            batch=f'T1,{clock_epoch}\n'.encode()+batch
         if len(batch)>1024:
             raise DeviceError('batch_too_long')
         ignored=deque(maxlen=8)
@@ -149,33 +187,10 @@ class Channel:
             timeout=self.timeout if timeout is None else timeout
             deadline=time.monotonic()+timeout
             await asyncio.wait_for(self.transport.write(batch),timeout)
-            while True:
-                remaining=deadline-time.monotonic()
-                if remaining<=0:
-                    raise asyncio.TimeoutError
-                raw=await asyncio.wait_for(self.transport.readline(),remaining)
-                if self.capture_event(raw):ignored.append('touch');continue
-                if not raw.startswith(b'P1,'):
-                    ignored.append('other')
-                    continue
-                if len(raw)>MAX_RESPONSE_BYTES or not raw.endswith(b'\n'):
-                    raise DeviceError('invalid_response')
-                try:
-                    response=json.loads(raw[3:])
-                except (ValueError,UnicodeError):
-                    raise DeviceError('invalid_response') from None
-                if not isinstance(response,dict) or type(response.get('boot')) is not int:
-                    raise DeviceError('invalid_response')
-                if response.get('epoch')!=self.epoch or response.get('seq')!=self.seq:
-                    ignored.append('stale')
-                    continue
-                if self.boot is not None and response.get('boot')!=self.boot:
-                    raise DeviceError('device_restarted')
-                if response.get('ok') is False:
-                    raise CommandRejected(str(response.get('error','unknown')), response.get('stage'))
-                if response.get('ok') is not True:
-                    raise DeviceError('invalid_response')
-                return response
+            response = await self._read_response(self.seq, deadline, ignored)
+            if response['ok'] is False:
+                raise CommandRejected(str(response.get('error', 'unknown')), response.get('stage'))
+            return response
         except CommandRejected:
             raise
         except asyncio.TimeoutError:
@@ -184,3 +199,30 @@ class Channel:
         except (DeviceError,OSError,asyncio.CancelledError):
             self.online=False
             raise
+
+    async def _read_response(self, expected, deadline, ignored):
+        while True:
+            remaining=deadline-time.monotonic()
+            if remaining<=0:
+                raise asyncio.TimeoutError
+            raw=await asyncio.wait_for(self.transport.readline(),remaining)
+            if self.capture_event(raw):ignored.append('touch');continue
+            if not raw.startswith(b'P1,'):
+                ignored.append('other')
+                continue
+            if len(raw)>MAX_RESPONSE_BYTES or not raw.endswith(b'\n'):
+                raise DeviceError('invalid_response')
+            try:
+                response=json.loads(raw[3:])
+            except (ValueError,UnicodeError):
+                raise DeviceError('invalid_response') from None
+            if not isinstance(response,dict) or type(response.get('boot')) is not int:
+                raise DeviceError('invalid_response')
+            if response.get('epoch')!=self.epoch or response.get('seq')!=expected:
+                ignored.append('stale')
+                continue
+            if self.boot is not None and response.get('boot')!=self.boot:
+                raise DeviceError('device_restarted')
+            if type(response.get('ok')) is not bool:
+                raise DeviceError('invalid_response')
+            return response

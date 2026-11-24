@@ -199,10 +199,15 @@ class WifiLink:
                     while not self.queue.empty():self.queue.get_nowait()
                 self.queue.put_nowait(OSError('wifi_disconnected: '+str(error)))
 
-    async def write(self,data):
-        if self.closed or not self.writer:raise OSError('wifi_disconnected')
+    async def write(self, data):
+        await self.write_records((data,))
+
+    async def write_records(self, records):
         async with self.write_lock:
-            self.writer.write(self.codec.encode(data));await self.writer.drain()
+            if self.closed or self.writer is None:
+                raise OSError('wifi_disconnected')
+            self.writer.write(b''.join(self.codec.encode(record) for record in records))
+            await self.writer.drain()
 
     async def readline(self):
         value=await self.queue.get()

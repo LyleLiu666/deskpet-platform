@@ -27,7 +27,7 @@ from .agent_config import (
 )
 from .agent_tool_callback import AGENT_CALLBACK_TOOLS, valid_callback_id, valid_callback_result
 from .card_upload import MUSIC_DIRECTORIES, upload_file, upload_usb, validate_music_path, validate_path
-from .channel import Channel, CommandRejected, DeviceError, TextNotVisible
+from .channel import SPEECH_CHUNK_WINDOW, Channel, CommandRejected, DeviceError, TextNotVisible
 from .image_display import prepare_image
 from .pairing import DeviceConfig, valid_device_uuid
 from .quota_projection import SOURCES
@@ -600,13 +600,15 @@ class Client:
                          self.channel.capabilities.get("capture_speech_cancel_ticket") == 1)
         started = False
 
-        async def speech_command(kind, **fields):
+        async def speech_command(kind, *, chunks=None, **fields):
             nonlocal started
             async with self._operation:
+                command = (self.channel.send(kind, **fields) if chunks is None
+                           else self.channel.send_speech_chunks(chunks))
                 if not scoped_cancel:
-                    result = await self.channel.send(kind, **fields)
+                    result = await command
                 else:
-                    request = asyncio.create_task(self.channel.send(kind, **fields))
+                    request = asyncio.create_task(command)
                     try:
                         result = await asyncio.shield(request)
                     except asyncio.CancelledError:
@@ -630,8 +632,15 @@ class Client:
                 if read_ticket is not None:fields["read_ticket"]=read_ticket
                 if capture_ticket is not None:fields["capture_ticket"]=capture_ticket
                 await speech_command("speech_begin", **fields)
-                for offset in range(0,len(pcm),384):
-                    await speech_command("speech_chunk", offset=offset, data=pcm[offset:offset+384].hex())
+                if getattr(getattr(self.channel, "transport", None), "wireless", False) is True:
+                    window = 384 * SPEECH_CHUNK_WINDOW
+                    for start in range(0, len(pcm), window):
+                        chunks = [(offset, pcm[offset:offset+384].hex())
+                                  for offset in range(start, min(start+window, len(pcm)), 384)]
+                        await speech_command("speech_chunk", chunks=chunks)
+                else:
+                    for offset in range(0, len(pcm), 384):
+                        await speech_command("speech_chunk", offset=offset, data=pcm[offset:offset+384].hex())
                 await speech_command("speech_commit")
                 async with asyncio.timeout(15):
                     while True:

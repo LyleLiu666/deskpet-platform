@@ -61,7 +61,7 @@ from .token_metrics import TokenMetrics
 from .usb_setup import probe_usb
 from .usb_link import UsbLink, UsbPort, find_usb_devices, read_usb_identity, reset_native_usb
 from .weather import fetch_relay_weather, fetch_weather
-from .speech import SpeechServiceError, SpeechTooLong, split_speech, synthesize_speech, validate_text
+from .speech import SpeechServiceError, SpeechTooLong, local_speech_voice, split_speech, synthesize_speech, validate_text
 from .transcription import (
     DashScopeTranscription,
     LocalTranscription,
@@ -720,21 +720,48 @@ class BoardSession:
                 if client.channel.capabilities.get("speech_pcm")!=1:return {"status":"unsupported"}
                 if read_ticket is not None and client.channel.capabilities.get("read_speech_ticket")!=1:
                     return {"status":"read_cancel_not_supported"}
-            parts=split_speech(text);duration=0
-            while parts:
-                part=parts.pop(0)
-                if not part.strip():continue
-                async with self.lock:
-                    if self.client is not client:return {"status":"not_connected","connection":self.snapshot}
-                try:pcm=await synthesize_speech(part)
-                except SpeechTooLong:
-                    if len(part)<2:raise
-                    middle=len(part)//2;parts[0:0]=[part[:middle],part[middle:]];continue
-                async with self.lock:
-                    if self.client is not client:return {"status":"not_connected","connection":self.snapshot}
-                    result=await client.play_speech_pcm(pcm,**speech_request)
-                duration+=result['duration_ms']
-            return {"status":"finished","duration_ms":duration}
+            parts = split_speech(text)
+            duration = 0
+            voice = local_speech_voice(self.path)
+            pending = None
+
+            async def next_clip():
+                while parts:
+                    part = parts.pop(0)
+                    if not part.strip():
+                        continue
+                    try:
+                        if voice:
+                            return await synthesize_speech(part, voice=voice)
+                        return await synthesize_speech(part)
+                    except SpeechTooLong:
+                        if len(part) < 2:
+                            raise
+                        middle = len(part) // 2
+                        parts[0:0] = [part[:middle], part[middle:]]
+                return None
+
+            try:
+                while parts or pending is not None:
+                    if self.client is not client:
+                        return {"status": "not_connected", "connection": self.snapshot}
+                    pcm = await pending if pending is not None else await next_clip()
+                    pending = None
+                    if self.client is not client:
+                        return {"status": "not_connected", "connection": self.snapshot}
+                    if pcm is None:
+                        break
+                    if voice and parts:
+                        pending = asyncio.create_task(next_clip())
+                    # The client binds playback to this link and serializes each device command.
+                    # Keep the session free for status updates between playback commands.
+                    result = await client.play_speech_pcm(pcm, **speech_request)
+                    duration += result['duration_ms']
+            finally:
+                if pending is not None:
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+            return {"status": "finished", "duration_ms": duration}
 
     async def read_notification(self,identity, *, read_ticket=None):
         item=await asyncio.to_thread(self.notifications.get,identity)
@@ -3162,12 +3189,12 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
 
     @server.tool()
     async def desk_speak(text: str, device_id: str | None = None) -> dict[str, Any]:
-        """主动朗读不超过 80 字的单行文字。文字会发送至微软 Edge 在线语音服务，音频不保存在设备卡上。"""
+        """主动朗读不超过 80 字的单行文字。由电脑合成。默认使用微软 Edge 在线语音服务，也可配置 macOS 本地合成。"""
         return await sessions.resolve(device_id).speak(text)
 
     @server.tool()
     async def desk_read_notification(identity: int, device_id: str | None = None) -> dict[str, Any]:
-        """主动朗读一条提醒的标题；标题会发送至微软 Edge 在线语音服务，不改变已读状态。"""
+        """主动朗读一条提醒的标题；由电脑使用已配置的语音服务合成，不改变已读状态。"""
         return await sessions.resolve(device_id).read_notification(identity)
 
     @server.tool()

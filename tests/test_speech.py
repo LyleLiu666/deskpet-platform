@@ -49,6 +49,66 @@ class Speech(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.code, 'service_unreachable')
         self.assertEqual(save.await_count, 2)
 
+    async def test_configured_macos_voice_synthesizes_without_edge(self):
+        pcm = b'\x01\x00\x02\x00'
+
+        async def start(program, *args, **options):
+            self.assertEqual(program, '/usr/bin/say')
+            self.assertEqual(args[:3], ('-v', 'Tingting', '-o'))
+            self.assertEqual(args[-2:], ('-f', '-'))
+            self.assertEqual(options['stdin'], asyncio.subprocess.PIPE)
+            with wave.open(args[3], 'wb') as target:
+                target.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+                target.writeframes(pcm)
+            return SimpleNamespace(communicate=communicate, returncode=0)
+
+        communicate = AsyncMock()
+        with patch.dict('os.environ', DESKPET_LOCAL_TTS_VOICE='Tingting'), \
+                patch('edge_tts.Communicate') as cloud, \
+                patch('deskpet_platform.speech.asyncio.create_subprocess_exec', side_effect=start):
+            self.assertEqual(await synthesize_speech('测试'), pcm)
+        cloud.assert_not_called()
+        communicate.assert_awaited_once_with('测试'.encode())
+
+    async def test_local_prefetch_is_cancelled_with_playback_and_leaves_session_available(self):
+        with TemporaryDirectory() as directory:
+            session = BoardSession(Path(directory) / 'device.json', no_token_probe=True)
+            preparing = asyncio.Event()
+            cancelled = asyncio.Event()
+
+            async def synth(text, *, voice):
+                self.assertEqual(voice, 'Tingting')
+                if text == '第一句。':
+                    return b'first'
+                preparing.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+
+            async def play(pcm):
+                self.assertEqual(pcm, b'first')
+                async with session.lock:
+                    pass
+                await preparing.wait()
+                await asyncio.Event().wait()
+
+            playback = AsyncMock(side_effect=play)
+            session.client = SimpleNamespace(
+                channel=SimpleNamespace(capabilities={'speech_pcm': 1}), play_speech_pcm=playback)
+            (Path(directory) / 'speech-voice').write_text('Tingting\n', encoding='utf-8')
+            with patch.dict('os.environ', clear=True), patch('deskpet_platform.speech.sys.platform', 'darwin'), \
+                    patch('deskpet_platform.mcp_server.synthesize_speech', side_effect=synth):
+                task = asyncio.create_task(session.speak('第一句。第二句。'))
+                try:
+                    await asyncio.wait_for(preparing.wait(), 1)
+                finally:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+            self.assertTrue(cancelled.is_set())
+            playback.assert_awaited_once_with(b'first')
+
     async def test_no_network_when_board_unavailable(self):
         with TemporaryDirectory() as directory:
             session=BoardSession(Path(directory)/'device.json',no_token_probe=True)

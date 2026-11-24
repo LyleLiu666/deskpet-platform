@@ -4,7 +4,7 @@ import unittest
 import zlib
 from unittest.mock import AsyncMock
 from deskpet_platform.client import Client
-from deskpet_platform.channel import Channel, DeviceError
+from deskpet_platform.channel import SPEECH_CHUNK_WINDOW, Channel, CommandRejected, DeviceError
 
 class SpeechPCM(unittest.IsolatedAsyncioTestCase):
     def client(self,send):
@@ -25,6 +25,58 @@ class SpeechPCM(unittest.IsolatedAsyncioTestCase):
         chunks=[item for item in send.await_args_list if item.args[0]=='speech_chunk']
         self.assertEqual([item.kwargs['offset'] for item in chunks],[0,384])
         self.assertEqual(bytes.fromhex(''.join(item.kwargs['data'] for item in chunks)),audio)
+
+    async def test_wifi_upload_uses_bounded_windows_and_drains_rejected_chunks(self):
+        written = []
+        replies = asyncio.Queue()
+        windows = []
+        reject_offset = None
+
+        class Transport:
+            wireless = True
+
+            async def write(self, line):
+                request = json.loads(line[3:])
+                written.append(request)
+                reject = (request['type'] == 'speech_chunk' and request['offset'] == reject_offset)
+                reply = dict(boot=1, epoch=request['epoch'], seq=request['seq'], ok=not reject)
+                if reject:
+                    reply['error'] = 'invalid_speech_chunk'
+                if request['type'] == 'speech_status':
+                    reply['speech_status'] = 'finished'
+                replies.put_nowait(('P1,' + json.dumps(reply) + '\n').encode())
+
+            async def write_records(self, lines):
+                windows.append(len(lines))
+                for line in lines:
+                    await self.write(line)
+
+            async def readline(self):
+                return replies.get_nowait()
+
+        client = self.client(AsyncMock())
+        client.channel = Channel(Transport(), 'aa:bb:cc:dd:ee:ff')
+        client.channel.online = True
+        client.channel.boot = 1
+        client.channel.capabilities.update(speech_pcm=1, capture_speech_ticket=1, capture_speech_cancel_ticket=1)
+        pcm = bytes(range(256)) * 25
+
+        self.assertEqual((await client.play_speech_pcm(pcm, capture_ticket=7))['status'], 'finished')
+        self.assertEqual(windows, [SPEECH_CHUNK_WINDOW, 1])
+        chunks = [request for request in written if request['type'] == 'speech_chunk']
+        self.assertEqual([chunk['offset'] for chunk in chunks], list(range(0, len(pcm), 384)))
+        self.assertEqual(b''.join(bytes.fromhex(chunk['data']) for chunk in chunks), pcm)
+
+        written.clear()
+        windows.clear()
+        reject_offset = 384
+        with self.assertRaisesRegex(CommandRejected, 'invalid_speech_chunk'):
+            await client.play_speech_pcm(pcm, capture_ticket=8)
+        self.assertEqual(windows, [SPEECH_CHUNK_WINDOW])
+        self.assertEqual(written[-1]['type'], 'speech_cancel')
+        self.assertEqual(written[-1]['ticket'], 8)
+        self.assertTrue(replies.empty())
+        self.assertTrue((await client.channel.send('heartbeat'))['ok'])
 
     async def test_invalid_and_failed_upload_cancel(self):
         send=AsyncMock(side_effect=[{'ok':True},DeviceError('broken'),{'ok':True}]);client=self.client(send)
