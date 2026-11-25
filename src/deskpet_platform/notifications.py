@@ -803,9 +803,9 @@ async def deliver_next(client, store, *, legacy_batch=False):
             store.set_action_pending(item["id"], item["category"] == "completed")
     try:
         try:
-            receipt = await client.show_text(notification_text(item))
+            receipt = await client.show_text(notification_text(item), category=item["category"])
         except ValueError:
-            receipt = await client.show_text(notification_text(item, detail=False))
+            receipt = await client.show_text(notification_text(item, detail=False), category=item["category"])
     except TextNotVisible:
         return False
     if receipt.get("status") not in ("shown", "finished"):

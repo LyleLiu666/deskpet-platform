@@ -1314,7 +1314,7 @@ class Client:
                                             source=record["source"], category=record["category"])
             await self.channel.send("notice_cache_commit")
 
-    async def show_text(self, text: str):
+    async def show_text(self, text: str, *, category=None):
         """Draw a short test message, returning the actual board receipt."""
         bitmap = _bitmap(text)
         if self.channel.capabilities.get("text_present") != 1:
@@ -1330,6 +1330,7 @@ class Client:
                 "text_begin", generation=generation, view_token=state["view_token"],
                 region="toast", bytes=len(bitmap), crc32=zlib.crc32(bitmap),
                 display_ms=4000, ttl_ms=3000,
+                **({"category": category} if category and state.get("alert_categories") == 1 else {}),
             )
             if answer.get("text_status") != "receiving":
                 if answer.get("text_reason") == "view_changed":

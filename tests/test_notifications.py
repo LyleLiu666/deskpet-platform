@@ -329,7 +329,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.texts = []
 
-            async def show_text(self, text):
+            async def show_text(self, text, *, category=None):
                 self.texts.append(text)
                 return {"status": "shown"}
 
@@ -368,6 +368,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             board.show_text.return_value = {"status": "shown"}
             self.assertTrue(await notifications.deliver_next(board, store, legacy_batch=True))
             self.assertIn("Claude Code", board.show_text.call_args.args[0])
+            self.assertEqual(board.show_text.call_args.kwargs, {"category": "response"})
             self.assertEqual(store.unseen_count(for_device=True), 2)
             self.assertIsNone(store.next_pending())
 
@@ -377,7 +378,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             store.add_agent_event("codex", "s", "one", "completed", "One")
             class Board:
                 channel = type("Channel", (), {"capabilities": {}})()
-                async def show_text(self, text):
+                async def show_text(self, text, *, category=None):
                     store.add_agent_event("codex", "s2", "two", "response", "Two")
                     return {"status": "shown"}
             self.assertTrue(await notifications.deliver_next(Board(), store, legacy_batch=True))
@@ -418,7 +419,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             class Channel:
                 capabilities = {}
             channel = Channel()
-            async def show_text(self, _text):
+            async def show_text(self, _text, *, category=None):
                 raise TextNotVisible('hidden')
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / 'notifications.sqlite3')
@@ -435,7 +436,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             text = None
             async def status(self):
                 raise AssertionError("a response request is not a completed action")
-            async def show_text(self, text):
+            async def show_text(self, text, *, category=None):
                 self.text = text
                 return {"status": "shown"}
         with tempfile.TemporaryDirectory() as directory:
@@ -455,7 +456,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             class Channel:
                 capabilities = {}
             channel = Channel()
-            async def show_text(self, _text):
+            async def show_text(self, _text, *, category=None):
                 raise AssertionError("an answered request must not alert as pending")
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
@@ -477,7 +478,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             async def play_role(self, *_args):
                 self.actions += 1
                 return {"action_status": "busy" if self.actions <= 2 else "started"}
-            async def show_text(self, _text):
+            async def show_text(self, _text, *, category=None):
                 return {"status": "shown"}
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
@@ -645,7 +646,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.actions_played += 1
                 return {"action_status": "busy" if self.actions_played <= 2 else "started"}
 
-            async def show_text(self, _text):
+            async def show_text(self, _text, *, category=None):
                 self.messages_shown += 1
                 return {"status": "shown"}
 
@@ -688,7 +689,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.actions_played += 1
                 return {"action_status": "unavailable", "reason": "music_active"}
 
-            async def show_text(self, _text):
+            async def show_text(self, _text, *, category=None):
                 self.messages_shown += 1
                 return {"status": "shown"}
 
@@ -716,7 +717,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             async def play_role(self, action, duration):
                 self.action = (action, duration)
                 return {"action_status": "started"}
-            async def show_text(self, text):
+            async def show_text(self, text, *, category=None):
                 self.text = text
                 return {"status": "shown"}
         with tempfile.TemporaryDirectory() as directory:
@@ -735,7 +736,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             capabilities = {}
         class Board:
             channel = Channel()
-            async def show_text(self, _text):
+            async def show_text(self, _text, *, category=None):
                 return {"status": "display_unconfirmed"}
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
@@ -756,7 +757,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             async def play_role(self, action, duration):
                 self.action = action
                 return {"action_status": "started"}
-            async def show_text(self, _text):
+            async def show_text(self, _text, *, category=None):
                 return {"status": "shown"}
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
@@ -777,7 +778,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 return ["deliver_result"]
             async def play_role(self, action, duration):
                 self.action = action
-            async def show_text(self, _text):
+            async def show_text(self, _text, *, category=None):
                 return {"status": "shown"}
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
@@ -798,7 +799,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 return ["deliver_result"]
             async def play_role(self, action, duration):
                 self.action = action
-            async def show_text(self, _text):
+            async def show_text(self, _text, *, category=None):
                 return {"status": "shown"}
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
@@ -822,7 +823,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.count = count
             async def status(self):
                 return {"pet_page": 0}
-            async def show_text(self, _text):
+            async def show_text(self, _text, *, category=None):
                 return {"status": "shown"}
             async def close(self):
                 pass
@@ -845,7 +846,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self,config):self.identity=config.identity
             async def __aenter__(self):return self
             async def status(self):return {'pet_page':0}
-            async def show_text(self,_text):delivered.append(self.identity);return {'status':'shown'}
+            async def show_text(self, _text, *, category=None):delivered.append(self.identity);return {'status':'shown'}
             async def close(self):pass
         with tempfile.TemporaryDirectory() as directory:
             config=Path(directory)/'device.json'
@@ -1032,7 +1033,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self,config):self.identity=config.identity
             async def __aenter__(self):return self
             async def status(self):return {'pet_page':0}
-            async def show_text(self,_text):delivered.append(self.identity);return {'status':'shown'}
+            async def show_text(self, _text, *, category=None):delivered.append(self.identity);return {'status':'shown'}
             async def close(self):pass
         with tempfile.TemporaryDirectory() as directory:
             config=Path(directory)/'device.json'
@@ -1061,7 +1062,7 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 return self
             async def status(self):
                 return {}
-            async def show_text(self, _text):
+            async def show_text(self, _text, *, category=None):
                 return {"status": "shown"}
             async def close(self):
                 closed.set()

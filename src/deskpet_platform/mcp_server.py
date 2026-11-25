@@ -1111,9 +1111,9 @@ class BoardSession:
             item = self.notifications.latest_unseen()
             if item:
                 try:
-                    result = await self.client.show_text(notification_text(item))
+                    result = await self.client.show_text(notification_text(item), category=item["category"])
                 except ValueError:
-                    result = await self.client.show_text(notification_text(item, detail=False))
+                    result = await self.client.show_text(notification_text(item, detail=False), category=item["category"])
                 if result.get("status") == "shown":
                     try:
                         await self.client.show_notice_detail(item["id"])

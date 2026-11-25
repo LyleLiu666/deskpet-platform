@@ -102,7 +102,7 @@ class TouchTests(unittest.IsolatedAsyncioTestCase):
                 event, self.event = self.event, None
                 return event
 
-            async def show_text(self, _text):
+            async def show_text(self, _text, *, category=None):
                 return {"status": "shown"}
 
             async def show_notice_detail(self, _identity):
@@ -196,7 +196,7 @@ class TouchTests(unittest.IsolatedAsyncioTestCase):
         class Board:
             def __init__(self):
                 self.detail = None
-            async def show_text(self, text):
+            async def show_text(self, text, *, category=None):
                 self.text = text
                 return {"status": "shown"}
             async def show_notice_detail(self, identity):
