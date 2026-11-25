@@ -5,7 +5,9 @@ from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
+from deskpet_platform.analytics_collectors import jsonl_events
 from deskpet_platform.analytics_store import AnalyticsStore
 
 NOW = datetime(2026, 11, 25, 10, tzinfo=timezone.utc)
@@ -52,7 +54,11 @@ class AnalyticsStoreTest(unittest.TestCase):
         start = "2026-11-24T15:59:59Z"
         next_day = "2026-11-24T16:00:00Z"
         one, two = codex_usage(start, 7, "one", 7), codex_usage(next_day, 5, "two", 12)
-        path = self.write(name, meta, one, one, codex_legacy(next_day, 7, 7))
+        start_first = {"type": "event_msg", "timestamp": start,
+                       "payload": {"type": "task_started", "turn_id": "turn-one"}}
+        start_second = {"type": "event_msg", "timestamp": next_day,
+                        "payload": {"type": "task_started", "turn_id": "turn-two"}}
+        path = self.write(name, meta, start_first, one, one, codex_legacy(next_day, 7, 7), start_second)
         self.write(name, two, append=True, partial=True)
         self.assertEqual(self.read(0)["days"], [(20261124, 7, 1)])
         with path.open("ab") as stream:
@@ -60,12 +66,40 @@ class AnalyticsStoreTest(unittest.TestCase):
         result = self.read(0)
         self.assertEqual(result["days"], [(20261125, 5, 1), (20261124, 7, 1)])
         self.assertEqual(result["sessions"][0]["output_tokens"], 12)
+        self.assertEqual(result["sessions"][0]["turns"], 2)
         self.assertEqual(self.read(0), result)
         replacement = self.write(".replacement", meta, two)
         replacement.replace(path)
         self.assertEqual(self.read(0)["days"], [(20261125, 5, 1)])
         self.write(name, meta, one)
         self.assertEqual(self.read(0)["days"], [(20261124, 7, 1)])
+
+    def test_large_log_append_starts_at_the_saved_offset(self):
+        name = ".codex/sessions/2026/11/25/large.jsonl"
+        stamp = "2026-11-25T05:00:00Z"
+        meta = {"type": "session_meta", "payload": {"id": "stable-session"}}
+        sample = codex_usage(stamp, 7, "first", 7)
+        sample["padding"] = "fixture" * 120
+        path = self.write(name, meta, *[sample] * 2500)
+        previous = path.stat().st_size
+        self.assertGreater(previous, 2 * 1024 * 1024)
+        before = self.read(0)
+
+        self.write(name, codex_usage(stamp, 11, "second", 18), append=True)
+        offsets = []
+
+        def observe(kind, stream, session):
+            start = stream.tell()
+            yield from jsonl_events(kind, stream, session)
+            offsets.append((start, stream.tell()))
+
+        with patch("deskpet_platform.analytics_store.jsonl_events", side_effect=observe):
+            after = self.read(0)
+        self.assertEqual(offsets, [(previous, path.stat().st_size)])
+        self.assertEqual(before["days"], [(20261125, 7, 1)])
+        self.assertEqual(after["days"], [(20261125, 18, 1)])
+        self.assertEqual(after["sessions"][0]["key"], before["sessions"][0]["key"])
+        self.assertEqual(after["sessions"][0]["output_tokens"], 18)
 
     def test_late_modern_record_replaces_legacy_without_double_counting(self):
         name = ".codex/sessions/2026/11/25/rollout.jsonl"
