@@ -17,8 +17,8 @@ def _codex_session_url(session):
     return f"codex://threads/{thread}" if str(thread) == session else None
 
 
-def notification_launch_args(source, session):
-    if source == "antigravity" and sys.platform == "darwin":
+def notification_launch_args(source, session, *, exact=False):
+    if source == "antigravity" and sys.platform == "darwin" and not exact:
         return ("-b", "com.google.antigravity")
     if source == "codex" and (url := _codex_session_url(session)):
         return (url,)

@@ -1284,6 +1284,20 @@ class Client:
         async with self._operation:
             await self.channel.send("notice_ack", ids=ids)
 
+    async def pending_message_session_open(self, rows):
+        async with self._operation:
+            reply = await self.channel.send("notice_session_open", rows=rows)
+        request = reply.get("request")
+        if request is not None and (
+                not isinstance(request, dict) or request.keys() != {"id", "created", "ticket"} or
+                any(type(value) is not int or not 0 < value <= 0xFFFFFFFF for value in request.values())):
+            raise DeviceError("invalid_message_session_open")
+        return request
+
+    async def finish_message_session_open(self, ticket, *, accepted):
+        async with self._operation:
+            await self.channel.send("notice_session_open", ticket=ticket, accepted=accepted)
+
     async def message_view(self, mode="status", identity=None):
         if self.channel.capabilities.get("message_view") != 1:
             raise DeviceError("message_view_not_supported")

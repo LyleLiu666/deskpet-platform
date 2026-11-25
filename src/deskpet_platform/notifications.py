@@ -520,7 +520,7 @@ class NotificationStore:
         return db.execute("""UPDATE notifications SET dismissed=COALESCE(dismissed,?),
             seen=COALESCE(seen,?) WHERE id=? AND category='response'""", (now, now, identity)).rowcount > 0
 
-    def legacy_message_snapshot(self, through, created):
+    def legacy_message_snapshot(self, through, created, *, include_session_open=False):
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE" if through else "BEGIN")
             if through:
@@ -532,11 +532,22 @@ class NotificationStore:
                 FROM notifications WHERE category='completed' AND seen IS NULL)""").fetchone()[0]
             responses = db.execute(f"SELECT count(*) FROM notifications n WHERE {ACTIVE_QUESTION}").fetchone()[0]
             rows = db.execute(f"""SELECT * FROM (
-                SELECT id,title,created,shown,seen,source,category,resolved FROM notifications n
+                SELECT id,title,created,shown,seen,source,category,resolved,session FROM notifications n
                 WHERE category='completed' OR ({ACTIVE_QUESTION})
                 ORDER BY category='response' DESC,id DESC LIMIT 10
                 ) ORDER BY id DESC""").fetchall()
-        return self._items(rows), (min(65535, completed), min(65535, responses))
+        records = self._items(rows)
+        if include_session_open:
+            for record, row in zip(records, rows):
+                if record["category"] == "response" and notification_launch_args(row[5], row[8], exact=True):
+                    record["open_session"] = True
+        return records, (min(65535, completed), min(65535, responses))
+
+    def pending_session_launch_args(self, identity, created):
+        with closing(self._connect()) as db:
+            row = db.execute(f"""SELECT source,session,created FROM notifications n
+                                WHERE id=? AND ({ACTIVE_QUESTION})""", (identity,)).fetchone()
+        return notification_launch_args(*row[:2], exact=True) if row and int(row[2]) == created else None
 
     def withdrawn_response_count(self):
         with closing(self._connect()) as db:

@@ -12,6 +12,64 @@ import json
 
 
 class TouchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_message_opens_only_the_matching_pending_session(self):
+        class Wire:
+            def __init__(self):
+                self.requests = []
+                self.pending = None
+
+            async def write(self, raw):
+                self.request = json.loads(raw[3:])
+                self.requests.append(self.request)
+
+            async def readline(self):
+                reply = {k: self.request[k] for k in ("epoch", "seq")}
+                reply.update(ok=True, boot=1)
+                if self.request["type"] == "notice_pending":
+                    reply["ids"] = []
+                if self.request["type"] == "notice_session_open" and "rows" in self.request and self.pending:
+                    reply["request"] = self.pending
+                return b"P1," + json.dumps(reply).encode() + b"\n"
+
+        with tempfile.TemporaryDirectory() as directory:
+            board = BoardSession(Path(directory) / "device.json")
+            config = DeviceConfig("02:00:00:00:00:01", bytes(32))
+            client = board.client = Client(config)
+            channel = client.channel = Channel(wire := Wire(), config.identity)
+            channel.epoch, channel.boot, channel.online = "a" * 32, 1, True
+            channel.capabilities = {"message_card_summary": 1, "notice_session_open": 1}
+            thread = "019a2da9-e5d0-7000-844a-1c30b7f5477d"
+            notifications = board.notifications
+            old = notifications.add_agent_event("codex", thread, "old", "response", "old")
+            active = notifications.add_agent_event("codex", thread, "new", "response", "current")
+            other = notifications.add_agent_event("antigravity", thread, "ask", "response", "other")
+            created = {item["id"]: int(item["created_at"]) for item in notifications.list()}
+            with (patch("deskpet_platform.desktop_launch.sys.platform", "darwin"),
+                  patch("deskpet_platform.desktop_launch.subprocess.run") as launch):
+                await board.refresh_messages()
+                self.assertIn([[active, created[active]]],
+                              [request.get("rows") for request in wire.requests])
+                records, _ = notifications.legacy_message_snapshot(0, 0, include_session_open=True)
+                for ticket, identity, when, expected in (
+                    (1, active, created[active], True),
+                    (2, active, created[active] + 1, False),
+                    (3, old, created[old], False),
+                    (4, other, created[other], False),
+                ):
+                    wire.pending = {"id": identity, "created": when, "ticket": ticket}
+                    await board.refresh_message_session_open(client, records)
+                    self.assertEqual(wire.requests[-2]["rows"], [[active, created[active]]])
+                    self.assertEqual(wire.requests[-1]["ticket"], ticket)
+                    self.assertEqual(wire.requests[-1]["accepted"], expected)
+                launch.assert_called_once()
+                self.assertEqual(launch.call_args.args[0], ["/usr/bin/open", f"codex://threads/{thread}"])
+
+                notifications.resolve_response(active)
+                wire.pending = {"id": active, "created": created[active], "ticket": 5}
+                await board.refresh_message_session_open(client, records)
+                self.assertFalse(wire.requests[-1]["accepted"])
+                launch.assert_called_once()
+
     async def test_desktop_launch_routes_only_matching_cached_notifications(self):
         class Wire:
             async def write(self, raw):

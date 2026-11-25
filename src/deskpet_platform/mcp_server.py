@@ -630,6 +630,7 @@ class BoardSession:
     async def refresh_messages(self):
         client = self.client
         card_summary = client.channel.capabilities.get("message_card_summary") == 1
+        session_open = client.channel.capabilities.get("notice_session_open") == 1
         if card_summary:
             ids, clear, dismissals = await client.pending_notice_feedback()
             for item in dismissals:
@@ -651,11 +652,14 @@ class BoardSession:
         fields = {}
         stamp = None
         if card_summary:
-            records, summary = await asyncio.to_thread(self.notifications.legacy_message_snapshot, *clear)
+            records, summary = await asyncio.to_thread(self.notifications.legacy_message_snapshot, *clear,
+                                                       include_session_open=session_open and supports_desktop_launch())
             stamp = (summary, clear)
             fields = {"summary": summary, "clear": clear}
         else:
             records = await asyncio.to_thread(self.notifications.list, 10, for_device=True)
+        if session_open:
+            await self.refresh_message_session_open(client, records)
         fingerprint = (stamp, [(item["id"], item["seen"], item["title"]) for item in records])
         if fingerprint != self.last_message_cache or (card_summary and time.monotonic() >= self.message_cache_due):
             responses = [item["id"] for item in records if item["category"] == "response"]
@@ -672,6 +676,22 @@ class BoardSession:
             await asyncio.to_thread(self.notifications.record_response_projection, "legacy", responses, confirmed=True)
             self.last_message_cache = fingerprint
             self.message_cache_due = time.monotonic() + 8
+
+    async def refresh_message_session_open(self, client, records):
+        rows = [[item["id"], int(item["created_at"])] for item in records if item.get("open_session")]
+        request = await client.pending_message_session_open(rows)
+        if request is None:
+            return
+        accepted = False
+        try:
+            if [request["id"], request["created"]] in rows:
+                args = await asyncio.to_thread(self.notifications.pending_session_launch_args,
+                                               request["id"], request["created"])
+                if args:
+                    accepted = await asyncio.to_thread(launch_notification, args)
+        except (OSError, sqlite3.Error, subprocess.SubprocessError):
+            pass  # Return a failed launch to the detail screen.
+        await client.finish_message_session_open(request["ticket"], accepted=accepted)
 
     async def refresh_agent_notifications(self, heartbeat):
         if self.client is not None:
