@@ -646,13 +646,6 @@ class BoardSession:
         if ids:
             await asyncio.to_thread(self.notifications.mark_seen_many, ids, grouped_completions=card_summary)
         acknowledged = ids + [item["id"] for item in dismissals]
-        if acknowledged:
-            try:
-                await client.acknowledge_notice_reads(acknowledged)
-            except CommandRejected as error:
-                if error.code != "low_battery_readonly":
-                    raise
-                return
 
         fields = {}
         stamp = None
@@ -665,6 +658,13 @@ class BoardSession:
             records = await asyncio.to_thread(self.notifications.list, 10, for_device=True)
         if session_open:
             await self.refresh_message_session_open(client, records)
+        if acknowledged:
+            try:
+                await client.acknowledge_notice_reads(acknowledged)
+            except CommandRejected as error:
+                if error.code != "low_battery_readonly":
+                    raise
+                return
         fingerprint = (stamp, [(item["id"], item["seen"], item["title"]) for item in records])
         if fingerprint != self.last_message_cache or (card_summary and time.monotonic() >= self.message_cache_due):
             responses = [item["id"] for item in records if item["category"] == "response"]

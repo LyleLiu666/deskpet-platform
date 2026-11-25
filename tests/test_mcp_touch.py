@@ -17,6 +17,7 @@ class TouchTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.requests = []
                 self.pending = None
+                self.blocked_read = None
 
             async def write(self, raw):
                 self.request = json.loads(raw[3:])
@@ -26,7 +27,9 @@ class TouchTests(unittest.IsolatedAsyncioTestCase):
                 reply = {k: self.request[k] for k in ("epoch", "seq")}
                 reply.update(ok=True, boot=1)
                 if self.request["type"] == "notice_pending":
-                    reply["ids"] = []
+                    reply["ids"] = [self.blocked_read] if self.blocked_read else []
+                if self.request["type"] == "notice_ack" and self.blocked_read:
+                    reply.update(ok=False, error="low_battery_readonly")
                 if self.request["type"] == "notice_session_open" and "rows" in self.request and self.pending:
                     reply["request"] = self.pending
                 return b"P1," + json.dumps(reply).encode() + b"\n"
@@ -64,8 +67,17 @@ class TouchTests(unittest.IsolatedAsyncioTestCase):
                 launch.assert_called_once()
                 self.assertEqual(launch.call_args.args[0], ["/usr/bin/open", f"codex://threads/{thread}"])
 
-                notifications.resolve_response(active)
+                launch.reset_mock()
+                wire.blocked_read = active
                 wire.pending = {"id": active, "created": created[active], "ticket": 5}
+                wire.requests.clear()
+                await board.refresh_messages()
+                self.assertTrue(any(request.get("accepted") is True for request in wire.requests))
+                self.assertNotIn("notice_cache_commit", [request["type"] for request in wire.requests])
+                launch.assert_called_once()
+
+                notifications.resolve_response(active)
+                wire.pending = {"id": active, "created": created[active], "ticket": 6}
                 await board.refresh_message_session_open(client, records)
                 self.assertFalse(wire.requests[-1]["accepted"])
                 launch.assert_called_once()
