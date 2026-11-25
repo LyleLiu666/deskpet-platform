@@ -687,7 +687,7 @@ class NotificationStore:
     def pending_attention(self):
         with closing(self._connect()) as db:
             return db.execute(f"""SELECT COALESCE(MAX(id),0) FROM notifications n
-                WHERE category='response' AND resolved IS NULL AND dismissed IS NULL AND NOT ({SUPERSEDED_QUESTION})
+                WHERE ({ACTIVE_QUESTION})
                 AND id>COALESCE((SELECT through_id FROM notification_attention WHERE id=1),0)""").fetchone()[0]
 
     def acknowledge_attention(self, identity):
@@ -788,10 +788,9 @@ class NotificationStore:
                            ((now, identity) for identity in identities))
 
     def unseen_count(self, *, for_device=False):
+        visible = f"AND (category!='response' OR ({ACTIVE_QUESTION}))" if for_device else ""
         with closing(self._connect()) as db:
-            return db.execute("""SELECT COUNT(*) FROM notifications WHERE seen IS NULL
-                AND (NOT ? OR category!='response' OR (resolved IS NULL AND dismissed IS NULL))""",
-                              (for_device,)).fetchone()[0]
+            return db.execute(f"SELECT COUNT(*) FROM notifications n WHERE seen IS NULL {visible}").fetchone()[0]
 
     def has_active_notifications(self, *, include_unconfirmed=False):
         with closing(self._connect()) as db:

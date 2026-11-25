@@ -606,7 +606,7 @@ class BoardSession:
             return
         now = time.monotonic() if now is None else now
         try:
-            summary = await asyncio.to_thread(self.notifications.home_summary)
+            summary = await asyncio.to_thread(self.notifications.home_summary, for_device=True)
         except (OSError, sqlite3.Error, ValueError):
             self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
             return

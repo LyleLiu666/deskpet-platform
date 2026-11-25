@@ -139,6 +139,8 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({row[2] for row in self.store.analytics_attention()}, set(pending))
         self.assertEqual(len(self.store.list()), 8)
         self.assertEqual([row["id"] for row in self.store.list(for_device=True)], [completed, *pending])
+        self.assertEqual(self.store.unseen_count(for_device=True), 4)
+        self.assertEqual(self.store.pending_attention(), latest)
 
         self.client.channel.capabilities.pop("agent_local_inbox")
         self.store.resolve_response(latest)
@@ -146,6 +148,8 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["id"] for item in self.view.items.values() if not item["resolved"]],
                          [completed, other_session, other_source])
         self.assertEqual(self.store.legacy_message_snapshot(0, 0)[1][1], 2)
+        self.assertEqual(self.store.unseen_count(for_device=True), 3)
+        self.assertEqual(self.store.pending_attention(), other_session)
         self.assertEqual({row[2] for row in self.store.analytics_attention()}, {other_session, other_source})
         self.assertFalse(any(self.store.get(identity)["resolved"] for identity in questions[:-1]))
 

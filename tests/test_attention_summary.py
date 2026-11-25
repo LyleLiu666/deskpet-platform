@@ -34,6 +34,7 @@ class AttentionSummaryTests(unittest.IsolatedAsyncioTestCase):
             client = type('Client', (), {})()
             client.channel = type('Channel', (), {'capabilities': {'attention_summary': 1}})()
             client.set_attention_summary = AsyncMock()
+            session.notifications.add_agent_event('codex', 'session', 'older', 'response', 'Earlier question')
             question = session.notifications.add_agent_event('codex', 'session', 'question', 'response', 'Question')
             session.notifications.mark_seen(question)
             await session.refresh_attention_summary(client, now=0)
