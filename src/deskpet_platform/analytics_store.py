@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_source ON events(source, session, key);
 CREATE INDEX IF NOT EXISTS events_file_stamp ON events(file, stamp);
 CREATE INDEX IF NOT EXISTS events_codex_total ON events(source, session, codex_total, amount);
+CREATE INDEX IF NOT EXISTS events_codex_mirror_time ON events(session, amount, stamp, codex_total)
+  WHERE source=0 AND NOT codex_legacy AND amount IS NOT NULL;
 CREATE TABLE IF NOT EXISTS usage_cursors (
   path TEXT PRIMARY KEY, device INTEGER, inode INTEGER, size INTEGER, mtime INTEGER
 );
@@ -57,11 +59,18 @@ EVENTS = """
 WITH relevant AS (
   SELECT e.* FROM events e
   WHERE e.source=:source AND e.stamp <= :until
-  AND (NOT e.codex_legacy OR NOT EXISTS (
-    SELECT 1 FROM events m
-    WHERE m.source=0 AND m.session=e.session AND NOT m.codex_legacy AND m.amount=e.amount
-    AND ((m.codex_total=e.codex_total)
-         OR ((m.codex_total IS NULL OR e.codex_total IS NULL) AND abs(m.stamp-e.stamp)<2))
+  AND (NOT e.codex_legacy OR (
+    NOT EXISTS (
+      SELECT 1 FROM events m
+      WHERE m.source=0 AND m.session=e.session AND NOT m.codex_legacy
+        AND m.codex_total=e.codex_total AND m.amount=e.amount
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM events m
+      WHERE m.source=0 AND m.session=e.session AND NOT m.codex_legacy AND m.amount=e.amount
+        AND m.stamp>e.stamp-2 AND m.stamp<e.stamp+2
+        AND (m.codex_total IS NULL OR e.codex_total IS NULL)
+    )
   ))
   UNION ALL
   SELECT p.* FROM events p

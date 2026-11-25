@@ -109,6 +109,20 @@ class AnalyticsStoreTest(unittest.TestCase):
         self.write(name, codex_usage(stamp, 9, "first", 9), append=True)
         self.assertEqual(self.read(0)["days"], [(20261125, 9, 1)])
 
+    def test_codex_mirror_matches_cumulative_usage_or_a_nearby_incomplete_record(self):
+        def at(seconds):
+            return (NOW - timedelta(minutes=1) + timedelta(seconds=seconds)).isoformat()
+
+        self.write(".codex/sessions/2026/11/25/mirrors.jsonl",
+                   codex_usage(at(0), 5, "first", 5),
+                   codex_legacy(at(1), 5, None),
+                   codex_legacy(at(2), 5, None),
+                   codex_usage(at(4), 7, "second", 12),
+                   codex_legacy(at(5), 7, 99),
+                   codex_usage(at(8), 11, "third", None),
+                   codex_legacy(at(9), 11, 111))
+        self.assertEqual(self.read(0)["days"], [(20261125, 35, 1)])
+
     def test_session_projection_uses_latest_title_and_execution_state(self):
         name = ".codex/sessions/2026/11/25/session.jsonl"
 
