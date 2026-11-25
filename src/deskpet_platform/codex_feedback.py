@@ -2,8 +2,11 @@
 from contextlib import closing
 import hashlib
 import json
+import logging
+import os
 from pathlib import Path
 import sqlite3
+import tempfile
 
 from .notifications import codex_home, session_title
 
@@ -98,6 +101,62 @@ def _closed_async_call(output):
     return isinstance(output, dict) and output.get("accepted") is False
 
 
+def _resolve_reply(store, session, identities):
+    if not identities:
+        return 0
+    try:
+        # Leave enough time in the two-second hook to save a retry receipt.
+        return store.resolve_agent_events("codex", session, identities, timeout=.1)
+    except sqlite3.OperationalError as error:
+        directory = store.path.parent / "codex-replies"
+        if os.name == "nt":
+            from .windows_private import ensure_private_directory
+            store.path.parent.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_directory(store.path.parent)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if directory.is_symlink():
+            raise ValueError("invalid_codex_reply_directory")
+        data = json.dumps([session, identities]).encode()
+        stream = tempfile.NamedTemporaryFile(dir=directory, delete=False)
+        temporary = Path(stream.name)
+        try:
+            with stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(directory / (hashlib.sha256(data).hexdigest() + ".json"))
+        finally:
+            temporary.unlink(missing_ok=True)
+        logging.getLogger(__name__).warning("Codex reply queued for retry (%s)",
+                                            getattr(error, "sqlite_errorname", "storage_unavailable"))
+        return len(identities)  # Wake the delivery workers even for the last reply.
+
+
+def retry_replies(store):
+    directory = store.path.parent / "codex-replies"
+    if not directory.is_dir():
+        return 0
+    if directory.is_symlink():
+        raise ValueError("invalid_codex_reply_directory")
+    updated = 0
+    for receipt in directory.glob("*.json"):
+        try:
+            data = receipt.read_bytes()
+        except FileNotFoundError:
+            continue  # Another worker already committed the same receipt.
+        if receipt.stem != hashlib.sha256(data).hexdigest():
+            try:
+                receipt.replace(receipt.with_suffix(".invalid"))
+            except FileNotFoundError:
+                continue
+            logging.getLogger(__name__).warning("Damaged Codex reply receipt set aside")
+            continue
+        session, identities = json.loads(data)
+        updated += store.resolve_agent_events("codex", session, identities)
+        receipt.unlink(missing_ok=True)
+    return updated
+
+
 class QuestionReconciler:
     """Recover missed hook outcomes from the local Codex session records."""
 
@@ -107,20 +166,21 @@ class QuestionReconciler:
         self.checked = {}
 
     def run(self):
+        updated = retry_replies(self.store)
         pending = {}
         for session, identity, turn in self.store.open_codex_questions():
             pending.setdefault(session, {})[identity] = turn
         if not pending:
             self.checked.clear()
-            return 0
+            return updated
         try:
             state = (self.home / "state_5.sqlite").resolve().as_uri() + "?mode=ro"
             with closing(sqlite3.connect(state, uri=True, timeout=.1)) as db:
                 threads = {session: db.execute("SELECT rollout_path,archived FROM threads WHERE id=?",
                                                (session,)).fetchone() for session in pending}
         except (OSError, sqlite3.Error, ValueError):
-            return 0
-        updated, checked = 0, {}
+            return updated
+        checked = {}
         for session, questions in pending.items():
             if threads[session] is None:
                 continue
@@ -152,9 +212,11 @@ class QuestionReconciler:
                 return set(), set(), None
             key = (path, stat.st_dev, stat.st_ino)
             targets = frozenset(questions.items())
-            previous, offset, known = self.checked.get(session, (None, 0, frozenset()))
+            previous, offset, known, cli = self.checked.get(session, (None, 0, frozenset(), {}))
             if key != previous or offset > stat.st_size or not targets.issubset(known):
-                offset = 0
+                offset, cli = 0, {}
+            else:
+                cli = cli.copy()
             settled, abandoned = set(), set()
             with path.open("rb") as stream:
                 stream.seek(offset)
@@ -162,15 +224,15 @@ class QuestionReconciler:
                     if not line.endswith(b"\n"):
                         break
                     offset += len(line)
-                    answered, interrupted = self._outcomes(line, questions)
+                    answered, interrupted = self._outcomes(line, questions, cli)
                     settled.update(answered)
                     abandoned.update(interrupted)
         except (OSError, ValueError, RuntimeError):
             return set(), set(), None
-        return settled, abandoned, (key, offset, targets)
+        return settled, abandoned, (key, offset, targets, cli)
 
     @staticmethod
-    def _outcomes(line, questions):
+    def _outcomes(line, questions, cli):
         try:
             record = json.loads(line)
         except (ValueError, UnicodeError):
@@ -184,10 +246,36 @@ class QuestionReconciler:
                 return (), [identity for identity, turn in questions.items() if turn == payload["turn_id"]]
             if kind == "user_message":
                 return [identity for identity in answers(payload.get("message")) if identity in questions], ()
-        if record.get("type") == "response_item" and kind == "function_call_output" and _closed_async_call(payload.get("output")):
+        if record.get("type") != "response_item":
+            return (), ()
+        if kind == "function_call" and payload.get("name") == CLI_TOOL:
+            call = payload.get("call_id")
             try:
-                return [identity for index in range(3)
-                        if (identity := question_id(payload.get("call_id"), index)) in questions], ()
+                if not any(question_id(call, index) in questions for index in range(3)):
+                    return (), ()
+                arguments = json.loads(payload.get("arguments"))
+            except (TypeError, ValueError):
+                return (), ()
+            items = arguments.get("questions") if isinstance(arguments, dict) else None
+            if isinstance(items, list) and 1 <= len(items) <= 3 and all(isinstance(item, dict) for item in items):
+                cli[call] = [{"id": item.get("id")} for item in items]
+        if kind == "message" and payload.get("role") == "user":
+            content = payload.get("content")
+            if isinstance(content, list):
+                return {identity for part in content if isinstance(part, dict) and part.get("type") == "input_text"
+                        for identity in answers(part.get("text")) if identity in questions}, ()
+        if kind == "function_call_output":
+            call = payload.get("call_id")
+            output = payload.get("output")
+            items = cli.get(call) if isinstance(call, str) else None
+            if items and cli_question_outcomes(items, output):
+                count = len(cli.pop(call))
+            elif _closed_async_call(output):
+                count = 3
+            else:
+                return (), ()
+            try:
+                return [identity for index in range(count) if (identity := question_id(call, index)) in questions], ()
             except ValueError:
                 return (), ()
         return (), ()
@@ -201,7 +289,7 @@ def deliver(store, event):
         raise ValueError("invalid_feedback_session")
     kind = event.get("hook_event_name")
     if kind == "UserPromptSubmit":
-        return store.resolve_agent_events("codex", session, answers(event.get("prompt")))
+        return _resolve_reply(store, session, answers(event.get("prompt")))
     if kind not in ("PreToolUse", "PostToolUse") or event.get("tool_name") not in (TOOL, CLI_TOOL):
         return 0
     details = event.get("tool_input")
@@ -214,10 +302,10 @@ def deliver(store, event):
         if event["tool_name"] == CLI_TOOL:
             if cli_question_outcomes(questions, response):
                 # The device inbox only records whether an item remains pending.
-                return store.resolve_agent_events("codex", session, identities)
+                return _resolve_reply(store, session, identities)
             return 0
         if _closed_async_call(response):
-            return store.resolve_agent_events("codex", session, identities)
+            return _resolve_reply(store, session, identities)
         return 0
     turn = event.get("turn_id")
     if not isinstance(turn, str) or not 0 < len(turn) <= 128 or not turn.isprintable():

@@ -273,6 +273,6 @@ def receive(config, *, handle=None, response=None):
         if len(raw) > 1024 * 1024:
             raise ValueError("hook_event_too_large")
         receive_event(config, json.loads(raw), handle=handle)
-    except Exception:
-        pass
+    except Exception as error:
+        print(f"DeskPet hook failed ({type(error).__name__})", file=sys.stderr)
     print(json.dumps(response or {}))

@@ -491,6 +491,13 @@ class BoardSession:
     async def poll(self):
         sampled_client, heartbeat = None, {}
         while True:
+            now = time.monotonic()
+            if now >= self.codex_questions_due:
+                self.codex_questions_due = now + 5
+                try:
+                    await asyncio.to_thread(self.codex_questions.run)
+                except (OSError, sqlite3.Error, ValueError):
+                    self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
             await self.recover_wifi(sampled_client, heartbeat)
             await self.refresh_onboard_tool_callback(self.client)
             async with self.lock:
@@ -528,10 +535,6 @@ class BoardSession:
                     self.record_status(heartbeat)
                     notification_sync_ok = True
                     try:
-                        now = time.monotonic()
-                        if now >= self.codex_questions_due:
-                            self.codex_questions_due = now + 5
-                            await asyncio.to_thread(self.codex_questions.run)
                         await asyncio.to_thread(self.notifications.sync)
                     except (OSError, sqlite3.Error, ValueError):
                         notification_sync_ok = False

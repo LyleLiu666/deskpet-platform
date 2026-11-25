@@ -708,9 +708,9 @@ class NotificationStore:
             return db.execute("""SELECT session,turn,parent_turn FROM notifications
                 WHERE source='codex' AND category='response' AND resolved IS NULL AND dismissed IS NULL""").fetchall()
 
-    def resolve_agent_events(self, source, session, event_ids, *, remember_missing=True, abandoned=False):
+    def resolve_agent_events(self, source, session, event_ids, *, remember_missing=True, abandoned=False, timeout=2):
         """Close a tool's settled requests in a single inbox update."""
-        with closing(self._connect()) as db, db:
+        with closing(self._connect(timeout=timeout)) as db, db:
             db.execute("BEGIN IMMEDIATE")
             now = time.time()
             events = [(source, session, event_id, now) for event_id in event_ids]
@@ -896,6 +896,7 @@ def _live_receiver_requested(config_path):
 
 
 async def _run_workers(config_path, *, client_factory, max_seconds, poll_interval, handoff_delay, idle_seconds, receivers_only):
+    from .codex_feedback import retry_replies
     from .device_registry import DeviceRegistry
 
     registry = DeviceRegistry(config_path)
@@ -912,10 +913,20 @@ async def _run_workers(config_path, *, client_factory, max_seconds, poll_interva
         try:
             acquire(descriptor, blocking=False)
         except BlockingIOError:
+            # Cover a dispatcher already exiting after its last scan.
+            try:
+                await asyncio.to_thread(retry_replies, inbox)
+            except sqlite3.OperationalError:
+                pass  # The dispatch owner retries while the inbox is busy.
             return
         while time.monotonic() < deadline:
             now = time.monotonic()
             if now >= next_scan:
+                try:
+                    await asyncio.to_thread(retry_replies, inbox)
+                except sqlite3.OperationalError:
+                    await asyncio.sleep(max(.5, poll_interval))
+                    continue
                 paths = await asyncio.to_thread(registry.receiver_paths if receivers_only else registry.paths)
                 next_scan = now + 5
                 for path in paths:
@@ -963,7 +974,8 @@ def _release_idle_dispatch(inbox, descriptor, through):
     try:
         with closing(inbox._connect(timeout=0)) as db:
             db.execute("BEGIN IMMEDIATE")
-            if db.execute(_INBOX_VERSION).fetchone() != through:
+            if (db.execute(_INBOX_VERSION).fetchone() != through or
+                    any((inbox.path.parent / "codex-replies").glob("*.json"))):
                 return False
             # The next hook starts its worker after committing. Release the
             # dispatch lock before that commit is possible. The per-board

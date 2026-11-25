@@ -4,7 +4,9 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -131,6 +133,89 @@ class CodexFeedbackTests(unittest.TestCase):
             }}) + "\n")
         self.assertEqual(reconcile.run(), 1)
         self.assertEqual(self.store.home_summary()["response_count"], 2)
+
+    def rollout(self):
+        home = Path(self.temp.name)
+        path = home / "sessions" / "desktop.jsonl"
+        path.parent.mkdir()
+        path.touch()
+        with closing(sqlite3.connect(home / "state_5.sqlite")) as db, db:
+            db.execute("CREATE TABLE threads(id, rollout_path, archived)")
+            db.execute("INSERT INTO threads VALUES(?,?,0)", (self.event["session_id"], str(path)))
+
+        def append(payload):
+            with path.open("a") as stream:
+                print(json.dumps({"type": "response_item", "payload": payload}), file=stream)
+
+        return codex_feedback.QuestionReconciler(self.store, home), append
+
+    def test_desktop_user_input_blocks_reconcile_only_matching_replies(self):
+        reconcile, append = self.rollout()
+        codex_feedback.deliver(self.store, self.event)
+        block = {"type": "input_text", "text": self.answer([1])["prompt"]}
+        append({"type": "message", "role": "assistant", "content": [block]})
+        append({"type": "message", "role": "user", "content": [{**block, "type": "output_text"}]})
+        self.assertEqual(reconcile.run(), 0)
+        append({"type": "message", "role": "user", "content": [{"type": "input_image"}, block, block]})
+        self.assertEqual(reconcile.run(), 1)
+        self.assertEqual(self.store.home_summary()["response_count"], 1)
+        self.assertEqual(reconcile.run(), 0)
+
+    def test_cli_rollout_pairs_matching_call_across_poll_and_partial_write(self):
+        reconcile, append = self.rollout()
+        event = {**self.event, "tool_name": codex_feedback.CLI_TOOL,
+                 "tool_input": {"questions": [{"id": "first"}, {"id": "second"}]}}
+        codex_feedback.deliver(self.store, event)
+        codex_feedback.deliver(self.store, {**self.event, "turn_id": "another-turn", "tool_use_id": "keep-open"})
+        output = {"type": "function_call_output", "call_id": event["tool_use_id"],
+                  "output": json.dumps({"answers": {"second": {"answers": ["private answer"]}}})}
+        append({**output, "call_id": "unrelated"})
+        append(output)
+        self.assertEqual(reconcile.run(), 0)
+        append({"type": "function_call", "name": "request_user_input", "call_id": event["tool_use_id"],
+                "arguments": json.dumps(event["tool_input"])})
+        self.assertEqual(reconcile.run(), 0)
+        append({**output, "output": '{"answers":{"other":{"answers":[]}}}'})
+        append({**output, "call_id": "another-call"})
+        self.assertEqual(reconcile.run(), 0)
+        line = json.dumps({"type": "response_item", "payload": output})
+        path = Path(self.temp.name) / "sessions/desktop.jsonl"
+        with path.open("a") as stream:
+            stream.write(line[:20])
+        self.assertEqual(reconcile.run(), 0)
+        with path.open("a") as stream:
+            print(line[20:], file=stream)
+        self.assertEqual(reconcile.run(), 2)
+        remaining = {identity for _, identity, _ in self.store.open_codex_questions()}
+        self.assertEqual(remaining, {codex_feedback.question_id("keep-open", index) for index in (0, 1)})
+
+    def test_locked_inbox_recovers_last_answer_without_another_hook(self):
+        config = Path(self.temp.name) / "device.json"
+        codex_feedback.deliver(self.store, self.event)
+        with closing(sqlite3.connect(self.store.path)) as locker:
+            locker.execute("BEGIN IMMEDIATE")
+            start = time.monotonic()
+            with patch("deskpet_platform.codex_hook.subprocess.Popen") as spawn, \
+                    self.assertLogs(codex_feedback.__name__, level="WARNING") as logged:
+                codex_hook.receive_event(config, self.answer([1]))
+            self.assertNotIn("private answer", " ".join(logged.output))
+            self.assertLess(time.monotonic() - start, 1.5)
+            spawn.assert_called_once()
+            receipts = list(self.store.path.parent.glob("codex-replies/*.json"))
+            self.assertEqual(len(receipts), 1)
+            self.assertNotIn("private answer", receipts[0].read_text())
+            # Start the same detached command while the writer still holds the lock.
+            with subprocess.Popen(*spawn.call_args.args, **spawn.call_args.kwargs) as worker:
+                try:
+                    locker.rollback()
+                    worker.wait(timeout=10)
+                finally:
+                    if worker.poll() is None:
+                        worker.kill()
+            self.assertEqual(worker.returncode, 0)
+        self.assertEqual(self.store.home_summary()["response_count"], 1)
+        self.assertFalse(receipts[0].exists())
+        self.assertEqual(codex_feedback.deliver(self.store, self.answer([1])), 0)
 
     def test_answered_retry_does_not_restore_the_earlier_call(self):
         initial = {**self.event, "tool_use_id": "failed-call"}
