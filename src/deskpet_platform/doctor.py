@@ -7,6 +7,7 @@ import shlex
 import shutil
 import sqlite3
 
+from .analytics_store import AnalyticsStore
 from .agent_speed_probe import find_installed_probe, host_platform
 from .codex_hook import (
     EVENT_MATCHERS, CLI_EVENT_MATCHERS, _load, _matches, _previous_installations, _validate_groups, hook_command,
@@ -116,6 +117,22 @@ def _event_progress(shared, selected, source):
             for category, row in rows.items()}
 
 
+def _analytics_status(shared, selected):
+    path = AnalyticsStore(shared.parent / "analytics.sqlite3").path
+    if path.is_symlink():
+        return {"status": "unavailable"}
+    if not path.is_file():
+        return {"status": "missing"}
+    try:
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.5)) as db:
+            db.execute("SELECT 1 FROM file_cursors LIMIT 1").fetchone()
+            row = (db.execute("SELECT observed_at FROM sync_receipts WHERE device=?",
+                              (str(selected.resolve()),)).fetchone() if selected is not None else None)
+    except (OSError, sqlite3.Error, ValueError):
+        return {"status": "unavailable"}
+    return {"status": "ready", "last_sync_at": row[0] if row else None}
+
+
 def diagnose(config, *, client, device_id=None, shared_config=None, token_probe=None, no_token_probe=False):
     registry = DeviceRegistry(config)
     devices = registry.list() if config.exists() or config.is_symlink() or registry.root.exists() else []
@@ -140,5 +157,6 @@ def diagnose(config, *, client, device_id=None, shared_config=None, token_probe=
         "host": host_platform(),
         "pairing": {"devices": devices, "selected_device_id": device_id, "connection": "not_checked"},
         "reminders": {"client": client, "hook": hook_state(client, shared), "latest_events": events},
+        "analytics": _analytics_status(shared, selected),
         "speed": {"status": probe_status, "path": str(probe) if probe else None, "reading": "not_checked"},
     }

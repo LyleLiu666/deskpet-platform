@@ -139,6 +139,14 @@ class Channel:
             raise DeviceError('line_too_long')
         return line
 
+    def fits_request(self, kind, **fields):
+        """Measure the actual encoded wire line at the largest valid sequence number."""
+        try:
+            self._request_line(0xffffffff, kind, fields)
+        except DeviceError:
+            return False
+        return True
+
     async def send_speech_chunks(self, chunks):
         """Pipeline one bounded group of ordered speech chunks on the paired link."""
         if not 1 <= len(chunks) <= SPEECH_CHUNK_WINDOW:

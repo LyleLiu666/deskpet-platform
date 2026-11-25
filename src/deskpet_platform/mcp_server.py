@@ -24,6 +24,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict
 
+from .analytics_store import AnalyticsStore
+from .analytics_sync import AnalyticsSync
 from .adaptive_speed.config import Config as SpeedConfig
 from .adaptive_speed.history import Frame, History
 from .adaptive_speed.runtime import AdaptiveRuntime
@@ -151,7 +153,7 @@ class BoardSession:
 
     def __init__(self, path, *, background=False, client_factory=Client, token_root=None, usb_port=None,
                  token_collector=None, token_probe=None, probe_collector=None, no_token_probe=False,
-                 notification_source=None, quota_store=None):
+                 notification_source=None, quota_store=None, analytics_store=None):
         if (token_collector is not None and (token_probe is not None or probe_collector is not None) or
                 token_probe is not None and probe_collector is not None):
             raise ValueError("请只选择一种 Token 速度采集器。")
@@ -216,6 +218,8 @@ class BoardSession:
         self.codex_live_allowance = {}
         self.codex_live_observed_at = 0.0
         self.quota_store = quota_store if quota_store is not None else QuotaStore(Path(path).parent / "agent-quota.sqlite3")
+        self.analytics = AnalyticsSync(analytics_store or AnalyticsStore(self.quota_store.path.with_name("analytics.sqlite3")),
+                                       self.notifications, device=Path(path).resolve())
         self.computer_display = DisplayPreferences(Path(path).parent / "computer-display.json")
         self.computer_metrics = ComputerMetrics()
         self.computer_metrics_lock = asyncio.Lock()
@@ -1702,6 +1706,20 @@ class BoardSession:
         selected = self.snapshot.get("quota_source")
         return (selected,) if selected in SOURCES else ()
 
+    async def poll_analytics(self):
+        """Collect and sync history separately from reminder and speed polling."""
+        while True:
+            client = self.client
+            if client is not None and client.channel.capabilities.get("agent_analytics") == 1:
+                try:
+                    await self.analytics.step(client, quota_store=self.quota_store,
+                                              codex=(self.codex_live_observed_at, self.codex_live_allowance))
+                except (OSError, sqlite3.Error, ValueError, KeyError, *LINK_ERRORS) as error:
+                    self.snapshot["analytics_error"] = type(error).__name__
+                else:
+                    self.snapshot.pop("analytics_error", None)
+            await asyncio.sleep(4)
+
     async def poll_antigravity_quota(self):
         """Refresh the shared quota cache without delaying writes to the board."""
         while True:
@@ -2597,7 +2615,7 @@ def create_server(config_path, role_dir=None, token_root=None, usb_port=None, to
             board.loop = asyncio.get_running_loop()
             tasks.extend(asyncio.create_task(run()) for run in
                          (board.poll, board.poll_weather, board.poll_tokens, board.poll_quota,
-                          board.poll_quota_display, board.poll_antigravity_quota, board.poll_computer_metrics))
+                          board.poll_quota_display, board.poll_antigravity_quota, board.poll_computer_metrics, board.poll_analytics))
 
     def make_session(path):
         board = BoardSession(path, token_root=token_root, token_collector=token_collector, probe_collector=shared_probe,

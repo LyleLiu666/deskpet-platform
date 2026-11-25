@@ -392,6 +392,17 @@ class NotificationStore:
             return f"p-{identity:x}-S{suffix}"
         return f"p-{identity:x}-{digest.hex()}"
 
+    def analytics_attention(self):
+        """Session keys and local inbox IDs for currently actionable questions."""
+        with closing(self._connect()) as db:
+            rows = db.execute(f"""SELECT n.source,n.session,n.id FROM notifications AS n
+                WHERE ({ACTIVE_QUESTION}) ORDER BY n.id DESC LIMIT 10""").fetchall()
+        source_ids = {"codex": (0,), "claude_code": (1,), "antigravity": (2, 3),
+                      "opencode": (4,), "workbuddy": (5,)}
+        return [[source_id, self._session_key(source, session).hex(), identity]
+                for source, session, identity in rows if 0 < identity <= 0xffffffff
+                for source_id in source_ids.get(source, ())]
+
     def cache_records(self, *, pending_first=False, active_only=False, session_ids=False):
         with closing(self._connect()) as db:
             # Within one request show its latest unanswered question. A more
@@ -1016,7 +1027,7 @@ async def _run_device_worker(config_path, *, source, client_factory, deadline, p
         methods = [board.poll]
         if live_options is not None:
             methods.extend((board.poll_weather, board.poll_tokens, board.poll_quota,
-                            board.poll_quota_display, board.poll_antigravity_quota, board.poll_computer_metrics))
+                            board.poll_quota_display, board.poll_antigravity_quota, board.poll_computer_metrics, board.poll_analytics))
         return board, [asyncio.create_task(method()) for method in methods]
 
     async def stop_session():

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_source ON events(source, session, key);
 CREATE INDEX IF NOT EXISTS events_file_stamp ON events(file, stamp);
 CREATE INDEX IF NOT EXISTS events_codex_total ON events(source, session, codex_total, amount);
+CREATE TABLE IF NOT EXISTS sync_receipts (device TEXT PRIMARY KEY, observed_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS quota_snapshots (
   source INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, snapshot TEXT NOT NULL
 );
@@ -241,6 +242,10 @@ class AnalyticsStore:
                        "observed_at=excluded.observed_at,snapshot=excluded.snapshot "
                        "WHERE excluded.observed_at>=quota_snapshots.observed_at AND excluded.snapshot!=quota_snapshots.snapshot",
                        (source, int(observed_at), json.dumps(quota)))
+
+    def record_sync(self, device, stamp):
+        with self._connect() as db:
+            db.execute("INSERT OR REPLACE INTO sync_receipts VALUES (?,?)", (str(device), stamp))
 
     def compute_source_payload(self, source, now):
         if not 0 <= source < len(SOURCES):
