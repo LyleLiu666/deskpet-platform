@@ -305,14 +305,18 @@ class AnalyticsStore:
                 GROUP BY day HAVING count(amount)>0 ORDER BY day DESC LIMIT 30
             """, bind).fetchall()
             rows = db.execute(EVENTS + f"""
-                SELECT session,max(stamp),wire_sum(amount),sum(turn),
-                       (SELECT title FROM observed o WHERE o.session=g.session AND title!=''
-                        ORDER BY stamp DESC,key DESC LIMIT 1),
-                       (SELECT CASE WHEN running AND stamp > :active_since THEN 1 ELSE 0 END FROM observed o
-                        WHERE o.session=g.session AND running IS NOT NULL
-                        ORDER BY stamp DESC,key LIMIT 1),
-                       {INPUTS}
-                FROM observed g GROUP BY session HAVING count(amount)>0
+                , session_events AS (
+                  SELECT observed.*,
+                    first_value(title) OVER (
+                      PARTITION BY session ORDER BY title!='' DESC, stamp DESC, key DESC
+                    ) AS latest_title,
+                    first_value(CASE WHEN running AND stamp > :active_since THEN 1 ELSE 0 END) OVER (
+                      PARTITION BY session ORDER BY running IS NOT NULL DESC, stamp DESC, key
+                    ) AS latest_running
+                  FROM observed
+                )
+                SELECT session,max(stamp),wire_sum(amount),sum(turn),max(latest_title),max(latest_running),{INPUTS}
+                FROM session_events GROUP BY session HAVING count(amount)>0
                 ORDER BY max(stamp) DESC
             """, bind).fetchall()
             entry = db.execute("SELECT snapshot FROM quota_snapshots WHERE source=?", (source,)).fetchone()

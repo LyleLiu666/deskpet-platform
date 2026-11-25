@@ -109,6 +109,26 @@ class AnalyticsStoreTest(unittest.TestCase):
         self.write(name, codex_usage(stamp, 9, "first", 9), append=True)
         self.assertEqual(self.read(0)["days"], [(20261125, 9, 1)])
 
+    def test_session_projection_uses_latest_title_and_execution_state(self):
+        name = ".codex/sessions/2026/11/25/session.jsonl"
+
+        def at(seconds):
+            return (NOW + timedelta(seconds=seconds)).isoformat()
+
+        def event(kind, seconds, **fields):
+            return {"type": "event_msg", "timestamp": at(seconds), "payload": {"type": kind, **fields}}
+
+        self.write(name, event("thread_name_updated", -25, thread_name="Old"),
+                   codex_usage(at(-20), 9, "first", 9),
+                   event("thread_name_updated", -15, thread_name="Current"),
+                   event("task_started", -8, turn_id="turn"))
+        session, = self.read(0)["sessions"]
+        self.assertEqual((session["title"], session["state"], session["turns"]), ("Current", 1, 1))
+
+        self.write(name, event("task_complete", -8, turn_id="turn"), append=True)
+        session, = self.read(0)["sessions"]
+        self.assertEqual((session["title"], session["state"], session["turns"]), ("Current", 0, 1))
+
     def test_usage_backfill_weights_cache_and_preserves_unavailable_history(self):
         name = ".codex/sessions/2026/11/25/live.jsonl"
         missing = ".codex/sessions/2026/11/24/missing.jsonl"
