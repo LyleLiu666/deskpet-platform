@@ -92,17 +92,26 @@ class QuotaStore:
         if antigravity_quota.read_statusline_quota(payload, now):
             self.record(source, payload, now)
 
-    def read(self, source, now, *, max_age=MAX_AGE_SECONDS):
+    def observation(self, source):
+        """Return the original observation time for historical snapshots."""
         if source not in READERS or not self.path.is_file() or self.path.is_symlink():
             return None
         try:
             with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1)) as db:
                 row = db.execute("SELECT observed, reading FROM snapshots WHERE source = ?", (source,)).fetchone()
-            if row is None or not 0 <= now - row[0] <= max_age:
+            if row is None or type(row[0]) not in (float, int):
                 return None
             reading = json.loads(row[1])
-            if not isinstance(reading, dict):
-                return None
+            return (row[0], reading) if isinstance(reading, dict) else None
+        except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
+            return None
+
+    def read(self, source, now, *, max_age=MAX_AGE_SECONDS):
+        observation = self.observation(source)
+        if observation is None or not 0 <= now - observation[0] <= max_age:
+            return None
+        reading = observation[1]
+        try:
             if source == "claude_code":
                 windows = reading.get("quotas")
                 if not isinstance(windows, list):
