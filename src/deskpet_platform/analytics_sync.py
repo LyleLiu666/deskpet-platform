@@ -14,6 +14,20 @@ class AnalyticsSync:
         self.confirmed = {}
         self.next_history = 0.0
         self.last_synced_at = None
+        self.attention_epoch = None
+        self.next_attention = 0.0
+
+    async def refresh_attention(self, client):
+        channel = client.channel
+        if not channel.online or channel.capabilities.get("agent_analytics") != 1:
+            return
+        epoch, now = channel.epoch, time.monotonic()
+        if self.attention_epoch == epoch and now < self.next_attention:
+            return
+        rows = await asyncio.to_thread(self.notifications.analytics_attention)
+        await channel.send("analytics_attention", rows=rows)
+        self.attention_epoch = epoch
+        self.next_attention = now + 4
 
     async def step(self, client, *, quota_store, codex=None, now=None):
         channel = client.channel
@@ -24,8 +38,6 @@ class AnalyticsSync:
             self.confirmed.clear()
             self.epoch = channel.epoch
             self.next_history = 0
-        attention = await asyncio.to_thread(self.notifications.analytics_attention)
-        await channel.send("analytics_attention", rows=attention)
         if now < self.next_history:
             return
         await asyncio.to_thread(self.store.collect, now)

@@ -545,6 +545,11 @@ class BoardSession:
                         self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
                     if notification_sync_ok and self.client.channel.capabilities.get("attention_summary") == 1:
                         await self.refresh_attention_summary(self.client)
+                    if notification_sync_ok and channel.capabilities.get("agent_analytics") == 1:
+                        try:
+                            await self.analytics.refresh_attention(self.client)
+                        except (sqlite3.Error, ValueError):
+                            self.snapshot["notification_error"] = "提醒记录不可用，请检查本机存储。"
                     if self.client.channel.capabilities.get("touch_demo") == 1:
                         while event := await self.client.pending_touch():
                             try:

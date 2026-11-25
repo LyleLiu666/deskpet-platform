@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -10,6 +11,42 @@ from deskpet_platform.notifications import NotificationStore
 
 
 class AttentionSummaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_status_book_attention_refreshes_during_a_history_scan(self):
+        with TemporaryDirectory() as directory:
+            started = asyncio.Event()
+            finish = Event()
+            loop = asyncio.get_running_loop()
+
+            def collect(_now):
+                loop.call_soon_threadsafe(started.set)
+                finish.wait(5)
+
+            store = Mock(collect=collect)
+            session = BoardSession(Path(directory) / "device.json", no_token_probe=True, analytics_store=store)
+            client = Mock()
+            client.channel.capabilities = {"agent_analytics": 1}
+            client.channel.online, client.channel.epoch = True, "board"
+            client.channel.send = AsyncMock()
+            client.status = AsyncMock(return_value={})
+            session.client = client
+            session.recover_wifi = AsyncMock()
+            session.sync_computer_preferences = AsyncMock()
+            session.record_status = Mock()
+            history = asyncio.create_task(session.analytics.step(client, quota_store=session.quota_store))
+            try:
+                await asyncio.wait_for(started.wait(), 3)
+                client.channel.send.reset_mock()
+                session.notifications.add_agent_event("codex", "running", "ask", "response", "Need input")
+                with patch("deskpet_platform.mcp_server.asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await session.poll()
+                client.channel.send.assert_awaited_once_with(
+                    "analytics_attention", rows=session.notifications.analytics_attention())
+            finally:
+                finish.set()
+                history.cancel()
+                await asyncio.gather(history, return_exceptions=True)
+
     async def test_client_only_sends_to_supported_device(self):
         client = Client.__new__(Client)
         client._operation = asyncio.Lock()
