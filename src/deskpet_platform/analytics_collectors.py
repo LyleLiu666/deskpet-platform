@@ -33,6 +33,8 @@ class Event:
     running: bool | None = None
     codex_total: int | None = None
     codex_legacy: bool = False
+    input_tokens: int | None = None
+    cached_input_tokens: int | None = None
 
 
 def _dict(value):
@@ -52,6 +54,19 @@ def _title(value):
 
 def _amount(value):
     return value if type(value) is int and 0 <= value <= MAX_AMOUNT else None
+
+
+def _included_input(total, cached):
+    total, cached = _amount(total), _amount(cached)
+    return {
+        "input_tokens": total,
+        "cached_input_tokens": cached if total is not None and cached is not None and cached <= total else None,
+    }
+
+
+def _split_input(uncached, cached, written):
+    parts = tuple(map(_amount, (uncached, cached, written)))
+    return _included_input(sum(parts) if None not in parts else None, cached)
 
 
 def _time(value):
@@ -80,19 +95,24 @@ def _codex(row, session, position, stamp):
         return session, None
     if kind == "token_usage_record":
         response = _id(payload.get("response_id"))
-        amount = _amount(_dict(payload.get("usage")).get("output_tokens"))
+        usage = _dict(payload.get("usage"))
+        amount = _amount(usage.get("output_tokens"))
         if amount is not None:
             total = _amount(_dict(payload.get("thread_token_usage")).get("output_tokens"))
             return session, Event(0, session, "response:" + response if response else f"usage:{stamp}:{position}",
-                                  stamp, amount=amount, codex_total=total)
+                                  stamp, amount=amount, codex_total=total,
+                                  **_included_input(usage.get("input_tokens"), usage.get("cached_input_tokens")))
     if kind == "event_msg":
         kind = payload.get("type")
         if kind == "token_count":
-            amount = _amount(_dict(_dict(payload.get("info")).get("last_token_usage")).get("output_tokens"))
+            info = _dict(payload.get("info"))
+            usage = _dict(info.get("last_token_usage"))
+            amount = _amount(usage.get("output_tokens"))
             if amount is not None:
-                total = _amount(_dict(_dict(payload.get("info")).get("total_token_usage")).get("output_tokens"))
+                total = _amount(_dict(info.get("total_token_usage")).get("output_tokens"))
                 return session, Event(0, session, f"legacy:{stamp}:{position}", stamp, amount=amount,
-                                      codex_total=total, codex_legacy=True)
+                                      codex_total=total, codex_legacy=True,
+                                      **_included_input(usage.get("input_tokens"), usage.get("cached_input_tokens")))
         turn = _id(payload.get("turn_id"))
         if turn and kind in ("task_started", "task_complete", "turn_aborted"):
             return session, Event(0, session, f"{kind}:{turn}", stamp, turn=kind == "task_started",
@@ -113,8 +133,10 @@ def _claude(row, session, position, stamp):
     identity = _id(row.get("uuid")) or str(position)
     if kind == "assistant":
         identity = _id(message.get("id")) or identity
-        usage = _amount(_dict(message.get("usage")).get("output_tokens"))
-        return session, Event(1, session, "assistant:" + identity, stamp, amount=usage)
+        usage = _dict(message.get("usage"))
+        return session, Event(1, session, "assistant:" + identity, stamp, amount=_amount(usage.get("output_tokens")),
+                              **_split_input(usage.get("input_tokens"), usage.get("cache_read_input_tokens"),
+                                             usage.get("cache_creation_input_tokens")))
     if kind == "user" and not row.get("isMeta") and not row.get("toolUseResult"):
         content = message.get("content")
         if isinstance(content, str) or (isinstance(content, list) and
@@ -135,7 +157,10 @@ def _antigravity(row, session, position, stamp):
     if kind == "PLANNER_RESPONSE" and origin == "MODEL":
         model = row.get("model")
         source = ANTIGRAVITY_MODELS.get(model, -1) if isinstance(model, str) else -1
-        return session, Event(source, session, f"planner:{index}", stamp, amount=_amount(row.get("output_tokens")))
+        # Desktop transcript steps report fresh input separately from cached
+        # reads. This differs from the Antigravity CLI result envelope.
+        return session, Event(source, session, f"planner:{index}", stamp, amount=_amount(row.get("output_tokens")),
+                              **_split_input(row.get("input_tokens"), row.get("cache_read_tokens"), 0))
     return session, None
 
 
@@ -155,10 +180,23 @@ def _workbuddy(row, session, position, stamp):
         key = _id(data.get("conversationRequestId")) or identity
         return session, Event(5, session, "user:" + key, stamp, turn=True)
     if (kind == "message" and role == "assistant") or kind == "function_call":
-        usage = _amount(_dict(_dict(row.get("message")).get("usage")).get("output_tokens"))
-        if usage is not None:
+        usage = _dict(_dict(row.get("message")).get("usage"))
+        amount = _amount(usage.get("output_tokens"))
+        if amount is not None:
             key = _id(data.get("messageId")) or identity
-            return session, Event(5, session, "assistant:" + key, stamp, amount=usage)
+            total = _amount(usage.get("total_tokens"))
+            input_tokens = _amount(usage.get("input_tokens"))
+            cached = usage.get("cache_read_input_tokens")
+            # The recorded total identifies whether input already includes
+            # cache reads. A missing cache count stays unknown.
+            if total is not None and input_tokens is not None:
+                if total != input_tokens + amount:
+                    read = _amount(cached)
+                    input_tokens = total - amount if read is not None and total == input_tokens + read + amount else None
+            else:
+                input_tokens = None
+            return session, Event(5, session, "assistant:" + key, stamp, amount=amount,
+                                  **_included_input(input_tokens, cached))
     return session, None
 
 
@@ -212,8 +250,15 @@ def opencode_events(path, earliest):
                 continue
             role = message.get("role")
             if role == "assistant":
-                amount = _amount(_dict(message.get("tokens")).get("output"))
-                yield Event(4, session, identity, stamp, amount=amount)
+                tokens = _dict(message.get("tokens"))
+                cache = _dict(tokens.get("cache"))
+                amount = _amount(tokens.get("output"))
+                reasoning = _amount(tokens.get("reasoning"))
+                if amount is not None and reasoning is not None:
+                    # OpenCode's stored output is visible output only.
+                    amount = min(amount + reasoning, MAX_AMOUNT)
+                yield Event(4, session, identity, stamp, amount=amount,
+                            **_split_input(tokens.get("input"), cache.get("read"), cache.get("write")))
             elif role == "user":
                 yield Event(4, session, identity, stamp, turn=True)
             if title:

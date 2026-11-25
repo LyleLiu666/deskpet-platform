@@ -75,28 +75,82 @@ class AnalyticsStoreTest(unittest.TestCase):
         self.write(name, codex_usage(stamp, 9, "first", 9), append=True)
         self.assertEqual(self.read(0)["days"], [(20261125, 9, 1)])
 
+    def test_usage_backfill_weights_cache_and_preserves_unavailable_history(self):
+        name = ".codex/sessions/2026/11/25/live.jsonl"
+        missing = ".codex/sessions/2026/11/24/missing.jsonl"
+        first = codex_usage("2026-11-25T05:00:00Z", 1_726_916, "first", 1_726_916)
+        first["payload"]["usage"].update(input_tokens=1_163_035_646, cached_input_tokens=1_150_841_088,
+                                          reasoning_output_tokens=600_755, total_tokens=1_164_762_562)
+        second = codex_usage("2026-11-25T05:00:01Z", 12, "second", 1_726_928)
+        second["payload"]["usage"].update(input_tokens=400, cached_input_tokens=0)
+        self.write(name, first, first, second, codex_legacy("2026-11-25T05:00:01Z", 12, 1_726_928))
+        self.write(missing, codex_usage("2026-11-24T05:00:00Z", 4, "gone", 4))
+        self.store.collect(self.now)
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            # What the output-only receiver left behind after reading both files.
+            db.execute("DELETE FROM event_inputs")
+            db.execute("DELETE FROM usage_cursors")
+        (self.home / missing).unlink()
+        result = self.read(0)
+        self.assertEqual(result["days"], [(20261125, 1_726_928, 1), (20261124, 4, 1)])
+        self.assertEqual(result["day_usage"], {20261125: (1_163_036_046, 1_150_841_088),
+                                              20261124: (None, None)})
+        self.assertEqual(list(result["session_usage"].values()), [(1_163_036_046, 1_150_841_088), (None, None)])
+        self.assertEqual(result, self.read(0))
+        first["payload"]["usage"]["cached_input_tokens"] = 1
+        self.write(name, first)
+        self.assertEqual(self.read(0)["day_usage"][20261125], (1_163_035_646, 1))
+
+    def test_incomplete_inputs_and_explicit_zero_are_distinct(self):
+        name = ".codex/sessions/2026/11/25/live.jsonl"
+        first = codex_usage("2026-11-25T05:00:00Z", 2, "first", 2)
+        first["payload"]["usage"].update(input_tokens=40, cached_input_tokens=0)
+        self.write(name, first)
+        self.assertEqual(self.read(0)["day_usage"], {20261125: (40, 0)})
+        second = codex_usage("2026-11-25T05:00:01Z", 2, "second", 4)
+        second["payload"]["usage"].update(input_tokens=20, cached_input_tokens=21)
+        self.write(name, second, append=True)
+        self.assertEqual(self.read(0)["day_usage"], {20261125: (60, None)})
+        self.write(name, codex_usage("2026-11-25T05:00:02Z", 2, "third", 6), append=True)
+        result = self.read(0)
+        self.assertEqual(result["day_usage"], {20261125: (None, None)})
+        self.assertEqual(result["days"], [(20261125, 6, 1)])
+
     def test_real_schema_projections_keep_measured_zero_and_known_provider(self):
         stamp = "2026-11-25T08:00:00Z"
         for amount in (0, 3):
             self.write(".claude/projects/p/s.jsonl", {"type": "assistant", "timestamp": stamp, "sessionId": "s",
                        "message": {"id": "message", "usage": {"output_tokens": amount}}}, append=True)
         self.write(".claude/projects/p/zero.jsonl", {"type": "assistant", "timestamp": "2026-11-23T08:00:00Z",
-                   "message": {"id": "zero", "usage": {"output_tokens": 0}}})
-        self.assertEqual(self.read(1)["days"], [(20261125, 3, 1), (20261123, 0, 1)])
+                   "message": {"id": "zero", "usage": {"output_tokens": 0, "input_tokens": 0,
+                                                        "cache_creation_input_tokens": 0,
+                                                        "cache_read_input_tokens": 0}}})
+        self.write(".claude/projects/p/other.jsonl", {"type": "assistant", "timestamp": "2026-11-22T08:00:00Z",
+                   "message": {"id": "other", "usage": {"output_tokens": 1, "input_tokens": 2,
+                                                         "cache_creation_input_tokens": 3,
+                                                         "cache_read_input_tokens": 10}}})
+        claude = self.read(1)
+        self.assertEqual(claude["days"], [(20261125, 3, 1), (20261123, 0, 1), (20261122, 1, 1)])
+        self.assertEqual(claude["day_usage"], {20261125: (None, None), 20261123: (0, 0), 20261122: (15, 10)})
         ag = {"type": "PLANNER_RESPONSE", "source": "MODEL", "created_at": stamp}
         self.write(".gemini/antigravity/brain/task/.system_generated/logs/transcript.jsonl",
                    dict(ag, type="USER_INPUT", source="USER_EXPLICIT", step_index=0),
-                   dict(ag, model="gemini-4-argon-high", output_tokens=11, step_index=1),
+                   dict(ag, model="gemini-4-argon-high", output_tokens=11, input_tokens=5,
+                        cache_read_tokens=60, step_index=1),
                    dict(ag, model="claude-opus-5-5-high", output_tokens=17, step_index=2),
                    dict(ag, model=None, output_tokens=23, step_index=3))
         gemini = self.read(2)
         self.assertEqual(gemini["days"], [(20261125, 11, 1)])
+        self.assertEqual(gemini["day_usage"], {20261125: (65, 60)})
         self.assertEqual(gemini["sessions"][0]["turns"], 1)
         self.assertEqual(self.read(3)["days"], [(20261125, 17, 1)])
         wb = {"type": "message", "role": "assistant", "timestamp": int(self.now * 1000), "sessionId": "wb",
-              "providerData": {"messageId": "response"}, "message": {"usage": {"output_tokens": 19}}}
+              "providerData": {"messageId": "response"}, "message": {"usage": {
+                  "output_tokens": 19, "input_tokens": 82, "cache_read_input_tokens": 61, "total_tokens": 101}}}
         self.write(".workbuddy/projects/p/wb.jsonl", wb, dict(wb, type="function_call"))
-        self.assertEqual(self.read(5)["days"], [(20261125, 19, 1)])
+        workbuddy = self.read(5)
+        self.assertEqual(workbuddy["days"], [(20261125, 19, 1)])
+        self.assertEqual(workbuddy["day_usage"], {20261125: (82, 61)})
 
     def test_opencode_reads_database_and_picks_up_updates(self):
         path = self.home / ".local/share/opencode/opencode.db"
@@ -110,9 +164,12 @@ class AnalyticsStoreTest(unittest.TestCase):
                        (stamp, stamp, json.dumps({"role": "assistant", "tokens": {"output": 12}})))
             db.commit()
             self.assertEqual(self.read(4)["days"], [(20261125, 12, 1)])
-            db.execute("UPDATE message SET data=?", (json.dumps({"role": "assistant", "tokens": {"output": 14}}),))
+            db.execute("UPDATE message SET data=?", (json.dumps({"role": "assistant", "tokens": {
+                "output": 14, "reasoning": 6, "input": 55, "cache": {"read": 70, "write": 10}, "total": 155}}),))
             db.commit()
-            self.assertEqual(self.read(4)["sessions"][0]["output_tokens"], 14)
+            opencode = self.read(4)
+            self.assertEqual(opencode["sessions"][0]["output_tokens"], 20)
+            self.assertEqual(opencode["day_usage"], {20261125: (135, 70)})
 
     def test_only_quota_change_keeps_rollup_fingerprint(self):
         before = self.read(0)

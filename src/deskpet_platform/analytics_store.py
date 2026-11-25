@@ -29,6 +29,14 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_source ON events(source, session, key);
 CREATE INDEX IF NOT EXISTS events_file_stamp ON events(file, stamp);
 CREATE INDEX IF NOT EXISTS events_codex_total ON events(source, session, codex_total, amount);
+CREATE TABLE IF NOT EXISTS usage_cursors (
+  path TEXT PRIMARY KEY, device INTEGER, inode INTEGER, size INTEGER, mtime INTEGER
+);
+CREATE TABLE IF NOT EXISTS event_inputs (
+  file TEXT NOT NULL, source INTEGER NOT NULL, session TEXT NOT NULL, key TEXT NOT NULL,
+  input_tokens INTEGER, cached_input_tokens INTEGER,
+  PRIMARY KEY(file, source, session, key)
+);
 CREATE TABLE IF NOT EXISTS sync_receipts (device TEXT PRIMARY KEY, observed_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS quota_snapshots (
   source INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, snapshot TEXT NOT NULL
@@ -70,7 +78,16 @@ WITH relevant AS (
     PARTITION BY session, key ORDER BY (amount IS NOT NULL) DESC, stamp DESC, file
   ) AS choice
   FROM relevant e
-), observed AS (SELECT * FROM ranked WHERE choice=1)
+), observed AS (
+  SELECT r.*, i.input_tokens, i.cached_input_tokens
+  FROM ranked r LEFT JOIN event_inputs i USING(file, source, session, key)
+  WHERE choice=1
+)
+"""
+
+INPUTS = """
+  CASE WHEN count(input_tokens)=count(amount) THEN wire_sum(input_tokens) END,
+  CASE WHEN count(cached_input_tokens)=count(amount) THEN wire_sum(cached_input_tokens) END
 """
 
 
@@ -139,6 +156,13 @@ class AnalyticsStore:
     def _insert(db, path, event):
         db.execute(INSERT_EVENT, (path, event.source, event.session, event.key, event.timestamp, event.amount,
                                   event.turn, event.title, event.running, event.codex_total, event.codex_legacy))
+        if event.amount is not None:
+            key = path, event.source, event.session, event.key
+            if event.input_tokens is not None:
+                db.execute("INSERT OR REPLACE INTO event_inputs VALUES (?,?,?,?,?,?)",
+                           (*key, event.input_tokens, event.cached_input_tokens))
+            else:
+                db.execute("DELETE FROM event_inputs WHERE file=? AND source=? AND session=? AND key=?", key)
 
     def _scan_file(self, db, kind, path, default_session, earliest):
         if path.is_symlink():
@@ -152,6 +176,12 @@ class AnalyticsStore:
         name = str(path)
         previous = db.execute("SELECT device,inode,size,mtime,offset,session,boundary FROM file_cursors "
                               "WHERE path=?", (name,)).fetchone()
+        # Older receivers can still use the base tables. Rescan when their
+        # cursor has advanced farther than the input data, including on upgrade.
+        usage_cursor = db.execute("SELECT device,inode,size,mtime FROM usage_cursors WHERE path=?",
+                                  (name,)).fetchone()
+        if previous and previous[:4] != usage_cursor:
+            previous = None
         identity = stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
         if previous and previous[:4] == identity:
             return
@@ -171,6 +201,7 @@ class AnalyticsStore:
                     offset, session = candidate, previous[5]
             if not offset:
                 db.execute("DELETE FROM events WHERE file=?", (name,))
+                db.execute("DELETE FROM event_inputs WHERE file=?", (name,))
             stream.seek(offset)
             for offset, session, event in jsonl_events(kind, stream, session):
                 if event is not None and event.session:
@@ -179,6 +210,7 @@ class AnalyticsStore:
             boundary = stream.read(min(64, offset))
             db.execute("INSERT OR REPLACE INTO file_cursors VALUES (?,?,?,?,?,?,?,?)",
                        (name, *identity, offset, session, boundary))
+            db.execute("INSERT OR REPLACE INTO usage_cursors VALUES (?,?,?,?,?)", (name, *identity))
 
     def collect(self, now):
         today = datetime.fromtimestamp(now, self.timezone).date()
@@ -202,6 +234,7 @@ class AnalyticsStore:
         db.execute("SAVEPOINT opencode")
         try:
             db.execute("DELETE FROM events WHERE file=?", (str(path),))
+            db.execute("DELETE FROM event_inputs WHERE file=?", (str(path),))
             for event in opencode_events(path, earliest):
                 self._insert(db, str(path), event)
         except (OSError, sqlite3.Error, ValueError):
@@ -256,37 +289,40 @@ class AnalyticsStore:
                     today=int(now_day.strftime("%Y%m%d")), active_since=now - 300)
         with self._connect() as db:
             db.execute("BEGIN")
-            days = db.execute(EVENTS + """
-                SELECT natural_day(stamp) AS day, wire_sum(amount), count(DISTINCT session)
+            day_rows = db.execute(EVENTS + f"""
+                SELECT natural_day(stamp) AS day, wire_sum(amount), count(DISTINCT session), {INPUTS}
                 FROM observed WHERE natural_day(stamp) BETWEEN :first_day AND :today
                 GROUP BY day HAVING count(amount)>0 ORDER BY day DESC LIMIT 30
             """, bind).fetchall()
-            rows = db.execute(EVENTS + """
+            rows = db.execute(EVENTS + f"""
                 SELECT session,max(stamp),wire_sum(amount),sum(turn),
                        (SELECT title FROM observed o WHERE o.session=g.session AND title!=''
                         ORDER BY stamp DESC,key DESC LIMIT 1),
                        (SELECT CASE WHEN running AND stamp > :active_since THEN 1 ELSE 0 END FROM observed o
                         WHERE o.session=g.session AND running IS NOT NULL
-                        ORDER BY stamp DESC,key LIMIT 1)
+                        ORDER BY stamp DESC,key LIMIT 1),
+                       {INPUTS}
                 FROM observed g GROUP BY session HAVING count(amount)>0
                 ORDER BY max(stamp) DESC
             """, bind).fetchall()
             entry = db.execute("SELECT snapshot FROM quota_snapshots WHERE source=?", (source,)).fetchone()
 
-        days = [(date, min(amount, MAX_AMOUNT), min(count, 65535)) for date, amount, count in days]
+        days = [(date, amount, min(count, 65535)) for date, amount, count, _, _ in day_rows]
+        day_usage = {date: (inputs, cache) for date, _, _, inputs, cache in day_rows}
         fallback = ("Codex", "Claude Code", "Antigravity Gemini", "Antigravity 第三方", "OpenCode", "WorkBuddy")[source]
         identity = "antigravity" if source in (2, 3) else SOURCES[source]
-        sessions = [
-            dict(key=NotificationStore._session_key(identity, session).hex(), title=title or fallback,
-                 updated_at=int(stamp), output_tokens=min(amount, MAX_AMOUNT), turns=min(turns or 0, 65535),
-                 state=int(bool(running)))
-            for session, stamp, amount, turns, title, running in rows
-        ]
+        sessions, session_usage = [], {}
+        for session, stamp, amount, turns, title, running, inputs, cache in rows:
+            key = NotificationStore._session_key(identity, session).hex()
+            session_usage[key] = (inputs, cache)
+            sessions.append(dict(key=key, title=title or fallback, updated_at=int(stamp), output_tokens=amount,
+                                 turns=min(turns or 0, 65535), state=int(bool(running))))
         sessions.sort(key=lambda item: (-item["updated_at"], item["key"]))
         sessions = sessions[:CAPACITY]
+        session_usage = {item["key"]: session_usage[item["key"]] for item in sessions}
         quota = (json.loads(entry[0]) if entry else
                  dict(observed_at=0, low_warning=False, reset_cards=0, credits="", windows=[]))
         unit = 0
         quota_crc, rollup_crc = _wire_crc(unit, quota, days, sessions)
         return dict(unit_kind=unit, quota=quota, quota_crc=quota_crc, rollup_crc=rollup_crc,
-                    days=days, sessions=sessions)
+                    days=days, sessions=sessions, day_usage=day_usage, session_usage=session_usage)
