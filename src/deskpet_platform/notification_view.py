@@ -175,9 +175,9 @@ class NotificationView:
                                                    unread_responses=inbox_read)
             receipts, attention = self.store.cached_home_receipts(active) if self.mode == "home" else ((), 0)
         elif self.mode == "home":
-            summary, receipts = self.store.home_summary(include_receipts=True)
+            summary, receipts = self.store.home_summary(include_receipts=True, for_device=True)
         else:
-            summary, receipts = self.store.home_summary(), ()
+            summary, receipts = self.store.home_summary(for_device=True), ()
         waiting = min(65535, summary["response_count"])
         results = min(65535, summary["completed_count"])
         if self.mode == "home":
@@ -208,7 +208,8 @@ class NotificationView:
             if cache_first and anchor is None:
                 anchor = max((item["id"] for item in cached_records), default=0)
             page = self.store.list_page(self.page, page_size=4, anchor=anchor,
-                                        pending_first=channel.capabilities.get("agent_inbox_read") == 1, clamp=True)
+                                        pending_first=channel.capabilities.get("agent_inbox_read") == 1,
+                                        clamp=True, for_device=True)
             self.page = page["page"]
             if cache_first and self.anchor is None:
                 # The first live page can replace the TF page only if they

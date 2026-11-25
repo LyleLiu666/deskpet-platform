@@ -8,6 +8,7 @@ import unittest
 import zlib
 
 from deskpet_platform.notification_view import NotificationView
+from deskpet_platform.notification_cache import NotificationCache
 from deskpet_platform.notifications import NotificationStore
 from deskpet_platform.mcp_server import BoardSession
 
@@ -111,6 +112,42 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
         second = [fields for kind, fields in self.client.channel.messages if kind == "snapshot_begin"][-1]
         self.assertEqual(second["pagination"], [1, 29])
         self.assertEqual(int(original[2:]) - 1, int(self.view.rows[0]["id"][2:]))
+
+    async def test_device_keeps_one_pending_row_per_source_and_session(self):
+        other_source = self.store.add_agent_event("claude_code", "shared", "ask", "response", "Claude")
+        other_session = self.store.add_agent_event("codex", "separate", "ask", "response", "Another session")
+        questions = [self.store.add_agent_event("codex", "shared", f"ask-{i}", "response",
+                                                f"Question {i}", parent_turn=f"turn-{min(i, 3)}") for i in range(5)]
+        latest = questions[-1]
+        pending = [latest, other_session, other_source]
+        completed = self.store.add_agent_event("codex", "shared", "done", "completed", "History")
+
+        await self.view.refresh(self.client)
+        self.assertEqual(self.client.channel.messages[0][1]["waiting"], 3)
+        self.assertTrue(self.view.touch({"action": "list", "version": self.view.version, "id": ""}))
+        await self.view.refresh(self.client)
+        self.assertEqual([item["id"] for item in self.view.items.values()], [completed, *pending])
+
+        cache = NotificationCache(self.store)
+        for capability in (0, 1):
+            self.client.channel.capabilities["agent_local_inbox"] = capability
+            records = cache._records(self.client.channel)
+            self.assertEqual([row["id"] for row in records if row["category"] == "response"], pending)
+        rows, counts = self.store.legacy_message_snapshot(0, 0)
+        self.assertEqual(counts[1], 3)
+        self.assertEqual([row["id"] for row in rows if row["category"] == "response"], pending)
+        self.assertEqual({row[2] for row in self.store.analytics_attention()}, set(pending))
+        self.assertEqual(len(self.store.list()), 8)
+        self.assertEqual([row["id"] for row in self.store.list(for_device=True)], [completed, *pending])
+
+        self.client.channel.capabilities.pop("agent_local_inbox")
+        self.store.resolve_response(latest)
+        await self.view.refresh(self.client)
+        self.assertEqual([item["id"] for item in self.view.items.values() if not item["resolved"]],
+                         [completed, other_session, other_source])
+        self.assertEqual(self.store.legacy_message_snapshot(0, 0)[1][1], 2)
+        self.assertEqual({row[2] for row in self.store.analytics_attention()}, {other_session, other_source})
+        self.assertFalse(any(self.store.get(identity)["resolved"] for identity in questions[:-1]))
 
     async def test_details_are_checked_before_record_is_marked_seen(self):
         identity = self.store.add_agent_event("claude_code", "s", "ask", "response", "Project")
@@ -319,7 +356,8 @@ class NotificationViewTests(unittest.IsolatedAsyncioTestCase):
     async def test_four_older_questions_are_first_and_list_reads_through_the_newest_commit(self):
         channel = self.client.channel
         channel.capabilities.update(agent_cache_first=1, agent_inbox_read=1)
-        questions = [self.store.add_agent_event("codex", "s", f"q{i}", "response", f"Question {i}") for i in range(4)]
+        questions = [self.store.add_agent_event("codex", f"waiting-{i}", "ask", "response", f"Question {i}")
+                     for i in range(4)]
         for index in range(105):
             self.store.add_agent_event("codex", "s", str(index), "completed", "Task")
         card = self.store.cache_records(pending_first=True)

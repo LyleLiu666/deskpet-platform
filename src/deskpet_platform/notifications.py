@@ -33,13 +33,16 @@ SUPERSEDED_QUESTION = """n.response_group IS NOT NULL AND EXISTS (
 
 OPEN_QUESTION = f"""n.category='response' AND n.resolved IS NULL AND n.dismissed IS NULL
     AND NOT ({SUPERSEDED_QUESTION})"""
-# A newer request takes over the attention for its session.
+# A newer request takes over its session's device row. Independently
+# answerable questions in the same explicit batch can take turns in that row.
 ACTIVE_QUESTION = f"""{OPEN_QUESTION} AND NOT EXISTS (
         SELECT 1 FROM notifications AS newer
         WHERE newer.source=n.source AND newer.session=n.session
           AND newer.category='response' AND newer.id>n.id
-          AND (newer.resolved IS NULL OR n.parent_turn IS NULL
+          AND (newer.resolved IS NULL OR n.response_group IS NULL
+               OR newer.response_group IS NOT n.response_group
                OR newer.parent_turn IS NOT n.parent_turn))"""
+DEVICE_HISTORY = f"(n.category!='response' OR n.resolved IS NOT NULL OR ({ACTIVE_QUESTION}))"
 
 
 def notification_text(item, *, detail=True):
@@ -342,10 +345,10 @@ class NotificationStore:
     def list(self, limit=30, *, for_device=False):
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("通知数量须为 1 至 100。")
+        where = f"WHERE n.category!='response' OR ({ACTIVE_QUESTION})" if for_device else ""
         with closing(self._connect()) as db:
-            rows = db.execute("""SELECT id,title,created,shown,seen,source,category,resolved FROM notifications
-                WHERE NOT ? OR category!='response' OR (resolved IS NULL AND dismissed IS NULL)
-                ORDER BY id DESC LIMIT ?""", (for_device, limit)).fetchall()
+            rows = db.execute(f"""SELECT id,title,created,shown,seen,source,category,resolved FROM notifications n
+                {where} ORDER BY id DESC LIMIT ?""", (limit,)).fetchall()
         return self._items(rows)
 
     def get(self, identity):
@@ -355,22 +358,25 @@ class NotificationStore:
                            (identity,)).fetchone()
         return self._items([row])[0] if row else None
 
-    def list_page(self, page, *, page_size=4, anchor=None, pending_first=False, clamp=False):
+    def list_page(self, page, *, page_size=4, anchor=None, pending_first=False, clamp=False, for_device=False):
         if (type(page) is not int or page < 1 or type(page_size) is not int or not 1 <= page_size <= 100 or
                 (anchor is not None and (type(anchor) is not int or anchor < 0))):
             raise ValueError("invalid_notification_page")
+        where = "n.id<=? AND n.dismissed IS NULL"
+        if for_device:
+            where += f" AND {DEVICE_HISTORY}"
         with closing(self._connect()) as db:
             db.execute("BEGIN")
             if anchor is None:
                 anchor = db.execute("SELECT COALESCE(MAX(id),0) FROM notifications").fetchone()[0]
-            total = db.execute("SELECT COUNT(*) FROM notifications WHERE id<=? AND dismissed IS NULL", (anchor,)).fetchone()[0]
+            total = db.execute(f"SELECT COUNT(*) FROM notifications n WHERE {where}", (anchor,)).fetchone()[0]
             pages = max(1, (total + page_size - 1) // page_size)
             if clamp:
                 page = min(page, pages)
             if page > pages:
                 raise ValueError("invalid_notification_page")
-            rows = db.execute("""SELECT id,title,created,shown,seen,source,category,resolved FROM notifications
-                WHERE id<=? AND dismissed IS NULL
+            rows = db.execute(f"""SELECT id,title,created,shown,seen,source,category,resolved FROM notifications n
+                WHERE {where}
                 ORDER BY CASE WHEN ? AND category='response' AND resolved IS NULL THEN 0 ELSE 1 END,
                          id DESC LIMIT ? OFFSET ?""", (anchor, pending_first, page_size, (page - 1) * page_size)).fetchall()
         return {"items": self._items(rows), "page": page, "pages": pages, "total": total, "anchor": anchor}
@@ -404,17 +410,17 @@ class NotificationStore:
                 for source_id in source_ids.get(source, ())]
 
     def cache_records(self, *, pending_first=False, active_only=False, session_ids=False):
+        eligible = DEVICE_HISTORY
+        if active_only:
+            eligible = f"""(category='completed' AND id IN (
+                SELECT MAX(id) FROM notifications WHERE category='completed' AND seen IS NULL
+                GROUP BY source,session)) OR ({ACTIVE_QUESTION})"""
         with closing(self._connect()) as db:
-            # Within one request show its latest unanswered question. A more
-            # recent request supersedes older turns, including after answer.
             rows = db.execute(f"""SELECT id,title,created,shown,seen,source,category,resolved,session,turn,workspace,workspace_context
                 FROM notifications AS n
-                WHERE dismissed IS NULL AND (NOT ? OR (category='completed' AND id IN (
-                    SELECT MAX(id) FROM notifications WHERE category='completed' AND seen IS NULL
-                    GROUP BY source,session))
-                    OR ({ACTIVE_QUESTION}))
+                WHERE dismissed IS NULL AND ({eligible})
                 ORDER BY CASE WHEN ? AND category='response' AND resolved IS NULL THEN 0 ELSE 1 END,
-                         id DESC LIMIT 100""", (active_only, pending_first)).fetchall()
+                         id DESC LIMIT 100""", (pending_first,)).fetchall()
         records = self._items(rows)
         for record, row in zip(records, rows):
             # Showing a reminder on the device does not change its TF rendition.
@@ -524,10 +530,10 @@ class NotificationStore:
                         AND category='completed'""", (time.time(), through))
             completed = db.execute("""SELECT count(*) FROM (SELECT DISTINCT source,session
                 FROM notifications WHERE category='completed' AND seen IS NULL)""").fetchone()[0]
-            responses = db.execute(f"SELECT count(*) FROM notifications n WHERE {OPEN_QUESTION}").fetchone()[0]
+            responses = db.execute(f"SELECT count(*) FROM notifications n WHERE {ACTIVE_QUESTION}").fetchone()[0]
             rows = db.execute(f"""SELECT * FROM (
                 SELECT id,title,created,shown,seen,source,category,resolved FROM notifications n
-                WHERE category='completed' OR ({OPEN_QUESTION})
+                WHERE category='completed' OR ({ACTIVE_QUESTION})
                 ORDER BY category='response' DESC,id DESC LIMIT 10
                 ) ORDER BY id DESC""").fetchall()
         return self._items(rows), (min(65535, completed), min(65535, responses))
@@ -573,18 +579,19 @@ class NotificationStore:
                            (time.time(), identity, include_responses))
             return identity
 
-    def home_summary(self, *, include_receipts=False):
+    def home_summary(self, *, include_receipts=False, for_device=False):
+        waiting = ACTIVE_QUESTION if for_device else OPEN_QUESTION
         with closing(self._connect()) as db:
             db.execute("BEGIN")
             completed = db.execute("""SELECT source,COUNT(DISTINCT session),MAX(id) FROM notifications
                 WHERE seen IS NULL AND category='completed' GROUP BY source ORDER BY MAX(id) DESC""").fetchall()
             response = db.execute(f"""SELECT n.source,groups.amount,n.id,n.title FROM notifications n JOIN
                 (SELECT source,COUNT(*) amount,MAX(id) latest FROM notifications AS n
-                 WHERE {OPEN_QUESTION} GROUP BY source) groups
+                 WHERE {waiting} GROUP BY source) groups
                 ON n.id=groups.latest ORDER BY n.id DESC""").fetchall()
             if include_receipts:
                 receipts = tuple(row[0] for row in db.execute(f"""SELECT id FROM notifications n WHERE displayed IS NULL AND
-                    ((category='completed' AND seen IS NULL) OR ({OPEN_QUESTION})) ORDER BY id"""))
+                    ((category='completed' AND seen IS NULL) OR ({waiting})) ORDER BY id"""))
         summary = {"completed_count": sum(row[1] for row in completed),
                 "completed_sources": [row[0] for row in completed],
                 "response_source_count": len(response),
