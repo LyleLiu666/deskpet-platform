@@ -119,6 +119,16 @@ def _wire_crc(unit, quota, days, sessions):
     return f"{zlib.crc32(snapshot):08x}", f"{zlib.crc32(bytes([unit]) + day_bytes + session_bytes):08x}"
 
 
+def _wire_usage_crc(day_usage, session_usage):
+    crc = 0
+    for group in (day_usage, session_usage):
+        packed = b"".join(struct.pack("<QQ", 0 if inputs is None else inputs + 1,
+                                     0 if cache is None else cache + 1)
+                          for inputs, cache in group.values())
+        crc = zlib.crc32(packed.ljust(CAPACITY * 16, b"\0"), crc)
+    return f"{crc:08x}"
+
+
 class AnalyticsStore:
     def __init__(self, path, *, home=None, timezone=None):
         if os.name == "nt":
@@ -325,4 +335,5 @@ class AnalyticsStore:
         unit = 0
         quota_crc, rollup_crc = _wire_crc(unit, quota, days, sessions)
         return dict(unit_kind=unit, quota=quota, quota_crc=quota_crc, rollup_crc=rollup_crc,
-                    days=days, sessions=sessions, day_usage=day_usage, session_usage=session_usage)
+                    days=days, sessions=sessions, day_usage=day_usage, session_usage=session_usage,
+                    usage_crc=_wire_usage_crc(day_usage, session_usage))

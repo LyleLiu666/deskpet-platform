@@ -47,34 +47,51 @@ class AnalyticsSync:
             await asyncio.to_thread(self.store.record_sync, self.device, self.last_synced_at)
 
     async def _sync_source(self, channel, source, state, payload):
+        rich_usage = "usage_crc" in state
+        usage_changed = rich_usage and state["usage_crc"] != payload["usage_crc"]
         quota_changed = state["quota_crc"] != payload["quota_crc"]
         rollup_changed = state["rollup_crc"] != payload["rollup_crc"]
-        if not quota_changed and not rollup_changed:
+        if rich_usage:
+            days = [(*row, *payload["day_usage"][row[0]]) if payload["day_usage"][row[0]][0] is not None else row
+                    for row in payload["days"]]
+            sessions = [dict(row, inputs=payload["session_usage"][row["key"]])
+                        if payload["session_usage"][row["key"]][0] is not None else row
+                        for row in payload["sessions"]]
+            payload = dict(payload, days=days, sessions=sessions)
+        if not quota_changed and not rollup_changed and not usage_changed:
             self.confirmed[source] = payload
             return
 
+        crcs = {key: payload[key] for key in ("quota_crc", "rollup_crc")}
+        if rich_usage:
+            crcs["usage_crc"] = payload["usage_crc"]
         if state.get("unit_kind") == payload["unit_kind"]:
             previous = self.confirmed.get(source)
-            if previous and previous["rollup_crc"] != state["rollup_crc"]:
+            if previous and (previous["rollup_crc"] != state["rollup_crc"] or
+                             (rich_usage and previous["usage_crc"] != state["usage_crc"])):
                 previous = None
             known_days = {row[0]: row for row in previous["days"]} if previous else {}
             known_sessions = {row["key"]: row for row in previous["sessions"]} if previous else {}
-            days = [row for row in payload["days"] if row[0] >= state["last_synced_day"]
-                    and known_days.get(row[0]) != row] if rollup_changed else []
-            sessions = [row for row in payload["sessions"] if known_sessions.get(row["key"]) != row
-                        ] if rollup_changed else []
+            days, sessions = [], []
+            if rollup_changed or usage_changed:
+                # A cache-only correction can affect any past day without
+                # moving the board's last synced date.
+                backfill = previous is not None or (usage_changed and not rollup_changed)
+                days = [row for row in payload["days"] if (backfill or row[0] >= state["last_synced_day"])
+                        and known_days.get(row[0]) != row]
+                sessions = [row for row in payload["sessions"] if known_sessions.get(row["key"]) != row]
             args = {"quota": payload["quota"]} if quota_changed else {}
-            if await self._patch_and_commit(channel, source, args, days, sessions, payload):
+            if await self._patch_and_commit(channel, source, args, days, sessions, crcs):
                 self.confirmed[source] = payload
                 return
 
         args = {"reset": True, "unit_kind": payload["unit_kind"], "quota": payload["quota"]}
-        if not await self._patch_and_commit(channel, source, args, payload["days"], payload["sessions"], payload):
+        if not await self._patch_and_commit(channel, source, args, payload["days"], payload["sessions"], crcs):
             raise ValueError(f"analytics_resync_failed:{SOURCES[source]}")
         self.confirmed[source] = payload
 
     @staticmethod
-    async def _patch_and_commit(channel, source, fields, days, sessions, payload):
+    async def _patch_and_commit(channel, source, fields, days, sessions, crcs):
         packet = dict(source=source, **fields)
         for key, rows in (("days", days), ("sessions", sessions)):
             for row in rows:
@@ -87,6 +104,5 @@ class AnalyticsSync:
                 packet = candidate
         if len(packet) > 1:
             await channel.send("analytics_patch", **packet)
-        response = await channel.send("analytics_commit", source=source, quota_crc=payload["quota_crc"],
-                                      rollup_crc=payload["rollup_crc"])
+        response = await channel.send("analytics_commit", source=source, **crcs)
         return response["need_resync"] is False
