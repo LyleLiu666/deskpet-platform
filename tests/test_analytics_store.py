@@ -88,9 +88,9 @@ class AnalyticsStoreTest(unittest.TestCase):
         self.write(name, codex_usage(stamp, 11, "second", 18), append=True)
         offsets = []
 
-        def observe(kind, stream, session):
+        def observe(kind, stream, session, **options):
             start = stream.tell()
-            yield from jsonl_events(kind, stream, session)
+            yield from jsonl_events(kind, stream, session, **options)
             offsets.append((start, stream.tell()))
 
         with patch("deskpet_platform.analytics_store.jsonl_events", side_effect=observe):
@@ -122,6 +122,109 @@ class AnalyticsStoreTest(unittest.TestCase):
                    codex_usage(at(8), 11, "third", None),
                    codex_legacy(at(9), 11, 111))
         self.assertEqual(self.read(0)["days"], [(20261125, 35, 1)])
+
+    def test_codex_archive_move_and_copy_keep_one_rollout(self):
+        active = ".codex/sessions/2026/11/25/rollout.jsonl"
+        archived = ".codex/archived_sessions/rollout.jsonl"
+        stamp = "2026-11-25T05:00:00Z"
+        meta = {"type": "session_meta", "payload": {"id": "archived-session"}}
+        usage = codex_legacy(stamp, 12, 12)
+        path = self.write(active, meta, usage)
+        before = self.read(0)
+        copy = self.write(archived, meta, usage)
+        self.assertEqual(self.read(0), before)
+        path.unlink()
+        self.assertEqual(self.read(0), before)
+        copy.unlink()
+        self.assertEqual(self.read(0), before)
+
+        self.write(".codex/archived_sessions/only-archived.jsonl", codex_legacy(stamp, 19, 19))
+        self.assertEqual(self.read(0)["days"], [(20261125, 31, 2)])
+
+    def test_codex_upgrade_replaces_cached_rows_after_archive_rename(self):
+        stamp = "2026-11-25T05:00:00Z"
+        name = ".codex/sessions/2026/11/25/rollout.jsonl"
+        modern = codex_usage(stamp, 30, "response", 35)
+        modern["payload"].update(thread_id="move", turn_id="turn")
+        modern["payload"]["usage"].update(input_tokens=1_300, cached_input_tokens=1_100)
+        legacy = codex_legacy(stamp, 25, 30)
+        legacy["payload"]["info"]["last_token_usage"].update(input_tokens=1_200, cached_input_tokens=1_000)
+        path = self.write(name, {"type": "session_meta", "payload": {"id": "move", "forked_from_id": "parent"}},
+                          {"type": "session_meta", "payload": {"id": "parent"}}, modern, legacy)
+        expected = self.read(0)
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            # An older collector switched to the embedded parent header.
+            db.execute("DELETE FROM codex_rollout_cursors")
+            db.execute("UPDATE events SET session='parent' WHERE file=?", (str(path),))
+            db.execute("UPDATE event_inputs SET session='parent' WHERE file=?", (str(path),))
+        archive = self.home / ".codex/archived_sessions" / path.name
+        archive.parent.mkdir(parents=True)
+        path.rename(archive)
+        self.assertEqual(self.read(0), expected)
+
+    def test_codex_full_dual_format_replaces_one_usage_after_append(self):
+        name = ".codex/sessions/2026/11/25/dual.jsonl"
+        modern = codex_usage("2026-11-25T05:00:00Z", 30, "response", 70)
+        modern["payload"].update(thread_id="session", turn_id="turn")
+        modern["payload"]["usage"].update(input_tokens=1_300, cached_input_tokens=1_100)
+        modern["payload"]["thread_token_usage"].update(input_tokens=1_800, cached_input_tokens=1_400)
+        self.write(name, {"type": "session_meta", "payload": {"id": "session"}}, modern)
+        self.assertEqual(self.read(0)["days"], [(20261125, 30, 1)])
+        legacy = codex_legacy("2026-11-25T05:00:45Z", 25, 65)
+        legacy["payload"]["info"]["last_token_usage"].update(input_tokens=1_200, cache_read_input_tokens=1_000)
+        self.write(name, legacy, append=True)
+        result = self.read(0)
+        self.assertEqual(result["days"], [(20261125, 25, 1)])
+        self.assertEqual(result["day_usage"], {20261125: (1_200, 1_000)})
+        self.assertEqual(self.read(0), result)
+
+    def test_codex_cumulative_only_deltas_continue_from_saved_baseline(self):
+        name = ".codex/archived_sessions/cumulative.jsonl"
+        first = codex_legacy("2026-11-24T15:59:59Z", 5, 5)
+        first_info = first["payload"]["info"]
+        first_info["last_token_usage"].update(input_tokens=100, cached_input_tokens=60)
+        first_info["total_token_usage"].update(input_tokens=100, cached_input_tokens=60)
+        self.write(name, first)
+        self.assertEqual(self.read(0)["days"], [(20261124, 5, 1)])
+        later = codex_legacy("2026-11-24T16:00:01Z", 0, 12)
+        later_info = later["payload"]["info"]
+        del later_info["last_token_usage"]
+        later_info["total_token_usage"].update(input_tokens=150, cached_input_tokens=90)
+        self.write(name, later, later, append=True)
+        result = self.read(0)
+        self.assertEqual(result["days"], [(20261125, 7, 1), (20261124, 5, 1)])
+        self.assertEqual(result["day_usage"], {20261125: (50, 30), 20261124: (100, 60)})
+
+    def test_codex_fork_replay_keeps_only_new_child_usage(self):
+        name = ".codex/sessions/2026/11/25/child.jsonl"
+        start = datetime(2026, 11, 25, 5, tzinfo=timezone.utc)
+        child = {"type": "session_meta", "timestamp": start.isoformat(),
+                 "payload": {"id": "child", "forked_from_id": "parent"}}
+        parent = {"type": "session_meta", "timestamp": start.isoformat(), "payload": {"id": "parent"}}
+        replay = []
+        for count in range(1, 21):
+            entry = codex_legacy((start + timedelta(milliseconds=count * 10)).isoformat(), 1, count)
+            info = entry["payload"]["info"]
+            info["last_token_usage"].update(input_tokens=10, cached_input_tokens=7)
+            info["total_token_usage"].update(input_tokens=count * 10, cached_input_tokens=count * 7)
+            replay.append(entry)
+
+        self.write(name, child, parent, *replay[:10])
+        self.assertEqual(self.read(0)["days"], [(20261125, 10, 1)])
+        self.write(name, *replay[10:], append=True)
+        self.assertEqual(self.read(0)["days"], [])
+
+        recorded = codex_legacy((start + timedelta(seconds=3)).isoformat(), 0, 27)
+        info = recorded["payload"]["info"]
+        del info["last_token_usage"]
+        info["total_token_usage"].update(input_tokens=250, cached_input_tokens=170)
+        self.write(name, recorded, append=True)
+        result = self.read(0)
+        self.assertEqual(result["days"], [(20261125, 7, 1)])
+        self.assertEqual(result["day_usage"], {20261125: (50, 30)})
+        from deskpet_platform.notifications import NotificationStore
+        self.assertEqual(result["sessions"][0]["key"],
+                         NotificationStore._session_key("codex", "child").hex())
 
     def test_session_projection_uses_latest_title_and_execution_state(self):
         name = ".codex/sessions/2026/11/25/session.jsonl"

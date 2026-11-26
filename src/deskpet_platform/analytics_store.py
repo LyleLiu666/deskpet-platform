@@ -1,5 +1,6 @@
 """Persistent cursor journal and the canonical DeskPet usage projection."""
 from contextlib import closing, contextmanager
+from dataclasses import asdict
 from datetime import datetime, timedelta
 import json
 import os
@@ -8,7 +9,7 @@ import sqlite3
 import struct
 import zlib
 
-from .analytics_collectors import MAX_AMOUNT, jsonl_events, log_paths, opencode_events
+from .analytics_collectors import CodexRollout, MAX_AMOUNT, jsonl_events, log_paths, opencode_events
 from .notifications import NotificationStore
 from .quota_projection import project_quota
 
@@ -20,6 +21,7 @@ CREATE TABLE IF NOT EXISTS file_cursors (
   path TEXT PRIMARY KEY, device INTEGER, inode INTEGER, size INTEGER, mtime INTEGER,
   offset INTEGER, session TEXT, boundary BLOB
 );
+CREATE INDEX IF NOT EXISTS file_cursors_identity ON file_cursors(device, inode);
 CREATE TABLE IF NOT EXISTS events (
   file TEXT NOT NULL, source INTEGER NOT NULL, session TEXT NOT NULL, key TEXT NOT NULL,
   stamp REAL NOT NULL, amount INTEGER, turn INTEGER, title TEXT, running INTEGER,
@@ -33,6 +35,10 @@ CREATE INDEX IF NOT EXISTS events_codex_mirror_time ON events(session, amount, s
   WHERE source=0 AND NOT codex_legacy AND amount IS NOT NULL;
 CREATE TABLE IF NOT EXISTS usage_cursors (
   path TEXT PRIMARY KEY, device INTEGER, inode INTEGER, size INTEGER, mtime INTEGER
+);
+CREATE TABLE IF NOT EXISTS codex_rollout_cursors (
+  path TEXT PRIMARY KEY, device INTEGER, inode INTEGER, size INTEGER, mtime INTEGER,
+  offset INTEGER, state TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS event_inputs (
   file TEXT NOT NULL, source INTEGER NOT NULL, session TEXT NOT NULL, key TEXT NOT NULL,
@@ -53,8 +59,8 @@ ON CONFLICT(file, source, session, key) DO UPDATE SET
   codex_total=excluded.codex_total,codex_legacy=excluded.codex_legacy
 """
 
-# A modern Codex record and its legacy mirror share the cumulative output and
-# amount. Older logs that lack a cumulative value match a nearby modern record.
+# Fully described Codex reports are reconciled before insertion. Sparse retained
+# rows still use their original cumulative or nearby matching rules.
 EVENTS = """
 WITH relevant AS (
   SELECT e.* FROM events e
@@ -183,6 +189,25 @@ class AnalyticsStore:
             else:
                 db.execute("DELETE FROM event_inputs WHERE file=? AND source=? AND session=? AND key=?", key)
 
+    @staticmethod
+    def _forget_relocated_codex_log(db, path, stream, identity):
+        # An archive rename can leave old-format rows behind under the vanished
+        # path. Require the same inode, name and saved bytes before replacing it.
+        aliases = db.execute("SELECT path,offset,boundary FROM file_cursors "
+                             "WHERE device=? AND inode=? AND path!=?",
+                             (*identity[:2], str(path))).fetchall()
+        for old_path, offset, boundary in aliases:
+            if Path(old_path).name != path.name or os.path.lexists(old_path) or not 0 < offset <= identity[2]:
+                continue
+            stream.seek(max(0, offset - 64))
+            if stream.read(min(64, offset)) != boundary:
+                continue
+            db.execute("DELETE FROM events WHERE file=?", (old_path,))
+            db.execute("DELETE FROM event_inputs WHERE file=?", (old_path,))
+            db.execute("DELETE FROM file_cursors WHERE path=?", (old_path,))
+            db.execute("DELETE FROM usage_cursors WHERE path=?", (old_path,))
+            db.execute("DELETE FROM codex_rollout_cursors WHERE path=?", (old_path,))
+
     def _scan_file(self, db, kind, path, default_session, earliest):
         if path.is_symlink():
             return
@@ -201,6 +226,19 @@ class AnalyticsStore:
                                   (name,)).fetchone()
         if previous and previous[:4] != usage_cursor:
             previous = None
+        codex = None
+        if kind == "codex":
+            saved = db.execute("SELECT device,inode,size,mtime,offset,state FROM codex_rollout_cursors WHERE path=?",
+                               (name,)).fetchone()
+            if previous and saved and saved[:5] == previous[:5]:
+                try:
+                    codex = CodexRollout(**json.loads(saved[5]))
+                except (TypeError, ValueError):
+                    pass
+            if codex is None:
+                # Rebuild readable Codex files once with the new reconciliation
+                # rules. An older writer may also have advanced the base cursor.
+                previous = None
         identity = stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
         if previous and previous[:4] == identity:
             return
@@ -213,7 +251,8 @@ class AnalyticsStore:
             if (opened.st_dev, opened.st_ino) != identity[:2]:
                 return
             offset, session = 0, default_session
-            if previous and previous[:2] == identity[:2] and identity[2] > previous[2]:
+            if (previous and previous[:2] == identity[:2] and identity[2] > previous[2]
+                    and not (codex and codex.fork_prefix_pending)):
                 candidate = previous[4]
                 stream.seek(max(0, candidate - 64))
                 if stream.read(min(64, candidate)) == previous[6]:
@@ -221,8 +260,11 @@ class AnalyticsStore:
             if not offset:
                 db.execute("DELETE FROM events WHERE file=?", (name,))
                 db.execute("DELETE FROM event_inputs WHERE file=?", (name,))
+                if kind == "codex":
+                    self._forget_relocated_codex_log(db, path, stream, identity)
+                    codex = CodexRollout()
             stream.seek(offset)
-            for offset, session, event in jsonl_events(kind, stream, session):
+            for offset, session, event in jsonl_events(kind, stream, session, codex=codex):
                 if event is not None and event.session:
                     self._insert(db, name, event)
             stream.seek(max(0, offset - 64))
@@ -230,6 +272,9 @@ class AnalyticsStore:
             db.execute("INSERT OR REPLACE INTO file_cursors VALUES (?,?,?,?,?,?,?,?)",
                        (name, *identity, offset, session, boundary))
             db.execute("INSERT OR REPLACE INTO usage_cursors VALUES (?,?,?,?,?)", (name, *identity))
+            if codex is not None:
+                db.execute("INSERT OR REPLACE INTO codex_rollout_cursors VALUES (?,?,?,?,?,?,?)",
+                           (name, *identity, offset, json.dumps(asdict(codex))))
 
     def collect(self, now):
         today = datetime.fromtimestamp(now, self.timezone).date()

@@ -37,6 +37,14 @@ class Event:
     cached_input_tokens: int | None = None
 
 
+@dataclass(slots=True)
+class CodexRollout:
+    metadata_seen: bool = False
+    fork_prefix_pending: bool = False
+    pending_response: str = ""
+    previous_total: tuple[int | None, ...] | None = None
+
+
 def _dict(value):
     return value if isinstance(value, dict) else {}
 
@@ -85,38 +93,68 @@ def _time(value):
     return stamp if 1577836800 <= stamp <= 4102444799 else None
 
 
-def _codex(row, session, position, stamp):
+def _codex_usage(raw):
+    raw = _dict(raw)
+    cache = raw.get("cached_input_tokens")
+    if cache is None:
+        cache = raw.get("cache_read_input_tokens")
+    return tuple(map(_amount, (raw.get("output_tokens"), raw.get("input_tokens"), cache)))
+
+
+def _codex(row, session, position, stamp, rollout):
     payload = _dict(row.get("payload"))
     kind = row.get("type")
     if kind == "session_meta":
-        session = _id(payload.get("id")) or session
+        if not rollout.metadata_seen and (identity := _id(payload.get("id"))):
+            session, rollout.metadata_seen = identity, True
         return session, None
     if stamp is None:
         return session, None
     if kind == "token_usage_record":
         response = _id(payload.get("response_id"))
-        usage = _dict(payload.get("usage"))
-        amount = _amount(usage.get("output_tokens"))
+        amount, inputs, cached = _codex_usage(payload.get("usage"))
+        key = "response:" + response if response else f"usage:{stamp}:{position}"
+        # A structured response report is followed by its token_count report in
+        # the same turn. Their cumulative counters may have different baselines.
+        thread = _id(payload.get("thread_id"))
+        rollout.pending_response = key if response and thread == session and _id(payload.get("turn_id")) else ""
         if amount is not None:
             total = _amount(_dict(payload.get("thread_token_usage")).get("output_tokens"))
-            return session, Event(0, session, "response:" + response if response else f"usage:{stamp}:{position}",
+            return session, Event(0, session, key,
                                   stamp, amount=amount, codex_total=total,
-                                  **_included_input(usage.get("input_tokens"), usage.get("cached_input_tokens")))
+                                  **_included_input(inputs, cached))
     if kind == "event_msg":
         kind = payload.get("type")
         if kind == "token_count":
             info = _dict(payload.get("info"))
-            usage = _dict(info.get("last_token_usage"))
-            amount = _amount(usage.get("output_tokens"))
+            if not info:
+                return session, None
+            pending, rollout.pending_response = rollout.pending_response, ""
+            previous = rollout.previous_total
+            totals = _codex_usage(info.get("total_token_usage"))
+            if any(value is not None for value in totals):
+                rollout.previous_total = totals
+            last = info.get("last_token_usage")
+            usage = _codex_usage(last)
+            if not isinstance(last, dict) and totals[0] is not None:
+                baseline = previous if previous is not None else (0, 0, 0)
+                usage = tuple(max(value-before, 0) if value is not None and before is not None else None
+                              for value, before in zip(totals, baseline))
+                if not any(usage):
+                    return session, None
+            amount, inputs, cached = usage
             if amount is not None:
-                total = _amount(_dict(info.get("total_token_usage")).get("output_tokens"))
-                return session, Event(0, session, f"legacy:{stamp}:{position}", stamp, amount=amount,
-                                      codex_total=total, codex_legacy=True,
-                                      **_included_input(usage.get("input_tokens"), usage.get("cached_input_tokens")))
+                complete = inputs is not None and cached is not None
+                key = pending if pending and complete else f"legacy:{stamp}:{position}"
+                return session, Event(0, session, key, stamp, amount=amount,
+                                      codex_total=totals[0], codex_legacy=not complete,
+                                      **_included_input(inputs, cached))
         turn = _id(payload.get("turn_id"))
-        if turn and kind in ("task_started", "task_complete", "turn_aborted"):
-            return session, Event(0, session, f"{kind}:{turn}", stamp, turn=kind == "task_started",
-                                  running=kind == "task_started")
+        if kind in ("task_started", "task_complete", "turn_aborted"):
+            rollout.pending_response = ""
+            if turn:
+                return session, Event(0, session, f"{kind}:{turn}", stamp, turn=kind == "task_started",
+                                      running=kind == "task_started")
         if kind == "thread_name_updated":
             return session, Event(0, session, f"title:{stamp}", stamp, title=_title(payload.get("thread_name")))
     return session, None
@@ -200,9 +238,7 @@ def _workbuddy(row, session, position, stamp):
     return session, None
 
 
-def jsonl_events(kind, stream, session):
-    """Yield complete-line cursor positions alongside normalized events."""
-    parser = {"codex": _codex, "claude": _claude, "antigravity": _antigravity, "workbuddy": _workbuddy}[kind]
+def _jsonl_rows(stream):
     while line := stream.readline():
         if not line.endswith(b"\n"):
             break
@@ -211,16 +247,74 @@ def jsonl_events(kind, stream, session):
             row = _dict(json.loads(line))
         except (UnicodeError, ValueError, RecursionError):
             row = {}
+        yield position, row
+
+
+def _codex_replay_prefix(stream):
+    rows = _jsonl_rows(stream)
+    position, first = next(((end, row) for end, row in rows if row), (0, {}))
+    meta = _dict(first.get("payload"))
+    child = _id(meta.get("id"))
+    if first.get("type") != "session_meta" or not child or not _id(meta.get("forked_from_id")):
+        return 0, False
+    foreign_meta = False
+    token_reports = 0
+    previous_stamp = _time(first.get("timestamp"))
+    for end, row in rows:
+        stamp = _time(row.get("timestamp"))
+        # ccusage uses a foreign session header and 20 uninterrupted reports
+        # to identify a copied prefix even when its timestamps were rewritten.
+        if stamp is not None and previous_stamp is not None and stamp - previous_stamp >= 1:
+            return (position if foreign_meta and token_reports >= 20 else 0), False
+        payload = _dict(row.get("payload"))
+        kind = row.get("type")
+        if kind == "session_meta" and (identity := _id(payload.get("id"))) and identity != child:
+            foreign_meta = True
+        if kind == "event_msg" and payload.get("type") == "token_count":
+            token_reports += 1
+        if stamp is not None:
+            previous_stamp = stamp
+        position = end
+    # The next append can decide whether an unfinished prefix was copied.
+    return (position if foreign_meta and token_reports >= 20 else 0), True
+
+
+def jsonl_events(kind, stream, session, *, codex=None):
+    """Yield complete-line cursor positions alongside normalized events."""
+    replay_until = 0
+    if kind == "codex":
+        if codex is None:
+            codex = CodexRollout()
+        if stream.tell() == 0:
+            replay_until, codex.fork_prefix_pending = _codex_replay_prefix(stream)
+            stream.seek(0)
+    else:
+        parser = {"claude": _claude, "antigravity": _antigravity, "workbuddy": _workbuddy}[kind]
+    for position, row in _jsonl_rows(stream):
         stamp = _time(row.get("created_at") if kind == "antigravity" else row.get("timestamp"))
-        session, event = parser(row, session, position, stamp)
+        if kind == "codex":
+            if replay_until and position > replay_until:
+                replay_until = 0
+                codex.pending_response = ""
+            session, event = _codex(row, session, position, stamp, codex)
+            if replay_until:
+                # Keep cumulative counters as the baseline for the child.
+                event = None
+        else:
+            session, event = parser(row, session, position, stamp)
         yield position, session, event
 
 
 def log_paths(home):
-    codex_root = Path(os.environ.get("CODEX_HOME", home / ".codex")) / "sessions"
+    override = os.environ.get("CODEX_HOME")
+    codex_homes = (Path(override).expanduser(),) if override else (
+        home / ".codex", *sorted((home / ".antigravity_cockpit/instances/codex").glob("*")),
+    )
     # A still-active conversation can have been created before the reporting window.
-    for path in codex_root.glob("*/*/*/*.jsonl"):
-        yield "codex", path, path.stem
+    for codex_home in codex_homes:
+        for folder in ("sessions", "archived_sessions"):
+            for path in (codex_home / folder).rglob("*.jsonl"):
+                yield "codex", path, path.stem
     claude_root = Path(os.environ.get("CLAUDE_CONFIG_DIR", home / ".claude")) / "projects"
     for path in claude_root.glob("*/*.jsonl"):
         yield "claude", path, path.stem
