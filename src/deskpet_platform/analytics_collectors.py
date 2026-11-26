@@ -10,12 +10,21 @@ from contextlib import closing
 # Exact model identifiers observed in Antigravity logs. An unclassified reply
 # cannot be attributed to either provider's allowance bucket.
 ANTIGRAVITY_MODELS = {
+    "gemini-3.8-flash-tiered": 2,
+    "gemini-4-argon": 2,
     "gemini-4-argon-high": 2,
     "gemini-4-argon-medium": 2,
+    "gemini-4-argon-trial": 2,
+    "gemini-4-carbon": 2,
+    "gemini-4-carbon-high": 2,
+    "gemini-4-neon": 2,
     "gemini-4-neon-xhigh": 2,
+    "gemini-4-hydrogen": 2,
+    "gemini-4-hydrogen-medium": 2,
     "gemini-4-hydrogen-tiered-high": 2,
     "gemini-4-hydrogen-xhigh": 2,
     "claude-opus-5-5-high": 3,
+    "claude-opus-5-5-medium": 3,
 }
 
 MAX_AMOUNT = (1 << 53) - 1
@@ -185,7 +194,7 @@ def _claude(row, session, position, stamp):
     return session, None
 
 
-def _antigravity(row, session, position, stamp):
+def _antigravity(row, session, position, stamp, *, metadata=None):
     index = row.get("step_index")
     if stamp is None or type(index) is not int or index < 0:
         return session, None
@@ -194,6 +203,9 @@ def _antigravity(row, session, position, stamp):
         return session, Event(-1, session, f"prompt:{index}", stamp, turn=True)
     if kind == "PLANNER_RESPONSE" and origin == "MODEL":
         model = row.get("model")
+        if metadata is not None:
+            model = metadata.model_at(index) or model
+            stamp = _time(metadata.completed_ms.get(index)) or stamp
         source = ANTIGRAVITY_MODELS.get(model, -1) if isinstance(model, str) else -1
         # Desktop transcript steps report fresh input separately from cached
         # reads. This differs from the Antigravity CLI result envelope.
@@ -279,7 +291,7 @@ def _codex_replay_prefix(stream):
     return (position if foreign_meta and token_reports >= 20 else 0), True
 
 
-def jsonl_events(kind, stream, session, *, codex=None):
+def jsonl_events(kind, stream, session, *, codex=None, antigravity_metadata=None):
     """Yield complete-line cursor positions alongside normalized events."""
     replay_until = 0
     if kind == "codex":
@@ -288,8 +300,8 @@ def jsonl_events(kind, stream, session, *, codex=None):
         if stream.tell() == 0:
             replay_until, codex.fork_prefix_pending = _codex_replay_prefix(stream)
             stream.seek(0)
-    else:
-        parser = {"claude": _claude, "antigravity": _antigravity, "workbuddy": _workbuddy}[kind]
+    elif kind != "antigravity":
+        parser = {"claude": _claude, "workbuddy": _workbuddy}[kind]
     for position, row in _jsonl_rows(stream):
         stamp = _time(row.get("created_at") if kind == "antigravity" else row.get("timestamp"))
         if kind == "codex":
@@ -300,6 +312,8 @@ def jsonl_events(kind, stream, session, *, codex=None):
             if replay_until:
                 # Keep cumulative counters as the baseline for the child.
                 event = None
+        elif kind == "antigravity":
+            session, event = _antigravity(row, session, position, stamp, metadata=antigravity_metadata)
         else:
             session, event = parser(row, session, position, stamp)
         yield position, session, event

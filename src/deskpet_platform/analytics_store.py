@@ -10,6 +10,7 @@ import struct
 import zlib
 
 from .analytics_collectors import CodexRollout, MAX_AMOUNT, jsonl_events, log_paths, opencode_events
+from .antigravity_metadata import companion_database, metadata_revision, read_metadata
 from .notifications import NotificationStore
 from .quota_projection import project_quota
 
@@ -39,6 +40,9 @@ CREATE TABLE IF NOT EXISTS usage_cursors (
 CREATE TABLE IF NOT EXISTS codex_rollout_cursors (
   path TEXT PRIMARY KEY, device INTEGER, inode INTEGER, size INTEGER, mtime INTEGER,
   offset INTEGER, state TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS antigravity_metadata_cursors (
+  path TEXT PRIMARY KEY, revision TEXT
 );
 CREATE TABLE IF NOT EXISTS event_inputs (
   file TEXT NOT NULL, source INTEGER NOT NULL, session TEXT NOT NULL, key TEXT NOT NULL,
@@ -226,6 +230,16 @@ class AnalyticsStore:
                                   (name,)).fetchone()
         if previous and previous[:4] != usage_cursor:
             previous = None
+        companion = revision = previous_revision = None
+        if kind == "antigravity":
+            companion = companion_database(path.absolute())
+            revision = metadata_revision(companion)
+            previous_revision = db.execute("SELECT revision FROM antigravity_metadata_cursors WHERE path=?",
+                                           (name,)).fetchone()
+            if previous_revision is None or (revision is not None and revision != previous_revision[0]):
+                # Native metadata can arrive after the JSONL step, even
+                # when the transcript itself hasn't changed since the last scan.
+                previous = None
         codex = None
         if kind == "codex":
             saved = db.execute("SELECT device,inode,size,mtime,offset,state FROM codex_rollout_cursors WHERE path=?",
@@ -242,6 +256,14 @@ class AnalyticsStore:
         identity = stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
         if previous and previous[:4] == identity:
             return
+        metadata = None
+        if revision is not None:
+            try:
+                metadata = read_metadata(companion)
+            except (OSError, sqlite3.Error):
+                if previous_revision is not None and previous_revision[0] is not None:
+                    return
+                revision = None
         try:
             stream = path.open("rb")
         except OSError:
@@ -264,7 +286,8 @@ class AnalyticsStore:
                     self._forget_relocated_codex_log(db, path, stream, identity)
                     codex = CodexRollout()
             stream.seek(offset)
-            for offset, session, event in jsonl_events(kind, stream, session, codex=codex):
+            for offset, session, event in jsonl_events(kind, stream, session, codex=codex,
+                                                      antigravity_metadata=metadata):
                 if event is not None and event.session:
                     self._insert(db, name, event)
             stream.seek(max(0, offset - 64))
@@ -275,6 +298,8 @@ class AnalyticsStore:
             if codex is not None:
                 db.execute("INSERT OR REPLACE INTO codex_rollout_cursors VALUES (?,?,?,?,?,?,?)",
                            (name, *identity, offset, json.dumps(asdict(codex))))
+            if kind == "antigravity":
+                db.execute("INSERT OR REPLACE INTO antigravity_metadata_cursors VALUES (?,?)", (name, revision))
 
     def collect(self, now):
         today = datetime.fromtimestamp(now, self.timezone).date()

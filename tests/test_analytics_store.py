@@ -26,6 +26,19 @@ def codex_legacy(stamp, amount, total):
              "total_token_usage": {"output_tokens": total}}}}
 
 
+def _varint(value):
+    encoded = bytearray()
+    while value >= 128:
+        encoded.append(value & 127 | 128)
+        value >>= 7
+    encoded.append(value)
+    return bytes(encoded)
+
+
+def _protobuf_blob(field, value):
+    return _varint(field << 3 | 2) + _varint(len(value)) + value
+
+
 class AnalyticsStoreTest(unittest.TestCase):
     def setUp(self):
         root = TemporaryDirectory()
@@ -322,6 +335,56 @@ class AnalyticsStoreTest(unittest.TestCase):
         workbuddy = self.read(5)
         self.assertEqual(workbuddy["days"], [(20261125, 19, 1)])
         self.assertEqual(workbuddy["day_usage"], {20261125: (82, 61)})
+
+    def test_antigravity_uses_native_step_models_and_reclassifies_saved_rows(self):
+        root = self.home / ".gemini/antigravity"
+        transcript = ".gemini/antigravity/brain/activity/.system_generated/logs/transcript.jsonl"
+        stamp = "2026-11-25T08:00:00Z"
+        rows = {"type": "PLANNER_RESPONSE", "source": "MODEL", "created_at": stamp,
+                "input_tokens": 5, "cache_read_tokens": 20}
+        self.write(transcript,
+                   {"type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": stamp, "step_index": 0},
+                   dict(rows, step_index=1, model=None, output_tokens=11),
+                   dict(rows, step_index=2, model="gemini-4-argon-high", output_tokens=17))
+        self.assertEqual(self.read(2)["days"], [(20261125, 17, 1)])
+        self.assertEqual(self.read(3)["days"], [])
+
+        def generation(step, model):
+            return _protobuf_blob(1, _protobuf_blob(19, model.encode())) + bytes([16, step])
+
+        db_path = root / "conversations/activity.db"
+        db_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(db_path)) as db, db:
+            db.execute("CREATE TABLE gen_metadata(idx INTEGER, size INTEGER, data BLOB)")
+            first = generation(1, "gemini-4-argon")
+            second = generation(2, "claude-opus-5-5-medium")
+            db.executemany("INSERT INTO gen_metadata VALUES (?,?,?)",
+                           [(0, len(first), first), (1, len(second), second)])
+        side_by_side = self.read(2)
+        self.assertEqual(side_by_side["days"], [(20261125, 11, 1)])
+        self.assertEqual(side_by_side["day_usage"], {20261125: (25, 20)})
+        self.assertEqual(side_by_side["sessions"][0]["turns"], 1)
+        self.assertEqual(self.read(3)["days"], [(20261125, 17, 1)])
+        with closing(sqlite3.connect(db_path)) as db, db:
+            corrected = generation(2, "gemini-4-carbon")
+            db.execute("UPDATE gen_metadata SET size=?,data=? WHERE idx=1", (len(corrected), corrected))
+        self.assertEqual(self.read(2)["days"], [(20261125, 28, 1)])
+        self.assertEqual(self.read(3)["days"], [])
+
+    def test_antigravity_buckets_usage_by_native_completion_across_midnight(self):
+        stamp = "2026-11-24T15:59:59Z"
+        transcript = ".gemini/antigravity/brain/midnight/.system_generated/logs/transcript.jsonl"
+        self.write(transcript, {"type": "PLANNER_RESPONSE", "source": "MODEL", "created_at": stamp,
+                                "step_index": 1, "model": "gemini-4-argon-high", "input_tokens": 5,
+                                "cache_read_tokens": 20, "output_tokens": 9})
+        self.assertEqual(self.read(2)["days"], [(20261124, 9, 1)])
+        db_path = self.home / ".gemini/antigravity/conversations/midnight.db"
+        db_path.parent.mkdir(parents=True)
+        finish = int(datetime(2026, 11, 24, 16, 0, 1, tzinfo=timezone.utc).timestamp())
+        with closing(sqlite3.connect(db_path)) as db, db:
+            db.execute("CREATE TABLE steps(idx INTEGER, step_type INTEGER, status INTEGER, metadata BLOB)")
+            db.execute("INSERT INTO steps VALUES (1,15,3,?)", (_protobuf_blob(7, b"\x08" + _varint(finish)),))
+        self.assertEqual(self.read(2)["days"], [(20261125, 9, 1)])
 
     def test_opencode_reads_database_and_picks_up_updates(self):
         path = self.home / ".local/share/opencode/opencode.db"
