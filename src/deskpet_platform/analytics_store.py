@@ -9,7 +9,8 @@ import sqlite3
 import struct
 import zlib
 
-from .analytics_collectors import CodexRollout, MAX_AMOUNT, jsonl_events, log_paths, opencode_events
+from .analytics_collectors import (CodexRollout, MAX_AMOUNT, codex_archive_sibling, codex_rollout_id,
+                                   jsonl_events, log_paths, opencode_events)
 from .antigravity_metadata import companion_database, metadata_revision, read_metadata
 from .notifications import NotificationStore
 from .quota_projection import project_quota
@@ -41,6 +42,10 @@ CREATE TABLE IF NOT EXISTS codex_rollout_cursors (
   path TEXT PRIMARY KEY, device INTEGER, inode INTEGER, size INTEGER, mtime INTEGER,
   offset INTEGER, state TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS codex_compatibility (
+  file TEXT NOT NULL, session TEXT NOT NULL, key TEXT NOT NULL,
+  PRIMARY KEY(file, session, key)
+);
 CREATE TABLE IF NOT EXISTS antigravity_metadata_cursors (
   path TEXT PRIMARY KEY, revision TEXT
 );
@@ -58,9 +63,19 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (
 INSERT_EVENT = """
 INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(file, source, session, key) DO UPDATE SET
-  stamp=max(events.stamp,excluded.stamp), amount=coalesce(excluded.amount,events.amount),
+  stamp=max(events.stamp,excluded.stamp),
+  amount=CASE WHEN excluded.source=1 THEN coalesce(max(events.amount,excluded.amount),excluded.amount,events.amount)
+              ELSE coalesce(excluded.amount,events.amount) END,
   turn=excluded.turn, title=excluded.title, running=excluded.running,
   codex_total=excluded.codex_total,codex_legacy=excluded.codex_legacy
+"""
+
+MERGE_CLAUDE_INPUTS = """
+INSERT INTO event_inputs VALUES (?,?,?,?,?,?)
+ON CONFLICT(file, source, session, key) DO UPDATE SET
+  input_tokens=max(event_inputs.input_tokens,excluded.input_tokens),
+  cached_input_tokens=coalesce(max(event_inputs.cached_input_tokens,excluded.cached_input_tokens),
+                                event_inputs.cached_input_tokens,excluded.cached_input_tokens)
 """
 
 # Fully described Codex reports are reconciled before insertion. Sparse retained
@@ -176,6 +191,15 @@ class AnalyticsStore:
             os.close(fd)
         with closing(sqlite3.connect(self.path, timeout=2)) as db, db:
             db.executescript(SCHEMA)
+            if db.execute("PRAGMA user_version").fetchone()[0] == 0:
+                db.execute("BEGIN IMMEDIATE")
+                if db.execute("PRAGMA user_version").fetchone()[0] == 0:
+                    # Reconcile readable rows again. Retain cached history for
+                    # files no longer available on the computer.
+                    db.execute("DELETE FROM codex_rollout_cursors")
+                    db.execute("DELETE FROM usage_cursors WHERE path IN (SELECT file FROM events WHERE source=1)")
+                    db.execute("PRAGMA user_version=1")
+                db.commit()
             db.create_aggregate("wire_sum", 1, _WireSum)
             db.create_function("natural_day", 1, lambda stamp: int(
                 datetime.fromtimestamp(stamp, self.timezone).strftime("%Y%m%d")), deterministic=True)
@@ -183,24 +207,39 @@ class AnalyticsStore:
 
     @staticmethod
     def _insert(db, path, event):
+        if event.source == 0 and event.key.startswith("response:"):
+            key = path, event.session, event.key
+            if event.codex_compatibility:
+                db.execute("INSERT OR IGNORE INTO codex_compatibility VALUES (?,?,?)", key)
+            elif db.execute("SELECT 1 FROM codex_compatibility WHERE file=? AND session=? AND key=?", key).fetchone():
+                # A replay of the structured report cannot overwrite the
+                # complete compatibility report already selected for this key.
+                return
         db.execute(INSERT_EVENT, (path, event.source, event.session, event.key, event.timestamp, event.amount,
                                   event.turn, event.title, event.running, event.codex_total, event.codex_legacy))
         if event.amount is not None:
             key = path, event.source, event.session, event.key
             if event.input_tokens is not None:
-                db.execute("INSERT OR REPLACE INTO event_inputs VALUES (?,?,?,?,?,?)",
+                db.execute(MERGE_CLAUDE_INPUTS if event.source == 1 else "INSERT OR REPLACE INTO event_inputs VALUES (?,?,?,?,?,?)",
                            (*key, event.input_tokens, event.cached_input_tokens))
-            else:
+            elif event.source != 1:
+                # Claude streams repeated snapshots of the same assistant message.
                 db.execute("DELETE FROM event_inputs WHERE file=? AND source=? AND session=? AND key=?", key)
 
     @staticmethod
-    def _forget_relocated_codex_log(db, path, stream, identity):
+    def _forget_relocated_codex_log(db, path, stream, identity, copied):
         # An archive rename can leave old-format rows behind under the vanished
-        # path. Require the same inode, name and saved bytes before replacing it.
+        # path. A copy can change the inode, so require the canonical sibling,
+        # the rollout UUID in its own header, and the same saved boundary bytes.
         aliases = db.execute("SELECT path,offset,boundary FROM file_cursors "
                              "WHERE device=? AND inode=? AND path!=?",
                              (*identity[:2], str(path))).fetchall()
-        for old_path, offset, boundary in aliases:
+        if copied is not None:
+            cursor, rollout_id = copied
+            stream.seek(0)
+            if codex_rollout_id(stream) == rollout_id:
+                aliases.append(cursor)
+        for old_path, offset, boundary in set(aliases):
             if Path(old_path).name != path.name or os.path.lexists(old_path) or not 0 < offset <= identity[2]:
                 continue
             stream.seek(max(0, offset - 64))
@@ -211,6 +250,7 @@ class AnalyticsStore:
             db.execute("DELETE FROM file_cursors WHERE path=?", (old_path,))
             db.execute("DELETE FROM usage_cursors WHERE path=?", (old_path,))
             db.execute("DELETE FROM codex_rollout_cursors WHERE path=?", (old_path,))
+            db.execute("DELETE FROM codex_compatibility WHERE file=?", (old_path,))
 
     def _scan_file(self, db, kind, path, default_session, earliest):
         if path.is_symlink():
@@ -240,7 +280,7 @@ class AnalyticsStore:
                 # Native metadata can arrive after the JSONL step, even
                 # when the transcript itself hasn't changed since the last scan.
                 previous = None
-        codex = None
+        codex = copied = None
         if kind == "codex":
             saved = db.execute("SELECT device,inode,size,mtime,offset,state FROM codex_rollout_cursors WHERE path=?",
                                (name,)).fetchone()
@@ -253,8 +293,16 @@ class AnalyticsStore:
                 # Rebuild readable Codex files once with the new reconciliation
                 # rules. An older writer may also have advanced the base cursor.
                 previous = None
+            if sibling := codex_archive_sibling(path):
+                old_path, rollout_id = sibling
+                if not os.path.lexists(old_path):
+                    cursor = db.execute("SELECT path,offset,boundary FROM file_cursors WHERE path=?",
+                                        (str(old_path),)).fetchone()
+                    if cursor is not None:
+                        copied = cursor, rollout_id
         identity = stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
-        if previous and previous[:4] == identity:
+        unchanged = previous and previous[:4] == identity
+        if unchanged and copied is None:
             return
         metadata = None
         if revision is not None:
@@ -272,6 +320,9 @@ class AnalyticsStore:
             opened = os.fstat(stream.fileno())
             if (opened.st_dev, opened.st_ino) != identity[:2]:
                 return
+            if unchanged:
+                self._forget_relocated_codex_log(db, path, stream, identity, copied)
+                return
             offset, session = 0, default_session
             if (previous and previous[:2] == identity[:2] and identity[2] > previous[2]
                     and not (codex and codex.fork_prefix_pending)):
@@ -283,8 +334,10 @@ class AnalyticsStore:
                 db.execute("DELETE FROM events WHERE file=?", (name,))
                 db.execute("DELETE FROM event_inputs WHERE file=?", (name,))
                 if kind == "codex":
-                    self._forget_relocated_codex_log(db, path, stream, identity)
+                    db.execute("DELETE FROM codex_compatibility WHERE file=?", (name,))
                     codex = CodexRollout()
+            if kind == "codex" and (not offset or copied is not None):
+                self._forget_relocated_codex_log(db, path, stream, identity, copied)
             stream.seek(offset)
             for offset, session, event in jsonl_events(kind, stream, session, codex=codex,
                                                       antigravity_metadata=metadata):

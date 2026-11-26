@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import json
 import os
+import re
 import sqlite3
 from contextlib import closing
 
@@ -28,6 +29,9 @@ ANTIGRAVITY_MODELS = {
 }
 
 MAX_AMOUNT = (1 << 53) - 1
+CODEX_ROLLOUT_NAME = re.compile(
+    r"rollout-(\d{4})-(\d{2})-(\d{2})T\d{2}-\d{2}-\d{2}-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +48,7 @@ class Event:
     codex_legacy: bool = False
     input_tokens: int | None = None
     cached_input_tokens: int | None = None
+    codex_compatibility: bool = False
 
 
 @dataclass(slots=True)
@@ -126,8 +131,10 @@ def _codex(row, session, position, stamp, rollout):
         # A structured response report is followed by its token_count report in
         # the same turn. Their cumulative counters may have different baselines.
         thread = _id(payload.get("thread_id"))
-        rollout.pending_response = key if response and thread == session and _id(payload.get("turn_id")) else ""
+        rollout.pending_response = ""
         if amount is not None:
+            if response and thread == session and _id(payload.get("turn_id")):
+                rollout.pending_response = key
             total = _amount(_dict(payload.get("thread_token_usage")).get("output_tokens"))
             return session, Event(0, session, key,
                                   stamp, amount=amount, codex_total=total,
@@ -153,11 +160,16 @@ def _codex(row, session, position, stamp, rollout):
                     return session, None
             amount, inputs, cached = usage
             if amount is not None:
-                complete = inputs is not None and cached is not None
-                key = pending if pending and complete else f"legacy:{stamp}:{position}"
+                input_usage = _included_input(inputs, cached)
+                complete = input_usage["cached_input_tokens"] is not None
+                if pending and not complete:
+                    # The paired response already has a usage report. An
+                    # incomplete mirror cannot fill inputs from another baseline.
+                    return session, None
+                key = pending or f"legacy:{stamp}:{position}"
                 return session, Event(0, session, key, stamp, amount=amount,
-                                      codex_total=totals[0], codex_legacy=not complete,
-                                      **_included_input(inputs, cached))
+                                      codex_total=totals[0], codex_legacy=not complete, codex_compatibility=bool(pending),
+                                      **input_usage)
         turn = _id(payload.get("turn_id"))
         if kind in ("task_started", "task_complete", "turn_aborted"):
             rollout.pending_response = ""
@@ -260,6 +272,24 @@ def _jsonl_rows(stream):
         except (UnicodeError, ValueError, RecursionError):
             row = {}
         yield position, row
+
+
+def codex_archive_sibling(path):
+    """Find the canonical sibling path for a correctly named Codex rollout."""
+    match = CODEX_ROLLOUT_NAME.fullmatch(path.name)
+    if not match:
+        return None
+    year, month, day, identity = match.groups()
+    if path.parent.name == "archived_sessions":
+        return path.parent.parent / "sessions" / year / month / day / path.name, identity
+    if path.parent.parts[-4:] == ("sessions", year, month, day):
+        return path.parents[4] / "archived_sessions" / path.name, identity
+    return None
+
+
+def codex_rollout_id(stream):
+    _, header = next(_jsonl_rows(stream), (0, {}))
+    return _id(_dict(header.get("payload")).get("id")) if header.get("type") == "session_meta" else ""
 
 
 def _codex_replay_prefix(stream):

@@ -1,7 +1,9 @@
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
+import shutil
 import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
@@ -146,6 +148,8 @@ class AnalyticsStoreTest(unittest.TestCase):
         before = self.read(0)
         copy = self.write(archived, meta, usage)
         self.assertEqual(self.read(0), before)
+        with closing(sqlite3.connect(self.store.path)) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM file_cursors").fetchone(), (2,))
         path.unlink()
         self.assertEqual(self.read(0), before)
         copy.unlink()
@@ -175,6 +179,64 @@ class AnalyticsStoreTest(unittest.TestCase):
         path.rename(archive)
         self.assertEqual(self.read(0), expected)
 
+    def test_codex_upgrade_recognizes_archived_copy_of_a_fork_rollout(self):
+        child = "019abcde-00ab-7000-8000-123456789abc"
+        stamp = "2026-11-25T05:00:00Z"
+        name = f"rollout-2026-11-25T05-00-00-{child}.jsonl"
+        usage = codex_legacy(stamp, 25, 30)
+        usage["payload"]["info"]["last_token_usage"].update(input_tokens=1_200, cached_input_tokens=1_000)
+        path = self.write(".codex/sessions/2026/11/25/" + name,
+                          {"type": "session_meta", "payload": {"id": child, "forked_from_id": "parent"}},
+                          {"type": "session_meta", "payload": {"id": "parent"}}, usage)
+        expected = self.read(0)
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            db.execute("DELETE FROM codex_rollout_cursors")
+            db.execute("UPDATE events SET session='parent' WHERE file=?", (str(path),))
+            db.execute("UPDATE event_inputs SET session='parent' WHERE file=?", (str(path),))
+        archive = self.home / ".codex/archived_sessions" / name
+        archive.parent.mkdir(parents=True)
+        shutil.copy2(path, archive)
+        self.assertNotEqual(archive.stat().st_ino, path.stat().st_ino)
+        path.unlink()
+
+        self.assertEqual(self.read(0), expected)
+
+    def test_codex_archived_copy_does_not_remove_a_different_rollout(self):
+        stamp = "2026-11-25T05:00:00Z"
+        child = "019abcde-00ab-7000-8000-123456789abc"
+        name = f"rollout-2026-11-25T05-00-00-{child}.jsonl"
+        usage = codex_legacy(stamp, 25, 30)
+        active = self.write(".codex/sessions/2026/11/25/" + name,
+                            {"type": "session_meta", "payload": {"id": child}}, usage)
+        self.assertEqual(self.read(0)["days"], [(20261125, 25, 1)])
+        self.write(".codex/archived_sessions/" + name,
+                   {"type": "session_meta", "payload": {"id": "other-rollout"}}, usage)
+        active.unlink()
+        self.assertEqual(self.read(0)["days"], [(20261125, 50, 2)])
+
+    def test_codex_unchanged_archive_replaces_cached_source_after_its_removal(self):
+        stamp = "2026-11-25T05:00:00Z"
+        child = "019abcde-00ab-7000-8000-123456789abc"
+        name = f"rollout-2026-11-25T05-00-00-{child}.jsonl"
+        active = self.write(".codex/sessions/2026/11/25/" + name,
+                            {"type": "session_meta", "payload": {"id": child, "forked_from_id": "parent"}},
+                            {"type": "session_meta", "payload": {"id": "parent"}}, codex_legacy(stamp, 25, 30))
+        expected = self.read(0)
+        archive = self.home / ".codex/archived_sessions" / name
+        archive.parent.mkdir(parents=True)
+        shutil.copy2(active, archive)
+        # Simulate retained rows from a legacy collector for a log which is
+        # still present but outside the new collector's filesystem window.
+        old = int(self.now) - 40 * 86400
+        os.utime(active, (old, old))
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            db.execute("UPDATE events SET session='parent' WHERE file=?", (str(active),))
+        self.assertEqual(self.read(0)["days"], [(20261125, 50, 2)])
+        active.unlink()
+
+        with patch("deskpet_platform.analytics_store.jsonl_events", side_effect=AssertionError("archive replay")):
+            self.assertEqual(self.read(0), expected)
+
     def test_codex_full_dual_format_replaces_one_usage_after_append(self):
         name = ".codex/sessions/2026/11/25/dual.jsonl"
         modern = codex_usage("2026-11-25T05:00:00Z", 30, "response", 70)
@@ -190,6 +252,27 @@ class AnalyticsStoreTest(unittest.TestCase):
         self.assertEqual(result["days"], [(20261125, 25, 1)])
         self.assertEqual(result["day_usage"], {20261125: (1_200, 1_000)})
         self.assertEqual(self.read(0), result)
+        self.write(name, modern, append=True)
+        self.assertEqual(self.read(0), result)
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            db.execute("PRAGMA user_version=0")
+            db.execute("DELETE FROM codex_compatibility")
+            db.execute("UPDATE events SET amount=30 WHERE source=0")
+            db.execute("UPDATE event_inputs SET input_tokens=1_300,cached_input_tokens=1_100 WHERE source=0")
+        self.assertEqual(self.read(0), result)
+
+    def test_codex_sparse_mirror_does_not_add_a_second_usage(self):
+        name = ".codex/sessions/2026/11/25/dual.jsonl"
+        stamp = "2026-11-25T05:00:00Z"
+        modern = codex_usage(stamp, 30, "response", 35)
+        modern["payload"].update(thread_id="session", turn_id="turn")
+        modern["payload"]["usage"].update(input_tokens=1_300, cached_input_tokens=1_100)
+        legacy = codex_legacy(stamp, 25, 30)
+        legacy["payload"]["info"]["last_token_usage"]["input_tokens"] = 1_200
+        self.write(name, {"type": "session_meta", "payload": {"id": "session"}}, modern)
+        expected = self.read(0)
+        self.write(name, legacy, append=True)
+        self.assertEqual(self.read(0), expected)
 
     def test_codex_cumulative_only_deltas_continue_from_saved_baseline(self):
         name = ".codex/archived_sessions/cumulative.jsonl"
@@ -299,6 +382,27 @@ class AnalyticsStoreTest(unittest.TestCase):
         result = self.read(0)
         self.assertEqual(result["day_usage"], {20261125: (None, None)})
         self.assertEqual(result["days"], [(20261125, 6, 1)])
+
+    def test_claude_streaming_update_retains_measured_usage(self):
+        name = ".claude/projects/p/s.jsonl"
+        row = {"type": "assistant", "timestamp": "2026-11-25T08:00:00Z", "sessionId": "s"}
+        full = {"id": "message", "usage": {"input_tokens": 5, "cache_creation_input_tokens": 20,
+                                           "cache_read_input_tokens": 75, "output_tokens": 8}}
+        sparse = {"id": "message", "stop_reason": "end_turn", "usage": {"output_tokens": 9}}
+        self.write(name, dict(row, message=full))
+        self.assertEqual(self.read(1)["day_usage"], {20261125: (100, 75)})
+        self.write(name, dict(row, message=sparse), append=True)
+        result = self.read(1)
+        self.assertEqual(result["days"], [(20261125, 9, 1)])
+        self.assertEqual(result["day_usage"], {20261125: (100, 75)})
+        self.assertEqual(list(result["session_usage"].values()), [(100, 75)])
+        self.write(name, dict(row, message=full), append=True)
+        self.assertEqual(self.read(1), result)
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            db.execute("PRAGMA user_version=0")
+            db.execute("UPDATE events SET amount=8 WHERE source=1")
+            db.execute("DELETE FROM event_inputs WHERE source=1")
+        self.assertEqual(self.read(1), result)
 
     def test_real_schema_projections_keep_measured_zero_and_known_provider(self):
         stamp = "2026-11-25T08:00:00Z"
