@@ -39,7 +39,7 @@ ACTIVE_QUESTION = f"""{OPEN_QUESTION} AND NOT EXISTS (
         SELECT 1 FROM notifications AS newer
         WHERE newer.source=n.source AND newer.session=n.session
           AND newer.category='response' AND newer.id>n.id
-          AND (newer.resolved IS NULL OR n.response_group IS NULL
+          AND ((newer.resolved IS NULL AND newer.dismissed IS NULL) OR n.response_group IS NULL
                OR newer.response_group IS NOT n.response_group
                OR newer.parent_turn IS NOT n.parent_turn))"""
 DEVICE_HISTORY = f"(n.category!='response' OR n.resolved IS NOT NULL OR ({ACTIVE_QUESTION}))"

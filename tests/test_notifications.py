@@ -130,6 +130,28 @@ class NotificationTests(unittest.TestCase):
             self.assertTrue(second.get(question)["resolved"])
             self.assertFalse(second.get(question)["seen"])
 
+    def test_dismissed_question_keeps_next_question_in_the_same_batch_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
+            older = store.add_agent_event("codex", "session", "first", "response", "First",
+                                          parent_turn="turn", response_group="batch")
+            newer = store.add_agent_event("codex", "session", "second", "response", "Second",
+                                          parent_turn="turn", response_group="batch")
+            self.assertEqual([row["id"] for row in store.list(for_device=True)], [newer])
+
+            store.dismiss_legacy_response(newer, int(store.get(newer)["created_at"]))
+
+            self.assertEqual(store.home_summary(for_device=True)["response_count"], 1)
+            records, summary = store.legacy_message_snapshot(0, 0)
+            self.assertEqual([row["id"] for row in records], [older])
+            self.assertEqual(summary, (0, 1))
+            self.assertEqual([row[2] for row in store.analytics_attention()], [older])
+
+            replacement = store.add_agent_event("codex", "session", "third", "response", "Third",
+                                                parent_turn="turn", response_group="next-batch")
+            store.dismiss_legacy_response(replacement, int(store.get(replacement)["created_at"]))
+            self.assertEqual(store.list(for_device=True), [])
+
     def test_multiple_sources_have_explicit_categories_and_bounded_home_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
