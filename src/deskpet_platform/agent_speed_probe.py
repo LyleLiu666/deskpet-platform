@@ -14,6 +14,45 @@ from sys import platform
 import time
 
 from .device_lock import DeviceLock
+from .session_titles import lookup_session_title
+
+AGENT_NAMES = {
+    "codex": "Codex", "claudeCode": "Claude Code", "claudeDesktop": "Claude Desktop",
+    "deepseek": "DeepSeek", "opencode": "OpenCode", "gemini": "Gemini",
+    "antigravity": "Antigravity", "workbuddy": "WorkBuddy", "workbuddyAi": "WorkBuddy AI",
+    "zcode": "ZCode", "kimi": "Kimi", "grokBuild": "Grok Build", "omp": "OMP",
+    "pi": "Pi", "openclaw": "OpenClaw", "hermes": "Hermes", "droid": "Droid", "devin": "Devin",
+}
+
+
+def _display_title(value):
+    if not isinstance(value, str):
+        return ""
+    title = " ".join(value.split())[:48]
+    if not title or not title.isprintable():
+        return ""
+    while len(title.encode()) > 48 or len(json.dumps(title, ensure_ascii=True)) > 84:
+        title = title[:-1]
+    return title
+
+
+def active_session_rows(agents, lookup):
+    if not isinstance(agents, list):
+        return None
+    sessions = {}
+    for agent in agents:
+        if not isinstance(agent, dict) or agent.get("phase") not in ("generating", "tools"):
+            continue
+        source, identity = agent.get("source"), agent.get("id")
+        if not isinstance(source, str) or not isinstance(identity, str):
+            continue
+        name = AGENT_NAMES.get(source, source[:16])
+        if name and name.isascii() and name.isprintable() and identity:
+            identity = identity.removesuffix(".jsonl").removesuffix(".json").removesuffix(".log")
+            key = (name, source, identity)
+            sessions[key] = _display_title(agent.get("title") or agent.get("name")) or sessions.get(key, "")
+    return [[name, sessions[(name, source, identity)] or _display_title(lookup(source, identity))]
+            for name, source, identity in sorted(sessions)[:6]]
 
 
 def host_platform():
@@ -68,13 +107,29 @@ class AgentSpeedProbe:
         self.metric_version = "agent-speed-output-v1-" + digest
         self.process = self.reader = self.latest = None
         self.lease = None
-        self.cache_lock = DeviceLock("agent-speed:" + self.metric_version)
+        # Older workers can still be running with the aggregate-only cache.
+        self.cache_lock = DeviceLock("agent-speed-v3:" + self.metric_version)
         self.shared_path = self.cache_lock.root / (self.cache_lock.name + ".json")
         self.request_path = self.cache_lock.root / (self.cache_lock.name + ".request")
         self.speed_state = None
         self.last_requested = None
         self.trend = deque()
         self.lock = asyncio.Lock()
+        self.session_titles = {}
+
+    def _session_rows(self, agents):
+        now = time.monotonic()
+
+        def lookup(source, identity):
+            key = (source, identity)
+            until, title = self.session_titles.get(key, (0, None))
+            if until <= now:
+                title = lookup_session_title(source, identity)
+                self.session_titles[key] = (now + (20 if title else 5), title)
+            return title
+
+        self.session_titles = {key: value for key, value in self.session_titles.items() if value[0] > now}
+        return active_session_rows(agents, lookup)
 
     def normalize(self, value, now):
         if not isinstance(value, dict) or value.get("state") != "running":
@@ -107,8 +162,12 @@ class AgentSpeedProbe:
             index = min(11, max(0, 11 - int((now - when) / 5)))
             trend[index] = amount
         sessions = generating + tools
-        return {"rate10": rate10, "sessions": sessions if sessions <= 255 else None,
-                "trend": trend, "quotas": []}
+        snapshot = {"rate10": rate10, "sessions": sessions if sessions <= 255 else None,
+                    "trend": trend, "quotas": []}
+        rows = value.get("session_titles")
+        if isinstance(rows, list) and len(rows) <= sessions <= 255:
+            snapshot["session_titles"] = rows
+        return snapshot
 
     async def sample(self):
         async with self.lock:
@@ -200,7 +259,8 @@ class AgentSpeedProbe:
                 self.latest = {"t": value.get("t"), "state": value.get("state"),
                                "live": {"output": live.get("output")} if isinstance(live, dict) else None,
                                "estimatedShare": value.get("estimatedShare"),
-                               "generating": value.get("generating"), "tools": value.get("tools")}
+                               "generating": value.get("generating"), "tools": value.get("tools"),
+                               "session_titles": await asyncio.to_thread(self._session_rows, value.get("agents"))}
                 self._write_shared(self.latest)
         except (OSError, ValueError):
             pass

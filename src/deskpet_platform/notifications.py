@@ -649,14 +649,13 @@ class NotificationStore:
             (identity for identity, _, attention_pending in rows if attention_pending), default=0)
 
     def summarize_legacy_backlog(self):
-        """Acknowledge backlog through the board's unread inbox summary."""
+        """Acknowledge old completion notices through the unread inbox summary."""
         now = time.time()
         cutoff = now - LEGACY_TOAST_MAX_AGE_SECONDS
-        eligible = f"seen IS NULL AND (category='completed' OR ({OPEN_QUESTION}))"
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            db.execute(f"""UPDATE notifications AS n SET shown=COALESCE(shown,?), action_pending=0
-                WHERE {eligible} AND (shown IS NULL OR action_pending=1)
+            db.execute("""UPDATE notifications SET shown=COALESCE(shown,?), action_pending=0
+                WHERE category='completed' AND seen IS NULL AND (shown IS NULL OR action_pending=1)
                 AND created<?""", (now, cutoff))
 
     def next_pending(self, *, text_only=False, legacy_batch=False):
@@ -666,12 +665,16 @@ class NotificationStore:
         with closing(self._connect()) as db:
             row = None
             if legacy_batch:
-                cutoff = time.time() - LEGACY_TOAST_MAX_AGE_SECONDS
-                row = db.execute(f"""SELECT id,title,shown,action_pending,source,category,MAX(id) OVER ()
-                    FROM notifications AS n WHERE {eligible} AND shown IS NULL AND created>=?
-                    ORDER BY category='response' DESC,id DESC LIMIT 1""", (cutoff,)).fetchone()
-                if row:
-                    batch = (row[6], cutoff)
+                # Each open question needs its own receipt. Only completions share a toast.
+                row = db.execute(f"""SELECT id,title,shown,action_pending,source,category FROM notifications AS n
+                    WHERE ({OPEN_QUESTION}) AND shown IS NULL AND seen IS NULL ORDER BY id LIMIT 1""").fetchone()
+                if row is None:
+                    cutoff = time.time() - LEGACY_TOAST_MAX_AGE_SECONDS
+                    row = db.execute("""SELECT id,title,shown,action_pending,source,category
+                        FROM notifications WHERE category='completed' AND seen IS NULL AND shown IS NULL
+                        AND created>=? ORDER BY id DESC LIMIT 1""", (cutoff,)).fetchone()
+                    if row:
+                        batch = (row[0], cutoff)
             if row is None:
                 row = db.execute(f"""SELECT id,title,shown,action_pending,source,category FROM notifications AS n
                     WHERE {eligible} AND (shown IS NULL OR (? AND action_pending=1))
@@ -713,9 +716,9 @@ class NotificationStore:
                        (now, now, identity))
             if batch:
                 through, cutoff = batch
-                db.execute(f"""UPDATE notifications AS n SET shown=?, action_pending=0
+                db.execute("""UPDATE notifications SET shown=?, action_pending=0
                     WHERE id<=? AND created>=? AND shown IS NULL AND seen IS NULL
-                    AND (category='completed' OR ({OPEN_QUESTION}))""", (now, through, cutoff))
+                    AND category='completed'""", (now, through, cutoff))
 
     def mark_seen(self, identity):
         with closing(self._connect()) as db, db:

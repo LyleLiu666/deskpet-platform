@@ -1,16 +1,102 @@
 import asyncio
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from deskpet_platform.agent_speed_probe import AgentSpeedProbe
+from deskpet_platform.agent_speed_probe import AgentSpeedProbe, active_session_rows
 from deskpet_platform.mcp_server import BoardSession, create_server
+from deskpet_platform.session_titles import lookup_session_title
 
 
 class AgentSpeedProbeTests(unittest.IsolatedAsyncioTestCase):
+    def test_active_rows_use_titles_for_working_probe_sessions_and_hide_raw_ids(self):
+        agents = [
+            {"source": "codex", "id": "rollout-00112233.jsonl", "phase": "generating"},
+            {"source": "claudeCode", "id": "full-session-11223344", "phase": "tools", "title": "Review API"},
+            {"source": "codex", "id": "idle-22223333", "phase": "idle"},
+            {"source": "codex", "id": "rollout-00112233", "phase": "tools"},
+            {"source": "devin", "id": "internal-key", "phase": "tools"},
+        ]
+        lookup = Mock(side_effect=lambda source, identity: "鱼缸运行" if source == "codex" else None)
+        self.assertEqual(active_session_rows(agents, lookup),
+                         [["Claude Code", "Review API"], ["Codex", "鱼缸运行"], ["Devin", ""]])
+        self.assertIsNone(active_session_rows(None, lookup))
+        self.assertEqual(active_session_rows(agents[2:3], lookup), [])
+        self.assertIn(("codex", "rollout-00112233"), [call.args for call in lookup.call_args_list])
+
+    def test_titles_resolve_the_exact_codex_thread_and_devin_session(self):
+        from contextlib import closing
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {
+            "CODEX_HOME": directory, "XDG_DATA_HOME": directory,
+        }):
+            root = Path(directory)
+            thread = "0190b1c2-abcd-1234-8000-abcdefabcdef"
+            with closing(sqlite3.connect(root / "state_5.sqlite")) as db:
+                db.execute("CREATE TABLE threads (id TEXT, name TEXT, title TEXT)")
+                db.execute("INSERT INTO threads VALUES (?, ?, ?)", (thread, "新版鱼缸", "Old title"))
+                db.commit()
+            (root / "devin/cli").mkdir(parents=True)
+            with closing(sqlite3.connect(root / "devin/cli/sessions.db")) as db:
+                db.execute("CREATE TABLE sessions (id TEXT, title TEXT)")
+                db.execute("INSERT INTO sessions VALUES (?, ?)", ("example-work", "LCD performance"))
+                db.commit()
+            self.assertEqual(lookup_session_title("codex", f"rollout-2026-{thread}.jsonl"), "新版鱼缸")
+            self.assertEqual(lookup_session_title("devin", "sessions.db#example-work"), "LCD performance")
+            self.assertIsNone(lookup_session_title("devin", "unknown"))
+
+    def test_codex_fork_reads_base_title_until_its_own_title_arrives(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"CODEX_HOME": directory}):
+            root = Path(directory)
+            parent = "0190b1c2-abcd-1234-8000-abcdefabcdef"
+            fork = "0190b1c2-abcd-1234-8000-abcdefabcdee"
+            (root / "session_index.jsonl").write_text(
+                json.dumps({"id": parent, "thread_name": "鱼缸性能"}) + "\n{truncated",
+                encoding="utf-8",
+            )
+            rollout = root / "sessions/2026/11/27" / f"rollout-2026-11-27T12-34-56-{fork}.jsonl"
+            rollout.parent.mkdir(parents=True)
+            records = [{"type": "session_meta", "payload": {"id": parent, "history_base": {"thread_id": parent}}}]
+            rollout.write_text(json.dumps(records[0]) + "\n", encoding="utf-8")
+            self.assertEqual(lookup_session_title("codex", rollout.name), "分支 · 鱼缸性能")
+            records.append({"type": "event_msg", "payload": {"type": "thread_name_updated", "thread_name": "鱼缸布局"}})
+            rollout.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
+            self.assertEqual(lookup_session_title("codex", rollout.name), "鱼缸布局")
+
+    def test_codex_title_uses_matching_index_in_cockpit_home(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"CODEX_HOME": directory}):
+            home = Path(directory)
+            alternate = home / ".antigravity_cockpit/instances/codex/workspace"
+            alternate.mkdir(parents=True)
+            thread = "0190b1c2-abcd-1234-8000-abcdefabcdef"
+            (alternate / "session_index.jsonl").write_text(
+                json.dumps({"id": thread, "thread_name": "修复主题样式"}) + "\n", encoding="utf-8",
+            )
+            with patch("deskpet_platform.session_titles.Path.home", return_value=home):
+                self.assertEqual(lookup_session_title("codex", thread), "修复主题样式")
+                self.assertIsNone(lookup_session_title("codex", "0190b1c2-abcd-1234-8000-abcdefabcdee"))
+
+    def test_codex_rollout_can_have_a_different_named_id_in_its_header(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"CODEX_HOME": directory}):
+            root = Path(directory)
+            parent = "0190b1c2-abcd-1234-8000-abcdefabcdef"
+            thread = "0190b1c2-abcd-1234-8000-abcdefabcdee"
+            filename_id = "0190b1c2-abcd-1234-8000-abcdefabcded"
+            (root / "session_index.jsonl").write_text("".join(
+                json.dumps({"id": identity, "thread_name": title}) + "\n"
+                for identity, title in ((parent, "鱼缸性能"), (thread, "调整鲨鱼"))
+            ), encoding="utf-8")
+            rollout = root / "sessions/2026/11/27" / f"rollout-2026-11-27T12-34-56-{filename_id}.jsonl"
+            rollout.parent.mkdir(parents=True)
+            rollout.write_text(json.dumps({
+                "type": "session_meta", "payload": {"id": thread, "history_base": {"thread_id": parent}},
+            }) + "\n", encoding="utf-8")
+            self.assertEqual(lookup_session_title("codex", rollout.name), "调整鲨鱼")
+
     async def test_server_uses_the_installed_probe_even_with_a_custom_quota_history(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -252,6 +338,9 @@ class AgentSpeedProbeTests(unittest.IsolatedAsyncioTestCase):
                       "estimatedShare": 0.4, "generating": 2, "tools": 1}
             value = collector.normalize(sample, 1001)
             self.assertEqual((value["rate10"], value["sessions"], value["trend"][-1]), (124, 3, 124))
+            self.assertNotIn("session_titles", value)
+            sample["session_titles"] = [["Codex", "鱼缸运行"]]
+            self.assertEqual(collector.normalize(sample, 1001)["session_titles"], sample["session_titles"])
             self.assertEqual(collector.speed_state, "E")
             sample["estimatedShare"] = 0
             self.assertEqual(collector.normalize(sample, 1001)["rate10"], 124)

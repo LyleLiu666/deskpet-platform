@@ -343,7 +343,7 @@ class NotificationTests(unittest.TestCase):
 
 
 class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_legacy_inbox_keeps_backlog_unread_and_delivers_a_fresh_single(self):
+    async def test_legacy_inbox_keeps_old_unanswered_questions_eligible(self):
         class Board:
             class Channel:
                 capabilities = {}
@@ -365,22 +365,26 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 fresh = store.add_agent_event("codex", "s", "fresh", "completed", "Fresh")
                 store.summarize_legacy_backlog()
                 board = Board()
-                self.assertTrue(await notifications.deliver_next(board, store))
-                self.assertFalse(await notifications.deliver_next(board, store))
-                self.assertEqual(board.texts, ["Codex 完成\nFresh"])
+                self.assertFalse(store.get(request)["shown"])
+                self.assertTrue(await notifications.deliver_next(board, store, legacy_batch=True))
+                self.assertTrue(await notifications.deliver_next(board, store, legacy_batch=True))
+                self.assertFalse(await notifications.deliver_next(board, store, legacy_batch=True))
+                self.assertEqual(board.texts, ["Codex 需要应答\nStill open", "Codex 完成\nFresh"])
                 self.assertEqual(store.unseen_count(for_device=True), 17)
                 self.assertFalse(store.get(request)["resolved"])
                 self.assertTrue(store.get(fresh)["shown"])
 
-    async def test_legacy_inbox_coalesces_only_after_a_confirmed_toast(self):
+    async def test_legacy_inbox_delivers_questions_separately_and_batches_completions(self):
         from unittest.mock import AsyncMock
         with tempfile.TemporaryDirectory() as directory:
             store = notifications.NotificationStore(Path(directory) / "notifications.sqlite3")
             completion = store.add_agent_event("codex", "s", "one", "completed", "One")
+            second_completion = store.add_agent_event("codex", "s", "second", "completed", "Second")
             remaining = store.add_agent_event("claude_code", "s", "two", "response", "Two")
-            withdrawn = store.add_agent_event("codex", "s2", "three", "response", "Three")
+            another = store.add_agent_event("codex", "s2", "three", "response", "Three")
+            withdrawn = store.add_agent_event("codex", "s3", "four", "response", "Four")
             store.summarize_legacy_backlog()
-            self.assertEqual(store.next_pending(legacy_batch=True)["id"], withdrawn)
+            self.assertEqual(store.next_pending(legacy_batch=True)["id"], remaining)
             store.resolve_response(withdrawn)
             board = type("Board", (), {"channel": type("Channel", (), {"capabilities": {}})()})()
             board.show_text = AsyncMock(return_value={"status": "expired"})
@@ -391,7 +395,14 @@ class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await notifications.deliver_next(board, store, legacy_batch=True))
             self.assertIn("Claude Code", board.show_text.call_args.args[0])
             self.assertEqual(board.show_text.call_args.kwargs, {"category": "response"})
-            self.assertEqual(store.unseen_count(for_device=True), 2)
+            self.assertFalse(store.get(another)["shown"])
+            self.assertFalse(store.get(second_completion)["shown"])
+            self.assertTrue(await notifications.deliver_next(board, store, legacy_batch=True))
+            self.assertEqual(board.show_text.call_args.args[0], "Codex 需要应答\nThree")
+            self.assertTrue(await notifications.deliver_next(board, store, legacy_batch=True))
+            self.assertEqual(board.show_text.call_args.args[0], "Codex 完成\nSecond")
+            self.assertTrue(store.get(completion)["shown"])
+            self.assertEqual(store.unseen_count(for_device=True), 4)
             self.assertIsNone(store.next_pending())
 
     async def test_a_notice_arriving_during_send_stays_pending(self):

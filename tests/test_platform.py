@@ -89,6 +89,28 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TextNotVisible):
             await client.show_text('Hello')
 
+    async def test_text_chunk_rejection_defers_only_when_the_view_changes(self):
+        client = Client(DeviceConfig(DEVICE, KEY))
+        client.channel = AsyncMock()
+        client.channel.capabilities = {"text_present": 1}
+        for rejected in ({"text_status": "rejected", "view_token": 8},
+                         {"text_status": "rejected", "text_reason": "view_changed"}):
+            with self.subTest(rejected=rejected):
+                client.channel.send.side_effect = [
+                    {"pet_page": 0, "view_token": 7, "text_generation": 0},
+                    {"text_status": "receiving", "view_token": 7}, rejected,
+                ]
+                with self.assertRaises(TextNotVisible):
+                    await client.show_text("Hello")
+        client.channel.send.side_effect = [
+            {"pet_page": 0, "view_token": 7, "text_generation": 0},
+            {"text_status": "receiving", "view_token": 7},
+            {"text_status": "rejected", "view_token": 7},
+        ]
+        with self.assertRaises(DeviceError) as error:
+            await client.show_text("Hello")
+        self.assertNotIsInstance(error.exception, TextNotVisible)
+
     async def test_resource_deletion_targets_a_complete_role_photo_or_one_desk_file(self):
         class Channel:
             capabilities = {"card_delete": 1}
@@ -244,6 +266,10 @@ class PlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await client.update_tokens(snapshot), ("token_update", snapshot))
         self.assertEqual(await client.update_tokens(snapshot, windows=windows),
                          ("token_update", {**snapshot, "speed_windows": windows}))
+        with_sessions = {**snapshot, "session_titles": [["Codex", "鱼缸运行"]]}
+        self.assertEqual(await client.update_tokens(with_sessions), ("token_update", snapshot))
+        client.channel.capabilities = {**client.channel.capabilities, "session_titles": 1}
+        self.assertEqual(await client.update_tokens(with_sessions), ("token_update", with_sessions))
 
     async def test_wifi_probe_accepts_only_the_paired_board_proof(self):
         class Board(asyncio.DatagramProtocol):

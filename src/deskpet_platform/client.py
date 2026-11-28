@@ -696,6 +696,8 @@ class Client:
     async def update_tokens(self, snapshot, *, windows=None):
         if self.channel.capabilities.get("token_stats") != 1:
             raise DeviceError("token_stats_not_supported")
+        if "session_titles" in snapshot and self.channel.capabilities.get("session_titles") != 1:
+            snapshot = {key: value for key, value in snapshot.items() if key != "session_titles"}
         async with self._operation:
             if windows is not None:
                 return await self.channel.send("token_update", **snapshot, speed_windows=windows)
@@ -1354,6 +1356,9 @@ class Client:
                 answer = await self.channel.send("text_chunk", generation=generation, index=index,
                                                  data=bitmap[offset:offset + 192].hex())
                 if answer.get("text_status") != "receiving":
+                    if (answer.get("text_reason") == "view_changed" or
+                            answer.get("view_token", state["view_token"]) != state["view_token"]):
+                        raise TextNotVisible("设备画面已切换，提醒将在画面可用时重试。")
                     raise DeviceError("测试文字传输中断。")
             receipt = await self.channel.send("text_commit", generation=generation)
             if receipt.get("text_status") != "ready":
